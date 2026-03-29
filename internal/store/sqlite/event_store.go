@@ -146,8 +146,11 @@ func (es *EventStore) upsertAgentSummary(ctx context.Context, event store.Event)
 			updated_at     = excluded.updated_at
 	`
 
+	// Only update cost from complete events — cost_usd is cumulative per session,
+	// so only the final complete event carries the true session total.
+	// Accumulating cost from every tool_call would massively inflate the summary.
 	costUSD := 0.0
-	if event.CostUSD != nil {
+	if event.EventType == "complete" && event.CostUSD != nil {
 		costUSD = *event.CostUSD
 	}
 	qualityScore := 0.0

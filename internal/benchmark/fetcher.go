@@ -2,6 +2,8 @@ package benchmark
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/enduluc/metronous/internal/store"
@@ -42,7 +44,9 @@ type WindowMetrics struct {
 	// ROIScore is the composite quality/cost ratio.
 	ROIScore float64
 
-	// TotalCostUSD is the sum of all event costs in the window.
+	// TotalCostUSD is the total cost for the window, computed as the
+	// sum of the maximum cost_usd per distinct session. This correctly
+	// handles cumulative cost_usd values emitted by the OpenCode plugin.
 	TotalCostUSD float64
 
 	// SessionCount is the number of distinct sessions observed in the window.
@@ -104,10 +108,15 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 			durations = append(durations, *e.DurationMs)
 		}
 
-		// cost_usd is cumulative per session — track max per session, not sum across events
-		if e.CostUSD != nil && e.SessionID != "" {
-			if *e.CostUSD > sessionMaxCost[e.SessionID] {
-				sessionMaxCost[e.SessionID] = *e.CostUSD
+		// cost_usd in stored events is always a cumulative session total emitted
+		// by the plugin — MAX per session gives the true cost for that session.
+		if e.CostUSD != nil {
+			if e.SessionID != "" {
+				if *e.CostUSD > sessionMaxCost[e.SessionID] {
+					sessionMaxCost[e.SessionID] = *e.CostUSD
+				}
+			} else if *e.CostUSD > 0 {
+				fmt.Fprintf(os.Stderr, "metronous/benchmark: dropping cost %.4f for agent %s — missing session_id\n", *e.CostUSD, agentID)
 			}
 		}
 

@@ -2,6 +2,7 @@ package benchmark_test
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -9,6 +10,9 @@ import (
 	"github.com/enduluc/metronous/internal/store"
 	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
 )
+
+// ptr returns a pointer to the given float64 value.
+func ptr(v float64) *float64 { return &v }
 
 // TestCalculateAccuracy verifies accuracy calculation.
 func TestCalculateAccuracy(t *testing.T) {
@@ -244,6 +248,28 @@ func TestInsufficientDataClassification(t *testing.T) {
 
 	if m.SampleSize >= benchmark.MinSampleSize {
 		t.Errorf("expected SampleSize < %d, got %d", benchmark.MinSampleSize, m.SampleSize)
+	}
+}
+
+// TestAggregateMetricsMultiEventCostDeduplication verifies that cost_usd is
+// de-duplicated per session (MAX per session, not sum of all events).
+// session-1 has 3 events with increasing cumulative costs (0.10, 0.25, 0.50).
+// session-2 has 2 events with increasing cumulative costs (0.30, 0.80).
+// Expected: TotalCostUSD = max(session-1) + max(session-2) = 0.50 + 0.80 = 1.30.
+func TestAggregateMetricsMultiEventCostDeduplication(t *testing.T) {
+	events := []store.Event{
+		{SessionID: "session-1", CostUSD: ptr(0.10), Model: "m"},
+		{SessionID: "session-1", CostUSD: ptr(0.25), Model: "m"},
+		{SessionID: "session-1", CostUSD: ptr(0.50), Model: "m"},
+		{SessionID: "session-2", CostUSD: ptr(0.30), Model: "m"},
+		{SessionID: "session-2", CostUSD: ptr(0.80), Model: "m"},
+	}
+	m := benchmark.AggregateMetrics("test-agent", events)
+	if math.Abs(m.TotalCostUSD-1.30) > 0.001 {
+		t.Errorf("TotalCostUSD: got %f, want 1.30", m.TotalCostUSD)
+	}
+	if m.SessionCount != 2 {
+		t.Errorf("SessionCount: got %d, want 2", m.SessionCount)
 	}
 }
 
