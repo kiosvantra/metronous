@@ -1,0 +1,196 @@
+package cli_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/enduluc/metronous/internal/cli"
+	"github.com/enduluc/metronous/internal/store"
+	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+)
+
+// setupReportTest creates a temporary benchmark.db with pre-populated runs and returns
+// the data directory path and a cleanup function.
+func setupReportTest(t *testing.T, runs []store.BenchmarkRun) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	dbPath := tmpDir + "/benchmark.db"
+
+	bs, err := sqlitestore.NewBenchmarkStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewBenchmarkStore: %v", err)
+	}
+	defer func() { _ = bs.Close() }()
+
+	ctx := context.Background()
+	for _, r := range runs {
+		if err := bs.SaveRun(ctx, r); err != nil {
+			t.Fatalf("SaveRun: %v", err)
+		}
+	}
+
+	return tmpDir
+}
+
+// sampleBenchmarkRun builds a BenchmarkRun for CLI test fixtures.
+func sampleBenchmarkRun(agentID string, verdict store.VerdictType) store.BenchmarkRun {
+	return store.BenchmarkRun{
+		RunAt:            time.Now().UTC().Truncate(time.Millisecond),
+		WindowDays:       7,
+		AgentID:          agentID,
+		Model:            "claude-sonnet-4",
+		Accuracy:         0.92,
+		P95LatencyMs:     15000,
+		ToolSuccessRate:  0.95,
+		ROIScore:         4.5,
+		TotalCostUSD:     2.0,
+		SampleSize:       100,
+		Verdict:          verdict,
+		RecommendedModel: "claude-haiku",
+		DecisionReason:   "All thresholds passed",
+	}
+}
+
+// runReportCmd executes the report command with given args, capturing stdout.
+func runReportCmd(t *testing.T, args []string) (string, error) {
+	t.Helper()
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create pipe: %v", err)
+	}
+	os.Stdout = w
+
+	// Build and execute command.
+	cmd := cli.NewReportCommand()
+	root := &cobra.Command{Use: "test"}
+	root.AddCommand(cmd)
+	root.SetArgs(append([]string{"report"}, args...))
+	execErr := root.Execute()
+
+	// Restore stdout and capture output.
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	return buf.String(), execErr
+}
+
+// TestReportCommandOutputsLatestRun verifies the report command displays runs in table format.
+func TestReportCommandOutputsLatestRun(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		sampleBenchmarkRun("code-agent", store.VerdictKeep),
+		sampleBenchmarkRun("ops-agent", store.VerdictSwitch),
+	}
+	tmpDir := setupReportTest(t, runs)
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+
+	if !strings.Contains(output, "code-agent") {
+		t.Errorf("output should contain code-agent, got:\n%s", output)
+	}
+	if !strings.Contains(output, "ops-agent") {
+		t.Errorf("output should contain ops-agent, got:\n%s", output)
+	}
+	if !strings.Contains(output, "KEEP") {
+		t.Errorf("output should contain KEEP verdict, got:\n%s", output)
+	}
+	if !strings.Contains(output, "SWITCH") {
+		t.Errorf("output should contain SWITCH verdict, got:\n%s", output)
+	}
+}
+
+// TestReportCommandFiltersByAgent verifies --agent flag filters results.
+func TestReportCommandFiltersByAgent(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		sampleBenchmarkRun("alpha-agent", store.VerdictKeep),
+		sampleBenchmarkRun("beta-agent", store.VerdictSwitch),
+	}
+	tmpDir := setupReportTest(t, runs)
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir, "--agent", "alpha-agent"})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+
+	if !strings.Contains(output, "alpha-agent") {
+		t.Errorf("output should contain alpha-agent, got:\n%s", output)
+	}
+	if strings.Contains(output, "beta-agent") {
+		t.Errorf("output should NOT contain beta-agent when filtered, got:\n%s", output)
+	}
+}
+
+// TestReportCommandJSONFormat verifies --format=json outputs valid JSON.
+func TestReportCommandJSONFormat(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		sampleBenchmarkRun("json-agent", store.VerdictUrgentSwitch),
+	}
+	tmpDir := setupReportTest(t, runs)
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir, "--format", "json"})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+
+	// Verify it's valid JSON.
+	var result []map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &result); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nOutput:\n%s", err, output)
+	}
+
+	if len(result) != 1 {
+		t.Fatalf("expected 1 JSON entry, got %d", len(result))
+	}
+
+	entry := result[0]
+	if entry["agent_id"] != "json-agent" {
+		t.Errorf("agent_id: got %v, want json-agent", entry["agent_id"])
+	}
+	if entry["verdict"] != "URGENT_SWITCH" {
+		t.Errorf("verdict: got %v, want URGENT_SWITCH", entry["verdict"])
+	}
+}
+
+// TestReportCommandNoRunsMessage verifies that empty DB shows a helpful message.
+func TestReportCommandNoRunsMessage(t *testing.T) {
+	tmpDir := setupReportTest(t, nil) // no runs
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+
+	if !strings.Contains(output, "No benchmark runs") {
+		t.Errorf("expected 'No benchmark runs' message, got:\n%s", output)
+	}
+}
+
+// TestReportCommandAgentNoRunsMessage verifies message when agent filter finds nothing.
+func TestReportCommandAgentNoRunsMessage(t *testing.T) {
+	tmpDir := setupReportTest(t, nil)
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir, "--agent", "nonexistent"})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+
+	if !strings.Contains(output, "No benchmark runs found for agent") {
+		t.Errorf("expected agent-specific no-runs message, got:\n%s", output)
+	}
+}

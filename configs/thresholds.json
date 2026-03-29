@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "defaults": {
+    "min_accuracy": 0.85,
+    "max_latency_p95_ms": 30000,
+    "min_tool_success_rate": 0.90,
+    "min_roi_score": 3.0,
+    "max_cost_usd_per_session": 0.50
+  },
+  "urgent_triggers": {
+    "min_accuracy": 0.60,
+    "max_error_rate": 0.30,
+    "max_cost_spike_multiplier": 3.0
+  },
+  "per_agent": {},
+  "model_pricing": {
+    "note": "Output price per 1M tokens in USD. Update when prices change.",
+    "models": {
+      "claude-sonnet-4-6": 15.00,
+      "claude-haiku-4-5": 5.00,
+      "claude-opus-4-5": 75.00,
+      "gpt-5.4": 15.00,
+      "gpt-5.4-mini": 4.50,
+      "kimi-k2.5": 3.00,
+      "gemini-3.1-pro": 12.00
+    }
+  }
+}

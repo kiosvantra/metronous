@@ -1,0 +1,344 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/enduluc/metronous/internal/store"
+)
+
+// EventStore is a SQLite-backed implementation of store.EventStore.
+// Writes are intended to flow through a single-writer EventQueue; reads
+// use a separate connection pool (WAL mode supports concurrent readers).
+type EventStore struct {
+	writeDB *sql.DB
+	readDB  *sql.DB
+	path    string
+}
+
+// Compile-time interface check.
+var _ store.EventStore = (*EventStore)(nil)
+
+// NewEventStore opens (or creates) the SQLite database at path, applies WAL
+// pragmas, and runs schema migrations. Returns a ready-to-use EventStore.
+func NewEventStore(path string) (*EventStore, error) {
+	writeDB, err := openDB(path)
+	if err != nil {
+		return nil, fmt.Errorf("open write connection: %w", err)
+	}
+
+	// Apply WAL pragmas on the write connection.
+	if err := applyPragmas(writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, err
+	}
+
+	// Apply schema migrations.
+	if err := ApplyTrackingMigrations(context.Background(), writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, err
+	}
+
+	// Open a separate read-pool connection.
+	// For in-memory databases (:memory:) used in tests, share the write connection.
+	var readDB *sql.DB
+	if path == ":memory:" {
+		readDB = writeDB
+	} else {
+		readDB, err = openReadDB(path)
+		if err != nil {
+			_ = writeDB.Close()
+			return nil, fmt.Errorf("open read connection: %w", err)
+		}
+	}
+
+	return &EventStore{
+		writeDB: writeDB,
+		readDB:  readDB,
+		path:    path,
+	}, nil
+}
+
+// InsertEvent persists a single event. If event.ID is empty, a new UUID is generated.
+// Returns the persisted event ID.
+func (es *EventStore) InsertEvent(ctx context.Context, event store.Event) (string, error) {
+	if event.ID == "" {
+		event.ID = uuid.New().String()
+	}
+
+	// Serialize metadata to JSON.
+	metaJSON := store.MetadataToJSON(event.Metadata)
+
+	const q = `
+		INSERT INTO events (
+			id, agent_id, session_id, event_type, model, timestamp,
+			duration_ms, prompt_tokens, completion_tokens,
+			cost_usd, quality_score, rework_count,
+			tool_name, tool_success, metadata
+		) VALUES (
+			?, ?, ?, ?, ?, ?,
+			?, ?, ?,
+			?, ?, ?,
+			?, ?, ?
+		)`
+
+	var toolSuccessInt *int
+	if event.ToolSuccess != nil {
+		v := 0
+		if *event.ToolSuccess {
+			v = 1
+		}
+		toolSuccessInt = &v
+	}
+
+	_, err := es.writeDB.ExecContext(ctx, q,
+		event.ID,
+		event.AgentID,
+		event.SessionID,
+		event.EventType,
+		event.Model,
+		event.Timestamp.UTC().UnixMilli(),
+		event.DurationMs,
+		event.PromptTokens,
+		event.CompletionTokens,
+		event.CostUSD,
+		event.QualityScore,
+		event.ReworkCount,
+		event.ToolName,
+		toolSuccessInt,
+		nullableString(metaJSON),
+	)
+	if err != nil {
+		return "", fmt.Errorf("insert event: %w", err)
+	}
+
+	// Update agent_summaries cache in the same transaction would require
+	// BEGIN/COMMIT — for simplicity we do a best-effort upsert separately.
+	if err := es.upsertAgentSummary(ctx, event); err != nil {
+		// Non-fatal: summary cache is best-effort, but log so it's not silent.
+		log.Printf("warn: upsertAgentSummary for agent %q: %v", event.AgentID, err)
+	}
+
+	return event.ID, nil
+}
+
+// upsertAgentSummary maintains the materialized summary cache for an agent.
+func (es *EventStore) upsertAgentSummary(ctx context.Context, event store.Event) error {
+	// The running average formula uses the OLD total_events value (before +1).
+	// In SQLite ON CONFLICT DO UPDATE SET, unqualified column references use
+	// the existing row's values (pre-update), not the new values being set.
+	//
+	// Correct formula: new_avg = (old_avg * old_count + new_quality) / (old_count + 1)
+	const q = `
+		INSERT INTO agent_summaries (agent_id, last_event_ts, total_events, total_cost_usd, avg_quality, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?)
+		ON CONFLICT(agent_id) DO UPDATE SET
+			last_event_ts  = MAX(last_event_ts, excluded.last_event_ts),
+			total_events   = total_events + 1,
+			total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+			avg_quality    = (avg_quality * total_events + excluded.avg_quality) / (total_events + 1),
+			updated_at     = excluded.updated_at
+	`
+
+	costUSD := 0.0
+	if event.CostUSD != nil {
+		costUSD = *event.CostUSD
+	}
+	qualityScore := 0.0
+	if event.QualityScore != nil {
+		qualityScore = *event.QualityScore
+	}
+	now := time.Now().UTC().UnixMilli()
+
+	_, err := es.writeDB.ExecContext(ctx, q,
+		event.AgentID,
+		event.Timestamp.UTC().UnixMilli(),
+		costUSD,
+		qualityScore,
+		now,
+	)
+	return err
+}
+
+// QueryEvents retrieves events matching the supplied filter criteria.
+func (es *EventStore) QueryEvents(ctx context.Context, query store.EventQuery) ([]store.Event, error) {
+	var (
+		conditions []string
+		args       []interface{}
+	)
+
+	if query.AgentID != "" {
+		conditions = append(conditions, "agent_id = ?")
+		args = append(args, query.AgentID)
+	}
+	if query.SessionID != "" {
+		conditions = append(conditions, "session_id = ?")
+		args = append(args, query.SessionID)
+	}
+	if query.EventType != "" {
+		conditions = append(conditions, "event_type = ?")
+		args = append(args, query.EventType)
+	}
+	if !query.Since.IsZero() {
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, query.Since.UTC().UnixMilli())
+	}
+	if !query.Until.IsZero() {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, query.Until.UTC().UnixMilli())
+	}
+
+	q := "SELECT id, agent_id, session_id, event_type, model, timestamp, duration_ms, prompt_tokens, completion_tokens, cost_usd, quality_score, rework_count, tool_name, tool_success, metadata FROM events"
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	q += " ORDER BY timestamp DESC"
+	if query.Limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, query.Limit)
+	}
+
+	rows, err := es.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query events: %w", err)
+	}
+	defer rows.Close()
+
+	return scanEvents(rows)
+}
+
+// GetAgentEvents returns all events for a specific agent since the given time.
+func (es *EventStore) GetAgentEvents(ctx context.Context, agentID string, since time.Time) ([]store.Event, error) {
+	return es.QueryEvents(ctx, store.EventQuery{
+		AgentID: agentID,
+		Since:   since,
+	})
+}
+
+// GetAgentSummary returns aggregated metrics for the specified agent.
+func (es *EventStore) GetAgentSummary(ctx context.Context, agentID string) (store.AgentSummary, error) {
+	const q = `
+		SELECT agent_id, last_event_ts, total_events, total_cost_usd, avg_quality
+		FROM agent_summaries
+		WHERE agent_id = ?
+	`
+	row := es.readDB.QueryRowContext(ctx, q, agentID)
+
+	var (
+		summary     store.AgentSummary
+		lastEventMs int64
+	)
+	err := row.Scan(
+		&summary.AgentID,
+		&lastEventMs,
+		&summary.TotalEvents,
+		&summary.TotalCostUSD,
+		&summary.AvgQuality,
+	)
+	if err == sql.ErrNoRows {
+		return store.AgentSummary{AgentID: agentID}, nil
+	}
+	if err != nil {
+		return store.AgentSummary{}, fmt.Errorf("get agent summary %q: %w", agentID, err)
+	}
+
+	summary.LastEventTs = time.UnixMilli(lastEventMs).UTC()
+	return summary, nil
+}
+
+// Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.
+// This should be called before Close during graceful shutdown.
+func (es *EventStore) Checkpoint() error {
+	if es.writeDB == nil {
+		return nil
+	}
+	_, err := es.writeDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	return err
+}
+
+// Close releases all database connections.
+func (es *EventStore) Close() error {
+	var errs []string
+	if es.readDB != nil && es.readDB != es.writeDB {
+		if err := es.readDB.Close(); err != nil {
+			errs = append(errs, "read db: "+err.Error())
+		}
+	}
+	if es.writeDB != nil {
+		if err := es.writeDB.Close(); err != nil {
+			errs = append(errs, "write db: "+err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("close event store: %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// scanEvents reads rows from a query into a slice of Event structs.
+func scanEvents(rows *sql.Rows) ([]store.Event, error) {
+	var events []store.Event
+
+	for rows.Next() {
+		var (
+			e              store.Event
+			timestampMs    int64
+			toolSuccessInt *int
+			metaJSON       sql.NullString
+		)
+
+		err := rows.Scan(
+			&e.ID,
+			&e.AgentID,
+			&e.SessionID,
+			&e.EventType,
+			&e.Model,
+			&timestampMs,
+			&e.DurationMs,
+			&e.PromptTokens,
+			&e.CompletionTokens,
+			&e.CostUSD,
+			&e.QualityScore,
+			&e.ReworkCount,
+			&e.ToolName,
+			&toolSuccessInt,
+			&metaJSON,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan event row: %w", err)
+		}
+
+		e.Timestamp = time.UnixMilli(timestampMs).UTC()
+
+		if toolSuccessInt != nil {
+			v := *toolSuccessInt != 0
+			e.ToolSuccess = &v
+		}
+
+		if metaJSON.Valid && metaJSON.String != "" {
+			e.Metadata = store.MetadataFromJSON(metaJSON.String)
+		}
+
+		events = append(events, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate event rows: %w", err)
+	}
+
+	return events, nil
+}
+
+// nullableString returns nil for empty strings (maps "" to NULL in SQLite).
+func nullableString(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
