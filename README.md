@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Metronous" width="100%"/>
+</p>
+
 # Metronous
 
 > Local AI agent telemetry, benchmarking, and model calibration for the [Gentle AI](https://github.com/Gentleman-Programming/gentle-ai) ecosystem.
