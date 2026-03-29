@@ -18,14 +18,14 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 ## Architecture
 
 ```
-OpenCode → metronous plugin → HTTP POST /ingest → metronous server → SQLite
+OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service) → SQLite
                                                                         ↓
                                                               ./metronous dashboard
 ```
 
-- **MCP Server**: Spawned by OpenCode, manages SQLite via stdio MCP protocol
-- **HTTP Endpoint**: Dynamic port for plugin telemetry ingestion
-- **Plugin**: TypeScript OpenCode plugin that captures events and sends them
+- **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
+- **Daemon (metronous)**: Long-lived systemd user service that handles telemetry ingestion, storage, and weekly benchmarks
+- **HTTP Endpoint**: Dynamic port (written to `~/.metronous/mcp.port`) for shim-to-daemon communication
 - **TUI Dashboard**: 3-tab terminal UI (Tracking / Benchmark / Config)
 
 ## Prerequisites
@@ -36,34 +36,48 @@ OpenCode → metronous plugin → HTTP POST /ingest → metronous server → SQL
 
 ## Installation
 
-### 1. Build the binary
+### Zero-friction (recommended)
+
+```bash
+go install github.com/enduluc/metronous/cmd/metronous@latest
+metronous install
+# Done — daemon running as systemd user service, OpenCode configured to use ["metronous", "mcp"]
+```
+
+### Manual installation (alternative)
 
 ```bash
 git clone https://github.com/Gentleman-Programming/metronous
 cd metronous
 go build -o metronous ./cmd/metronous
-sudo mv metronous /usr/local/bin/  # or add to PATH
+# Add the binary to your PATH or use the full path below
+
+# Install as a systemd user service and patch opencode.json automatically
+./metronous install
+
+# Manual steps if you prefer:
+# 1. Initialize Metronous (creates ~/.metronous/ and databases)
+# ./metronous init
+# 2. Start the daemon manually (for testing):
+# ./metronous server --data-dir ~/.metronous/data --daemon-mode
+# 3. Or install the systemd service yourself:
+# ./metronous install   # does steps 1-4 below
+#   a) writes ~/.config/systemd/user/metronous.service
+#   b) systemctl --user daemon-reload
+#   c) systemctl --user enable metronous
+#   d) systemctl --user start metronous
+#   e) patches ~/.config/opencode/opencode.json to use ["metronous", "mcp"]
 ```
 
-### 2. Install the OpenCode plugin
+### Configure OpenCode (automatically done by `metronous install`)
 
-```bash
-# Symlink the plugin into OpenCode's plugin directory
-ln -sf $(pwd)/plugins/metronous-opencode ~/.config/opencode/plugins/metronous-opencode
-
-# Or copy the pre-built plugin
-cp plugins/metronous-opencode/dist/index.js ~/.config/opencode/plugins/metronous-opencode/dist/index.js
-```
-
-### 3. Configure OpenCode
-
-Add to your `~/.config/opencode/opencode.json`:
+After running `metronous install`, your `~/.config/opencode/opencode.json` will contain:
 
 ```json
 {
   "mcp": {
     "metronous": {
-      "command": ["/usr/local/bin/metronous", "server", "--data-dir", "~/.metronous/data"],
+      "command": ["metronous", "mcp"],
       "type": "local"
     }
   },
@@ -71,9 +85,7 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-### 4. Restart OpenCode
-
-Metronous will appear as **"Metronous Connected"** in your MCP server list.
+Then restart OpenCode and it will show **"Metronous Connected"**.
 
 ## Usage
 
