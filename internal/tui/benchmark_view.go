@@ -181,13 +181,14 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			return BenchmarkDataMsg{Err: err}
 		}
 
+		// One row per agent — the most recent benchmark run only
 		var all []store.BenchmarkRun
 		for _, agentID := range agents {
-			runs, err := m.bs.GetRuns(ctx, agentID, maxBenchmarkRows/max(1, len(agents)))
-			if err != nil {
+			runs, err := m.bs.GetRuns(ctx, agentID, 1)
+			if err != nil || len(runs) == 0 {
 				continue
 			}
-			all = append(all, runs...)
+			all = append(all, runs[0])
 		}
 		return BenchmarkDataMsg{Runs: all}
 	}
