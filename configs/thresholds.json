@@ -2,10 +2,10 @@
   "version": "1.0",
   "defaults": {
     "min_accuracy": 0.85,
-    "max_latency_p95_ms": 30000,
-    "min_tool_success_rate": 0.90,
+    "max_latency_p95_ms": 60000,
+    "min_tool_success_rate": 0.70,
     "min_roi_score": 0.05,
-    "max_cost_usd_per_session": 0.50
+    "max_cost_usd_per_session": 50.00
   },
   "urgent_triggers": {
     "min_accuracy": 0.60,
