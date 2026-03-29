@@ -97,7 +97,8 @@ func runDashboard(dataDir, configPath string) error {
 		}
 	}()
 
-	model := tui.NewAppModel(es, bs, configPath, dataDir)
+	workDir, _ := os.Getwd()
+	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

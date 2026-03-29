@@ -72,11 +72,12 @@ type AppModel struct {
 // NewAppModel creates an AppModel wired to the given stores/config path.
 // dataDir is the Metronous data directory (e.g. ~/.metronous/data); it is used
 // by the benchmark view to load model pricing from dataDir/../thresholds.json.
-func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string) AppModel {
+// workDir is the current working directory used for project-level agent discovery.
+func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string, workDir string) AppModel {
 	return AppModel{
 		CurrentTab: TabTracking,
 		tracking:   NewTrackingModel(es),
-		benchmark:  NewBenchmarkModel(bs, dataDir),
+		benchmark:  NewBenchmarkModel(bs, dataDir, workDir),
 		config:     NewConfigModel(configPath),
 	}
 }

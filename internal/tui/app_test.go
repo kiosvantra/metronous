@@ -23,7 +23,7 @@ func sendSpecialKey(m tea.Model, keyType tea.KeyType) (tea.Model, tea.Cmd) {
 
 func newTestApp(t *testing.T) tui.AppModel {
 	t.Helper()
-	return tui.NewAppModel(nil, nil, "", "")
+	return tui.NewAppModel(nil, nil, "", "", "")
 }
 
 // ----- Task 26: App shell tests -----------------------------------------------
@@ -184,7 +184,7 @@ func TestTrackingViewShowsEmptyState(t *testing.T) {
 // ----- Task 28: Benchmark view tests -----------------------------------------
 
 func TestBenchmarkViewRendersHistoricalRuns(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "")
+	m := tui.NewBenchmarkModel(nil, "", "")
 	m, _ = m.Update(tui.BenchmarkDataMsg{
 		Runs: []store.BenchmarkRun{
 			{
@@ -208,7 +208,7 @@ func TestBenchmarkViewRendersHistoricalRuns(t *testing.T) {
 }
 
 func TestBenchmarkViewShowsEmptyState(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "")
+	m := tui.NewBenchmarkModel(nil, "", "")
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: nil})
 	view := m.View()
 	if !strings.Contains(view, "No benchmark") {

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/enduluc/metronous/internal/discovery"
 	"github.com/enduluc/metronous/internal/store"
 )
 
@@ -26,8 +28,9 @@ type benchmarkTickMsg struct{ t time.Time }
 
 // BenchmarkDataMsg carries fetched benchmark runs.
 type BenchmarkDataMsg struct {
-	Runs []store.BenchmarkRun
-	Err  error
+	Runs     []store.BenchmarkRun
+	TypeByID map[string]string // agentID → type label (primary/subagent/built-in/all)
+	Err      error
 }
 
 // Verdict colour styles.
@@ -48,11 +51,15 @@ var detailLabelStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("33"))
 
 // benchColWidths / benchColNames describe the benchmark history table.
-// Columns: Date | Agent | Accuracy | P95 Latency | Verdict | → Model | Savings
+// Columns: Date | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
 var (
-	benchColWidths = []int{12, 16, 10, 12, 18, 16, 8}
-	benchColNames  = []string{"Date", "Agent", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
+	benchColWidths = []int{12, 16, 9, 10, 12, 18, 16, 8}
+	benchColNames  = []string{"Date", "Agent", "Type", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
 )
+
+// verdictColIdx is the index of the Verdict column in benchColNames/benchColWidths.
+// Defined as a constant so the rendering code stays in sync with the column layout.
+const verdictColIdx = 5
 
 // modelPricingSection mirrors the JSON structure of the "model_pricing" key in thresholds.json.
 type modelPricingSection struct {
@@ -83,23 +90,29 @@ func loadModelPricing(dataDir string) map[string]float64 {
 
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
-	bs      store.BenchmarkStore
-	runs    []store.BenchmarkRun
-	err     error
-	cursor  int
-	loading bool
-	offset  int // for scrolling
-	pricing map[string]float64
+	bs       store.BenchmarkStore
+	runs     []store.BenchmarkRun
+	agents   []discovery.AgentInfo
+	typeByID map[string]string // agentID → type label (primary/subagent/built-in/all)
+	err      error
+	cursor   int
+	loading  bool
+	offset   int // for scrolling
+	pricing  map[string]float64
+	workDir  string
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
 // dataDir is the Metronous data directory (e.g. ~/.metronous/data); pricing is
 // loaded from dataDir/../thresholds.json. Pass an empty string to disable pricing.
-func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string) BenchmarkModel {
+// workDir is used for project-level agent discovery; pass os.Getwd() from the caller.
+func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string) BenchmarkModel {
 	return BenchmarkModel{
 		bs:      bs,
 		loading: true,
 		pricing: loadModelPricing(dataDir),
+		agents:  discovery.DiscoverAgents(workDir),
+		workDir: workDir,
 	}
 }
 
@@ -131,6 +144,9 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.runs = msg.Runs
+			if msg.TypeByID != nil {
+				m.typeByID = msg.TypeByID
+			}
 			// Clamp offset and cursor to valid range
 			if m.offset >= len(m.runs) {
 				if len(m.runs) > pageSize {
@@ -167,30 +183,93 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 	return m, nil
 }
 
-// fetchRuns returns a command that queries all agents' latest runs.
+// agentTypeOrder returns a sort priority for the given agent type.
+// Primary agents come first (0), then subagent (1), then all (2), then built-in (3).
+// Unknown types sort last (4).
+func agentTypeOrder(t string) int {
+	switch t {
+	case "primary":
+		return 0
+	case "subagent":
+		return 1
+	case "all":
+		return 2
+	case "built-in":
+		return 3
+	default:
+		return 4
+	}
+}
+
+// fetchRuns returns a command that queries all discovered agents' latest runs.
+// Agents with no data are included as placeholder rows (Verdict == "").
 func (m BenchmarkModel) fetchRuns() tea.Cmd {
 	if m.bs == nil {
 		return nil
 	}
+	// Snapshot the agent list at scheduling time so the closure is self-contained.
+	agents := m.agents
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		agents, err := m.bs.ListAgents(ctx)
+		// Build a map of agent types from the discovered agent list.
+		typeByID := make(map[string]string, len(agents))
+		for _, a := range agents {
+			typeByID[a.ID] = a.Type
+		}
+
+		// Also pick up any agents that have runs in the DB but were not
+		// discovered via config files (e.g. agents from old sessions).
+		dbAgents, err := m.bs.ListAgents(ctx)
 		if err != nil {
 			return BenchmarkDataMsg{Err: err}
 		}
+		for _, id := range dbAgents {
+			if _, found := typeByID[id]; !found {
+				typeByID[id] = "primary" // default type for DB-only agents
+			}
+		}
 
-		// One row per agent — the most recent benchmark run only
+		// Merge discovered and DB agent IDs into a unified set.
+		seen := make(map[string]bool)
+		var allIDs []string
+		for _, a := range agents {
+			if !seen[a.ID] {
+				seen[a.ID] = true
+				allIDs = append(allIDs, a.ID)
+			}
+		}
+		for _, id := range dbAgents {
+			if !seen[id] {
+				seen[id] = true
+				allIDs = append(allIDs, id)
+			}
+		}
+
+		// Build one row per agent.
 		var all []store.BenchmarkRun
-		for _, agentID := range agents {
+		for _, agentID := range allIDs {
 			runs, err := m.bs.GetRuns(ctx, agentID, 1)
 			if err != nil || len(runs) == 0 {
+				// No data yet — create a placeholder row.
+				all = append(all, store.BenchmarkRun{AgentID: agentID})
 				continue
 			}
 			all = append(all, runs[0])
 		}
-		return BenchmarkDataMsg{Runs: all}
+
+		// Sort rows: primary → subagent → all → built-in, then alphabetical within each group.
+		sort.Slice(all, func(i, j int) bool {
+			ti := agentTypeOrder(typeByID[all[i].AgentID])
+			tj := agentTypeOrder(typeByID[all[j].AgentID])
+			if ti != tj {
+				return ti < tj
+			}
+			return all[i].AgentID < all[j].AgentID
+		})
+
+		return BenchmarkDataMsg{Runs: all, TypeByID: typeByID}
 	}
 }
 
@@ -206,6 +285,10 @@ func (m BenchmarkModel) View() string {
 	}
 	if m.err != nil {
 		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
+		return sb.String()
+	}
+	if len(m.runs) == 0 && len(m.agents) == 0 {
+		sb.WriteString(dimStyle.Render("  No agents discovered and no benchmark runs yet.") + "\n")
 		return sb.String()
 	}
 	if len(m.runs) == 0 {
@@ -227,23 +310,26 @@ func (m BenchmarkModel) View() string {
 	}
 	for i, run := range m.runs[start:end] {
 		absIdx := start + i
-		row := formatBenchmarkRow(run, m.pricing)
+		agentType := m.typeByID[run.AgentID]
+		row := formatBenchmarkRow(run, agentType, m.pricing)
 		baseStyle := lipgloss.NewStyle()
 		if absIdx == m.cursor {
 			baseStyle = cursorStyle
 		}
-		// Render all columns except the last two (Verdict, → Model, Savings) without special colour.
-		// Verdict gets colour; → Model and Savings use dim style.
-		verdictColIdx := 4
+		// Render columns before Verdict without special colour.
+		// verdictColIdx = 5 (Date, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
 		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
-		// Verdict column with colour.
-		rendered += verdictStyle(run.Verdict).Render(
+		// Verdict column with colour — combine cursor background with verdict foreground.
+		verdictCell := verdictStyle(run.Verdict).Inherit(baseStyle).Render(
 			fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
-		// → Model column.
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[5], row[5]))
-		// Savings column.
+		rendered += verdictCell
+		// → Model column (index 6).
 		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
-		sb.WriteString(baseStyle.Render(rendered))
+		// Savings column (index 7).
+		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[7], row[7]))
+		// Write the row directly — do NOT re-wrap with baseStyle.Render() as that
+		// would strip the inner ANSI colour codes (verdict colour, etc.).
+		sb.WriteString(rendered)
 		sb.WriteString("\n")
 	}
 
@@ -271,6 +357,13 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64) strin
 	sb.WriteString(dimStyle.Render(divider) + "\n")
 	sb.WriteString(detailLabelStyle.Render("Decision Rationale") + "\n")
 	sb.WriteString(dimStyle.Render(divider) + "\n")
+
+	// Handle NO_DATA placeholder rows.
+	if isNoData(run) {
+		writeDetailField(&sb, "Agent", run.AgentID)
+		writeDetailField(&sb, "Status", "No benchmark runs recorded yet for this agent.")
+		return sb.String()
+	}
 
 	// Verdict line: show switch arrow if applicable.
 	verdictLine := string(run.Verdict)
@@ -393,8 +486,25 @@ func writeDetailField(sb *strings.Builder, label, value string) {
 	sb.WriteString("\n")
 }
 
+// isNoData returns true when a BenchmarkRun is a placeholder (no real run data).
+// A run is considered NO_DATA when RunAt is the zero time (never been run).
+func isNoData(run store.BenchmarkRun) bool {
+	return run.RunAt.IsZero()
+}
+
 // formatBenchmarkRow converts a BenchmarkRun into display columns.
-func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []string {
+// agentType is the type label for the Type column (primary/subagent/built-in/all).
+// For NO_DATA rows, metric fields are rendered as "-".
+func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[string]float64) []string {
+	if agentType == "" {
+		agentType = "-"
+	}
+
+	// Handle placeholder rows (agent discovered but no runs yet).
+	if isNoData(run) {
+		return []string{"-", run.AgentID, agentType, "-", "-", "NO DATA", "-", "-"}
+	}
+
 	date := run.RunAt.Local().Format("2006-01-02")
 	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
 	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
@@ -409,7 +519,7 @@ func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []st
 	// Savings column.
 	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
 
-	return []string{date, run.AgentID, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
+	return []string{date, run.AgentID, agentType, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
 }
 
 // computeSavings returns the savings ratio (0.0–1.0) and a formatted string
@@ -449,12 +559,4 @@ func verdictStyle(v store.VerdictType) lipgloss.Style {
 	default:
 		return verdictOther
 	}
-}
-
-// max returns the larger of two ints.
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
