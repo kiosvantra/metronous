@@ -13,7 +13,8 @@ type DefaultThresholds struct {
 	// MinToolSuccessRate is the minimum required tool call success rate (0.0–1.0). Default: 0.90.
 	MinToolSuccessRate float64 `json:"min_tool_success_rate"`
 
-	// MinROIScore is the minimum acceptable ROI score. Default: 3.0.
+	// MinROIScore is the minimum acceptable ROI score (tool_success_rate / cost_per_session).
+	// Default: 0.05, representing a minimum efficiency of 0.05 successful tool calls per dollar.
 	MinROIScore float64 `json:"min_roi_score"`
 
 	// MaxCostUSDPerSession is the maximum allowed cost per session in USD. Default: 0.50.
@@ -76,7 +77,7 @@ func DefaultThresholdValues() Thresholds {
 			MinAccuracy:          0.85,
 			MaxLatencyP95Ms:      30000,
 			MinToolSuccessRate:   0.90,
-			MinROIScore:          3.0,
+			MinROIScore:          0.05,
 			MaxCostUSDPerSession: 0.50,
 		},
 		UrgentTriggers: UrgentTriggers{

@@ -4,7 +4,7 @@
     "min_accuracy": 0.85,
     "max_latency_p95_ms": 30000,
     "min_tool_success_rate": 0.90,
-    "min_roi_score": 3.0,
+    "min_roi_score": 0.05,
     "max_cost_usd_per_session": 0.50
   },
   "urgent_triggers": {

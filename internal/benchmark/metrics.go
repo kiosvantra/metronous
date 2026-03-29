@@ -83,28 +83,20 @@ func CalculateToolSuccessRate(successes, total int) float64 {
 	return float64(successes) / float64(total)
 }
 
-// CalculateROIScore computes a composite Return-on-Investment score:
+// CalculateROIScore computes the efficiency-per-dollar ROI score:
 //
-//	ROI = (quality * accuracy) / (cost + epsilon)
+//	ROI = tool_success_rate / cost_per_session
 //
-// A higher score indicates better quality relative to cost.
-// quality is the mean quality score (0.0–1.0).
-// accuracy is the event accuracy rate (0.0–1.0).
-// cost is the total cost in USD.
+// This measures how much useful work is done per dollar spent.
+// toolSuccessRate is the fraction of successful tool calls (0.0–1.0).
+// costPerSession is the average cost per session in USD (total_cost / session_count).
 //
-// The result is clamped to [0, 10] to avoid unreasonably large values
-// when cost is near zero.
-func CalculateROIScore(quality, accuracy, cost float64) float64 {
-	const epsilon = 0.001 // avoid division by zero
-	roi := (quality * accuracy) / (cost + epsilon)
-	// Clamp to a reasonable upper bound.
-	if roi > 10.0 {
-		return 10.0
-	}
-	if roi < 0 {
+// Returns 0 when costPerSession is zero (no cost data available).
+func CalculateROIScore(toolSuccessRate, costPerSession float64) float64 {
+	if costPerSession <= 0 {
 		return 0
 	}
-	return roi
+	return toolSuccessRate / costPerSession
 }
 
 // CalculateAvgLatency returns the arithmetic mean of the provided durations.

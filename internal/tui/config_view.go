@@ -47,7 +47,7 @@ var configFields = []configField{
 	{label: "Min Accuracy", key: "min_accuracy", step: 0.01, min: 0, max: 1},
 	{label: "Max P95 Latency (ms)", key: "max_latency_p95_ms", step: 1000, min: 0, max: 300000},
 	{label: "Min Tool Success Rate", key: "min_tool_success_rate", step: 0.01, min: 0, max: 1},
-	{label: "Min ROI Score", key: "min_roi_score", step: 0.1, min: 0, max: 100},
+	{label: "Min ROI Score", key: "min_roi_score", step: 0.01, min: 0, max: 1.0},
 	{label: "Max Cost/Session (USD)", key: "max_cost_usd_per_session", step: 0.01, min: 0, max: 100},
 }
 
@@ -354,7 +354,7 @@ func formatConfigValue(key string, v float64) string {
 	case "max_cost_usd_per_session":
 		return fmt.Sprintf("$%.2f", v)
 	case "min_roi_score":
-		return fmt.Sprintf("%.1f", v)
+		return fmt.Sprintf("%.3f", v)
 	default:
 		return fmt.Sprintf("%.2f", v)
 	}

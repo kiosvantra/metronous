@@ -32,7 +32,7 @@ func goodMetrics(agentID string) benchmark.WindowMetrics {
 		P95LatencyMs:    15000,
 		P99LatencyMs:    20000,
 		ToolSuccessRate: 0.95,
-		ROIScore:        4.5,
+		ROIScore:        0.148, // sdd-apply like: 0.961 / 6.47 ≈ 0.148
 		TotalCostUSD:    2.0,
 		AvgQuality:      0.9,
 	}
@@ -87,11 +87,11 @@ func TestVerdictSwitchLowToolRate(t *testing.T) {
 	}
 }
 
-// TestVerdictSwitchLowROI verifies SWITCH when ROI < 3.0.
+// TestVerdictSwitchLowROI verifies SWITCH when ROI < 0.05.
 func TestVerdictSwitchLowROI(t *testing.T) {
 	defaults := config.DefaultThresholdValues()
 	m := goodMetrics("agent-a")
-	m.ROIScore = 2.5 // Below MinROIScore=3.0
+	m.ROIScore = 0.02 // Below MinROIScore=0.05
 
 	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
 	if vt != store.VerdictSwitch {
@@ -153,7 +153,7 @@ func TestVerdictTableDriven(t *testing.T) {
 		{"switch low accuracy", func(m *benchmark.WindowMetrics) { m.Accuracy = 0.80 }, store.VerdictSwitch},
 		{"switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictSwitch},
 		{"switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictSwitch},
-		{"switch low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 2.0 }, store.VerdictSwitch},
+		{"switch low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01 }, store.VerdictSwitch},
 	}
 
 	for _, tc := range tests {

@@ -102,26 +102,32 @@ func TestCalculateToolSuccessRate(t *testing.T) {
 }
 
 // TestCalculateROIScore verifies ROI score behavior.
+// ROI = tool_success_rate / cost_per_session (efficiency per dollar spent).
 func TestCalculateROIScore(t *testing.T) {
 	tests := []struct {
-		name     string
-		quality  float64
-		accuracy float64
-		cost     float64
-		wantMin  float64
-		wantMax  float64
+		name            string
+		toolSuccessRate float64
+		costPerSession  float64
+		wantMin         float64
+		wantMax         float64
 	}{
-		{"high quality low cost", 0.9, 0.95, 0.01, 5.0, 10.0},
-		{"low quality high cost", 0.3, 0.7, 5.0, 0.0, 1.0},
-		{"zero cost clamped to 10", 1.0, 1.0, 0.0, 9.0, 10.0},
-		{"zero quality", 0.0, 0.9, 1.0, 0.0, 0.01},
+		// sdd-apply like: 0.961 / 6.47 ≈ 0.148
+		{"high success moderate cost", 0.961, 6.47, 0.14, 0.16},
+		// sdd-verify like: 0.988 / 7.16 ≈ 0.138
+		{"high success low cost", 0.988, 7.16, 0.13, 0.15},
+		// sdd-explore like: 0.993 / 26.16 ≈ 0.038
+		{"high success high cost", 0.993, 26.16, 0.03, 0.05},
+		// Zero cost → ROI = 0 (no cost data)
+		{"zero cost per session", 0.95, 0.0, 0.0, 0.0},
+		// Negative cost → ROI = 0 (guard)
+		{"negative cost per session", 0.95, -1.0, 0.0, 0.0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := benchmark.CalculateROIScore(tc.quality, tc.accuracy, tc.cost)
+			got := benchmark.CalculateROIScore(tc.toolSuccessRate, tc.costPerSession)
 			if got < tc.wantMin || got > tc.wantMax {
-				t.Errorf("CalculateROIScore(%f, %f, %f) = %f, want [%f, %f]",
-					tc.quality, tc.accuracy, tc.cost, got, tc.wantMin, tc.wantMax)
+				t.Errorf("CalculateROIScore(%f, %f) = %f, want [%f, %f]",
+					tc.toolSuccessRate, tc.costPerSession, got, tc.wantMin, tc.wantMax)
 			}
 		})
 	}
@@ -166,6 +172,46 @@ func TestAggregateMetricsBasic(t *testing.T) {
 	}
 	if m.TotalCostUSD != 0.1 {
 		t.Errorf("TotalCostUSD: got %f, want 0.1", m.TotalCostUSD)
+	}
+	// No SessionIDs set → SessionCount=0 → costPerSession=0 → ROIScore=0.
+	if m.SessionCount != 0 {
+		t.Errorf("SessionCount: got %d, want 0 (no session IDs in events)", m.SessionCount)
+	}
+	if m.ROIScore != 0 {
+		t.Errorf("ROIScore: got %f, want 0 (no session cost denominator)", m.ROIScore)
+	}
+}
+
+// TestAggregateMetricsWithSession verifies the normal ROI path when SessionIDs are present.
+// ROI = tool_success_rate / cost_per_session where cost_per_session = total_cost / session_count.
+func TestAggregateMetricsWithSession(t *testing.T) {
+	dur500 := 500
+	cost := 0.50 // $0.50 total
+	quality := 0.9
+	toolName := "bash"
+	toolSuccess := true
+
+	events := []store.Event{
+		{AgentID: "agent-b", SessionID: "sess-1", EventType: "complete", Model: "claude-sonnet", DurationMs: &dur500, CostUSD: &cost, QualityScore: &quality},
+		{AgentID: "agent-b", SessionID: "sess-1", EventType: "tool_call", Model: "claude-sonnet", DurationMs: &dur500, ToolName: &toolName, ToolSuccess: &toolSuccess},
+		{AgentID: "agent-b", SessionID: "sess-2", EventType: "complete", Model: "claude-sonnet", DurationMs: &dur500},
+	}
+
+	m := benchmark.AggregateMetrics("agent-b", events)
+
+	// 2 distinct sessions.
+	if m.SessionCount != 2 {
+		t.Errorf("SessionCount: got %d, want 2", m.SessionCount)
+	}
+	// TotalCostUSD = 0.50 (only the first event has a cost).
+	if m.TotalCostUSD != 0.50 {
+		t.Errorf("TotalCostUSD: got %f, want 0.50", m.TotalCostUSD)
+	}
+	// cost_per_session = 0.50 / 2 = 0.25
+	// ROI = tool_success_rate / cost_per_session = 1.0 / 0.25 = 4.0
+	wantROI := 1.0 / 0.25
+	if m.ROIScore != wantROI {
+		t.Errorf("ROIScore: got %f, want %f (1.0/0.25)", m.ROIScore, wantROI)
 	}
 }
 

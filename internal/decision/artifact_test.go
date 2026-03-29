@@ -28,7 +28,7 @@ func sampleVerdict(agentID string, vt store.VerdictType) decision.Verdict {
 			Accuracy:        0.82,
 			P95LatencyMs:    25000,
 			ToolSuccessRate: 0.94,
-			ROIScore:        2.8,
+			ROIScore:        0.145,
 			TotalCostUSD:    3.5,
 		},
 	}
@@ -123,8 +123,8 @@ func TestArtifactContainsReasonsMetricsAndVerdict(t *testing.T) {
 	if codeAgent.Metrics.P95LatencyMs != 25000 {
 		t.Errorf("Metrics.P95LatencyMs: got %f, want 25000", codeAgent.Metrics.P95LatencyMs)
 	}
-	if codeAgent.Metrics.ROIScore != 2.8 {
-		t.Errorf("Metrics.ROIScore: got %f, want 2.8", codeAgent.Metrics.ROIScore)
+	if codeAgent.Metrics.ROIScore != 0.145 {
+		t.Errorf("Metrics.ROIScore: got %f, want 0.145", codeAgent.Metrics.ROIScore)
 	}
 	if codeAgent.RecommendedModel != "claude-haiku" {
 		t.Errorf("RecommendedModel: got %q, want claude-haiku", codeAgent.RecommendedModel)

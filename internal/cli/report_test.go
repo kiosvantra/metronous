@@ -50,7 +50,7 @@ func sampleBenchmarkRun(agentID string, verdict store.VerdictType) store.Benchma
 		Accuracy:         0.92,
 		P95LatencyMs:     15000,
 		ToolSuccessRate:  0.95,
-		ROIScore:         4.5,
+		ROIScore:         0.148,
 		TotalCostUSD:     2.0,
 		SampleSize:       100,
 		Verdict:          verdict,

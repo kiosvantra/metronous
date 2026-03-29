@@ -45,6 +45,9 @@ type WindowMetrics struct {
 	// TotalCostUSD is the sum of all event costs in the window.
 	TotalCostUSD float64
 
+	// SessionCount is the number of distinct sessions observed in the window.
+	SessionCount int
+
 	// AvgQuality is the mean quality score across all rated events.
 	AvgQuality float64
 }
@@ -81,11 +84,17 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 		toolTotal    int
 		toolSuccess  int
 		modelCounts  = make(map[string]int)
+		sessionSeen  = make(map[string]struct{})
 	)
 
 	for _, e := range events {
 		// Count by model to find the dominant model.
 		modelCounts[e.Model]++
+
+		// Track distinct sessions.
+		if e.SessionID != "" {
+			sessionSeen[e.SessionID] = struct{}{}
+		}
 
 		if e.EventType == "error" {
 			errorCount++
@@ -129,13 +138,21 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 	// Cost.
 	m.TotalCostUSD = totalCost
 
+	// Session count.
+	m.SessionCount = len(sessionSeen)
+
 	// Quality average.
 	if qualityCount > 0 {
 		m.AvgQuality = totalQuality / float64(qualityCount)
 	}
 
-	// ROI score.
-	m.ROIScore = CalculateROIScore(m.AvgQuality, m.Accuracy, totalCost)
+	// ROI score: tool_success_rate / cost_per_session.
+	// cost_per_session = total_cost / session_count (or 0 if no sessions).
+	var costPerSession float64
+	if m.SessionCount > 0 {
+		costPerSession = totalCost / float64(m.SessionCount)
+	}
+	m.ROIScore = CalculateROIScore(m.ToolSuccessRate, costPerSession)
 
 	return m
 }

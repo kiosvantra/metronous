@@ -80,7 +80,7 @@ func main() {
 		fmt.Printf("   Verdict: %s | Model: %s\n", run.Verdict, run.Model)
 		fmt.Printf("   Accuracy: %.2f | P95 Latency: %.0fms | Tool Success: %.2f\n",
 			run.Accuracy, run.P95LatencyMs, run.ToolSuccessRate)
-		fmt.Printf("   ROI Score: %.2f | Total Cost: $%.4f | Samples: %d\n",
+		fmt.Printf("   ROI Score: %.4f | Total Cost: $%.4f | Samples: %d\n",
 			run.ROIScore, run.TotalCostUSD, run.SampleSize)
 		fmt.Printf("   Reason: %s\n", run.DecisionReason)
 		if run.RecommendedModel != "" {

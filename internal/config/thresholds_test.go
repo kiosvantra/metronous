@@ -16,7 +16,7 @@ func TestThresholdsJSONDecode(t *testing.T) {
 			"min_accuracy": 0.85,
 			"max_latency_p95_ms": 30000,
 			"min_tool_success_rate": 0.90,
-			"min_roi_score": 3.0,
+			"min_roi_score": 0.05,
 			"max_cost_usd_per_session": 0.50
 		},
 		"urgent_triggers": {
@@ -48,8 +48,8 @@ func TestThresholdsJSONDecode(t *testing.T) {
 	if t1.Defaults.MinToolSuccessRate != 0.90 {
 		t.Errorf("Defaults.MinToolSuccessRate: got %v, want 0.90", t1.Defaults.MinToolSuccessRate)
 	}
-	if t1.Defaults.MinROIScore != 3.0 {
-		t.Errorf("Defaults.MinROIScore: got %v, want 3.0", t1.Defaults.MinROIScore)
+	if t1.Defaults.MinROIScore != 0.05 {
+		t.Errorf("Defaults.MinROIScore: got %v, want 0.05", t1.Defaults.MinROIScore)
 	}
 	if t1.Defaults.MaxCostUSDPerSession != 0.50 {
 		t.Errorf("Defaults.MaxCostUSDPerSession: got %v, want 0.50", t1.Defaults.MaxCostUSDPerSession)
@@ -118,8 +118,8 @@ func TestThresholdsEffectiveThresholdsWithOverride(t *testing.T) {
 		t.Errorf("MinAccuracy: got %v, want 0.92 (override)", effective.MinAccuracy)
 	}
 	// Other fields should remain at default
-	if effective.MinROIScore != 3.0 {
-		t.Errorf("MinROIScore should remain at default 3.0, got %v", effective.MinROIScore)
+	if effective.MinROIScore != 0.05 {
+		t.Errorf("MinROIScore should remain at default 0.05, got %v", effective.MinROIScore)
 	}
 }
 
