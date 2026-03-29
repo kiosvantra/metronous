@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -28,6 +29,10 @@ const (
 
 	// ServerVersion matches the CLI version.
 	ServerVersion = "0.1.0"
+
+	// gracefulShutdownTimeout is how long to wait for an existing instance
+	// to exit cleanly before sending SIGKILL.
+	gracefulShutdownTimeout = 2 * time.Second
 )
 
 // Server is a minimal MCP server that communicates over stdio.
@@ -281,7 +286,7 @@ func (s *Server) writeResponse(resp Response) error {
 func (s *Server) ServeWithHealth(ctx context.Context) error {
 	// ── Single-instance enforcement via PID file ───────────────────────────────
 	pidPath := s.pidFilePath()
-	if err := checkAndClaimPIDFile(pidPath); err != nil {
+	if err := acquirePIDFile(pidPath); err != nil {
 		return err
 	}
 	defer func() {
@@ -291,6 +296,15 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	}()
 
 	// ── HTTP health server ────────────────────────────────────────────────────
+
+	// Clean up any stale port file left by the previous instance.  The old
+	// process was already terminated by acquirePIDFile, so if the port file
+	// still exists it is definitely stale.
+	portPath := s.portFilePath()
+	if _, statErr := os.Stat(portPath); statErr == nil {
+		_ = os.Remove(portPath)
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		// Non-fatal: log the error and proceed with stdio-only mode.
@@ -306,8 +320,7 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	)
 
 	// Persist the port so other processes (e.g. the OpenCode plugin) can find it.
-	// The path is instance-scoped to data-dir to avoid collisions between instances.
-	portPath := s.portFilePath()
+	// portPath was already set above for the stale-file cleanup.
 	if portErr := writePortFile(portPath, port); portErr != nil {
 		s.logger.Warn("could not write mcp.port file", zap.Error(portErr))
 	}
@@ -513,27 +526,59 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
-// checkAndClaimPIDFile reads any existing PID file at path and determines
-// whether another live instance is using it.  If the existing process is alive
-// it returns an error.  Otherwise (stale or missing) it writes our PID and
-// returns nil.
-func checkAndClaimPIDFile(path string) error {
+// acquirePIDFile reads any existing PID file at path and claims ownership for
+// the current process.  If another live process owns the file it is terminated
+// gracefully (SIGTERM, wait up to 2 s, then SIGKILL) before the PID file is
+// overwritten.  Stale PID files (process already gone) are silently overwritten.
+func acquirePIDFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err == nil {
-		// File exists — check whether that process is still running.
+		// File exists — inspect the recorded PID.
 		pidStr := strings.TrimSpace(string(data))
-		if existingPID, parseErr := strconv.Atoi(pidStr); parseErr == nil {
-			if existingPID != os.Getpid() && isProcessAlive(existingPID) {
-				return fmt.Errorf("another Metronous instance is running (pid %d); stop it first or remove %s", existingPID, path)
+		existingPID, parseErr := strconv.Atoi(pidStr)
+		if parseErr == nil && existingPID > 0 && existingPID != os.Getpid() {
+			proc, findErr := os.FindProcess(existingPID)
+			if findErr == nil {
+				if sigErr := proc.Signal(syscall.Signal(0)); sigErr == nil {
+					// Process is alive — terminate it gracefully.
+					log.Printf("metronous: terminating existing instance (pid %d)", existingPID)
+					if err := proc.Signal(syscall.SIGTERM); err != nil {
+						log.Printf("metronous: SIGTERM to pid %d: %v", existingPID, err)
+					}
+
+					// Wait up to gracefulShutdownTimeout for the process to exit.
+					done := make(chan bool, 1)
+					go func() {
+						for i := 0; i < 20; i++ {
+							time.Sleep(100 * time.Millisecond)
+							if proc.Signal(syscall.Signal(0)) != nil {
+								done <- true
+								return
+							}
+						}
+						done <- false
+					}()
+
+					if graceful := <-done; !graceful {
+						// Process did not exit voluntarily — force-kill it.
+						log.Printf("metronous: force-killing existing instance (pid %d)", existingPID)
+						if err := proc.Signal(syscall.SIGKILL); err != nil {
+							log.Printf("metronous: SIGKILL to pid %d: %v", existingPID, err)
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+				// Process was alive but is now terminated (or was stale) —
+				// fall through and claim the PID file.
 			}
 		}
-		// Stale PID (process gone) — fall through and overwrite.
+		// Stale PID (process gone or parse failed) — fall through and overwrite.
 	} else if !os.IsNotExist(err) {
-		// Unexpected read error — log but don't block startup.
+		// Unexpected read error — surface it; don't silently start a duplicate.
 		return fmt.Errorf("read pid file: %w", err)
 	}
 
-	// No live instance found — claim ownership.
+	// Claim ownership by writing our own PID.
 	return writePIDFile(path)
 }
 
