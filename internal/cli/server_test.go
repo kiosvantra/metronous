@@ -38,9 +38,9 @@ func TestServerCommandFlagsExist(t *testing.T) {
 		t.Error("--data-dir flag not registered")
 	}
 
-	// Verify --daemon flag exists.
-	if f := cmd.Flags().Lookup("daemon"); f == nil {
-		t.Error("--daemon flag not registered")
+	// Verify --daemon-mode flag exists.
+	if f := cmd.Flags().Lookup("daemon-mode"); f == nil {
+		t.Error("--daemon-mode flag not registered")
 	}
 
 	// Verify --config flag exists.
@@ -187,19 +187,19 @@ func TestServerCommandQueueDrainsBeforeExit(t *testing.T) {
 	}
 }
 
-// TestServerDaemonFlagIsStub verifies --daemon flag is accepted but is a stub.
-func TestServerDaemonFlagIsStub(t *testing.T) {
+// TestServerDaemonModeFlag verifies --daemon-mode flag is accepted and sets daemonMode.
+func TestServerDaemonModeFlag(t *testing.T) {
 	cmd := cli.NewServerCommand()
 	// Verify the flag is accepted (no error parsing).
-	if err := cmd.ParseFlags([]string{"--daemon"}); err != nil {
-		t.Errorf("--daemon flag parse error: %v", err)
+	if err := cmd.ParseFlags([]string{"--daemon-mode"}); err != nil {
+		t.Errorf("--daemon-mode flag parse error: %v", err)
 	}
-	daemonFlag := cmd.Flags().Lookup("daemon")
-	if daemonFlag == nil {
-		t.Fatal("--daemon flag not found")
+	daemonModeFlag := cmd.Flags().Lookup("daemon-mode")
+	if daemonModeFlag == nil {
+		t.Fatal("--daemon-mode flag not found")
 	}
-	if daemonFlag.Value.String() != "true" {
-		t.Errorf("--daemon value: got %q, want %q", daemonFlag.Value.String(), "true")
+	if daemonModeFlag.Value.String() != "true" {
+		t.Errorf("--daemon-mode value: got %q, want %q", daemonModeFlag.Value.String(), "true")
 	}
 }
 

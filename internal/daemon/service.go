@@ -133,6 +133,7 @@ func (p *Program) run(ctx context.Context) error {
 	defer queue.Stop()
 
 	srv := mcp.NewStdioServer(p.logger)
+	srv.SetDataDir(p.cfg.DataDir)
 	mcp.RegisterIngestHandler(srv, func(innerCtx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return tracking.HandleIngest(innerCtx, req, queue)
 	})
@@ -142,7 +143,7 @@ func (p *Program) run(ctx context.Context) error {
 		zap.String("data_dir", p.cfg.DataDir),
 	)
 
-	return srv.ServeStdio(ctx)
+	return srv.ServeDaemon(ctx)
 }
 
 // ServiceConfig returns a kardianos/service configuration for Metronous.

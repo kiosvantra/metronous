@@ -38,7 +38,8 @@ const (
 // Server is a minimal MCP server that communicates over stdio.
 // It handles JSON-RPC 2.0 messages and dispatches tool calls to registered handlers.
 type Server struct {
-	mu       sync.RWMutex
+	mu       sync.RWMutex // guards tools, handlers, and dataDir
+	outMu    sync.Mutex   // guards out — separate from mu to prevent deadlock
 	tools    map[string]ToolDefinition
 	handlers map[string]ToolHandler
 	logger   *zap.Logger
@@ -261,14 +262,17 @@ func (s *Server) handleToolsCall(ctx context.Context, req Request) Response {
 
 // writeResponse serializes and writes a response to the output stream.
 // MCP stdio uses newline-delimited JSON.
+//
+// outMu is used (not mu) so that writing a response never deadlocks with
+// callers that hold mu for tool registration or handler lookup.
 func (s *Server) writeResponse(resp Response) error {
 	b, err := json.Marshal(resp)
 	if err != nil {
 		return fmt.Errorf("marshal response: %w", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.outMu.Lock()
+	defer s.outMu.Unlock()
 
 	if _, err := fmt.Fprintf(s.out, "%s\n", b); err != nil {
 		return fmt.Errorf("write response: %w", err)
@@ -286,7 +290,7 @@ func (s *Server) writeResponse(resp Response) error {
 func (s *Server) ServeWithHealth(ctx context.Context) error {
 	// ── Single-instance enforcement via PID file ───────────────────────────────
 	pidPath := s.pidFilePath()
-	if err := acquirePIDFile(pidPath); err != nil {
+	if err := AcquirePIDFile(pidPath); err != nil {
 		return err
 	}
 	defer func() {
@@ -363,6 +367,106 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	return s.ServeStdio(ctx)
 }
 
+// ServeDaemon is like ServeWithHealth but does NOT serve stdio. It is intended
+// for use when Metronous runs as a long-lived system service (e.g. systemd),
+// where stdin is /dev/null and there is no interactive MCP client connected
+// directly. Shim processes (metronous mcp) connect to the HTTP endpoint instead.
+//
+// The function blocks until ctx is cancelled.
+func (s *Server) ServeDaemon(ctx context.Context) error {
+	// ── Single-instance enforcement via PID file ───────────────────────────────
+	pidPath := s.pidFilePath()
+	if err := AcquirePIDFile(pidPath); err != nil {
+		return err
+	}
+	defer func() {
+		if removeErr := removePIDFile(pidPath); removeErr != nil {
+			s.logger.Warn("could not remove pid file", zap.Error(removeErr))
+		}
+	}()
+
+	// ── HTTP health server ─────────────────────────────────────────────────────
+	portPath := s.portFilePath()
+	if _, statErr := os.Stat(portPath); statErr == nil {
+		_ = os.Remove(portPath)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("start health HTTP server: %w", err)
+	}
+	// Close listener immediately on any error before returning
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			s.logger.Warn("could not close listener", zap.Error(closeErr))
+		}
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	s.logger.Info("daemon HTTP server listening",
+		zap.Int("port", port),
+		zap.String("addr", listener.Addr().String()),
+	)
+
+	if portErr := writePortFile(portPath, port); portErr != nil {
+		return fmt.Errorf("write mcp.port: %w", portErr)
+	}
+	defer func() {
+		if removeErr := removePortFile(portPath); removeErr != nil {
+			s.logger.Warn("could not remove mcp.port file", zap.Error(removeErr))
+		}
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/status", healthHandler)
+	// Use background context for ingestHandler to avoid using cancelled ctx during shutdown
+	mux.HandleFunc("/ingest", s.ingestHandler(context.Background()))
+
+	httpSrv := &http.Server{
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 15 * time.Second,
+	}
+
+	var serveErr error
+	serveDone := make(chan error, 1)
+	go func() {
+		serveErr = httpSrv.Serve(listener)
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			s.logger.Warn("daemon HTTP server stopped", zap.Error(serveErr))
+		}
+		serveDone <- serveErr
+	}()
+
+	// Shut down the HTTP server when the context is cancelled.
+	shutdownDone := make(chan struct{}, 1)
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("daemon HTTP server shutdown error", zap.Error(err))
+		}
+		shutdownDone <- struct{}{}
+	}()
+
+	// Wait for either server error or shutdown completion
+	select {
+	case err := <-serveDone:
+		// Server returned an error, wait for shutdown to complete
+		<-shutdownDone
+		return fmt.Errorf("serve HTTP server: %w", err)
+	case <-shutdownDone:
+		// Shutdown completed, wait for server to finish
+		<-serveDone
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			return fmt.Errorf("serve HTTP server: %w", serveErr)
+		}
+		return nil
+	}
+}
+
 // healthResponse is the JSON body returned by /health.
 type healthResponse struct {
 	Status  string `json:"status"`
@@ -417,7 +521,8 @@ func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
 		}
 
 		req := CallToolRequest{Name: "ingest", Arguments: arguments}
-		handlerCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Use background context for handler timeout to avoid using cancelled ctx during shutdown
+		handlerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		result, err := handler(handlerCtx, req)
@@ -526,17 +631,68 @@ func isProcessAlive(pid int) bool {
 	return err == nil
 }
 
-// acquirePIDFile reads any existing PID file at path and claims ownership for
-// the current process.  If another live process owns the file it is terminated
-// gracefully (SIGTERM, wait up to 2 s, then SIGKILL) before the PID file is
-// overwritten.  Stale PID files (process already gone) are silently overwritten.
-func acquirePIDFile(path string) error {
-	data, err := os.ReadFile(path)
-	if err == nil {
-		// File exists — inspect the recorded PID.
-		pidStr := strings.TrimSpace(string(data))
-		existingPID, parseErr := strconv.Atoi(pidStr)
-		if parseErr == nil && existingPID > 0 && existingPID != os.Getpid() {
+// AcquirePIDFile atomically claims ownership of the PID file at path for the
+// current process.  It uses O_CREAT|O_EXCL to eliminate the TOCTOU race
+// between read-check-claim that existed in the previous implementation.
+//
+// Behaviour:
+//   - If the file does not exist, it is created atomically and our PID written.
+//   - If the file already exists and contains our own PID, this is a no-op.
+//   - If the file already exists and contains a live foreign PID, that process
+//     is terminated gracefully (SIGTERM, wait up to gracefulShutdownTimeout,
+//     then SIGKILL) and the function recurses to re-claim atomically.
+//   - If the file already exists but the recorded PID is dead (stale), the
+//     file is removed and the function recurses to re-claim atomically.
+//
+// It is exported so that unit tests (in package mcp_test) can exercise it
+// directly.  Internal callers (ServeWithHealth) use the same symbol.
+func AcquirePIDFile(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create dir for pid file: %w", err)
+	}
+
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// ── Atomic creation attempt ───────────────────────────────────────────
+		// O_EXCL guarantees only one concurrent caller wins this step.
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			// We exclusively created the file — write our PID and done.
+			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
+			if err := f.Sync(); err != nil {
+				f.Close()
+				return fmt.Errorf("sync pid file: %w", err)
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close pid file: %w", err)
+			}
+			return werr
+		}
+
+		if !os.IsExist(err) {
+			// Unexpected error (permissions, read-only FS, etc.).
+			return fmt.Errorf("create pid file: %w", err)
+		}
+
+		// ── File already exists — inspect existing PID ────────────────────────
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				// Another goroutine/process deleted the file between our O_EXCL
+				// attempt and ReadFile — retry from the top.
+				continue
+			}
+			return fmt.Errorf("read pid file: %w", readErr)
+		}
+
+		existingPID, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+
+		// Already us — nothing to do.
+		if existingPID == os.Getpid() {
+			return nil
+		}
+
+		if existingPID > 0 {
 			proc, findErr := os.FindProcess(existingPID)
 			if findErr == nil {
 				if sigErr := proc.Signal(syscall.Signal(0)); sigErr == nil {
@@ -547,19 +703,16 @@ func acquirePIDFile(path string) error {
 					}
 
 					// Wait up to gracefulShutdownTimeout for the process to exit.
-					done := make(chan bool, 1)
-					go func() {
-						for i := 0; i < 20; i++ {
-							time.Sleep(100 * time.Millisecond)
-							if proc.Signal(syscall.Signal(0)) != nil {
-								done <- true
-								return
-							}
+					graceful := false
+					for i := 0; i < 20; i++ {
+						time.Sleep(100 * time.Millisecond)
+						if proc.Signal(syscall.Signal(0)) != nil {
+							graceful = true
+							break
 						}
-						done <- false
-					}()
+					}
 
-					if graceful := <-done; !graceful {
+					if !graceful {
 						// Process did not exit voluntarily — force-kill it.
 						log.Printf("metronous: force-killing existing instance (pid %d)", existingPID)
 						if err := proc.Signal(syscall.SIGKILL); err != nil {
@@ -568,18 +721,17 @@ func acquirePIDFile(path string) error {
 						time.Sleep(100 * time.Millisecond)
 					}
 				}
-				// Process was alive but is now terminated (or was stale) —
-				// fall through and claim the PID file.
+				// Process was alive but is now terminated (or was already dead) —
+				// fall through to remove and retry.
 			}
 		}
-		// Stale PID (process gone or parse failed) — fall through and overwrite.
-	} else if !os.IsNotExist(err) {
-		// Unexpected read error — surface it; don't silently start a duplicate.
-		return fmt.Errorf("read pid file: %w", err)
-	}
 
-	// Claim ownership by writing our own PID.
-	return writePIDFile(path)
+		// Remove the stale/expired file and retry with atomic creation.
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("remove stale pid file: %w", removeErr)
+		}
+	}
+	return fmt.Errorf("acquire pid file %s: too many retries", path)
 }
 
 // ReadPortFile reads the dynamic HTTP port from the instance-scoped port file.
