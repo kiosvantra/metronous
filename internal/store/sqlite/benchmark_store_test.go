@@ -220,6 +220,144 @@ func TestBenchmarkIndexesApplied(t *testing.T) {
 	}
 }
 
+// TestGetVerdictTrend verifies GetVerdictTrend behaviour across multiple scenarios.
+func TestGetVerdictTrend(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty store returns empty slice", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		trend, err := bs.GetVerdictTrend(ctx, "no-such-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		if len(trend) != 0 {
+			t.Errorf("expected empty slice, got %v", trend)
+		}
+	})
+
+	t.Run("fewer runs than requested weeks returns what exists oldest first", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Insert 2 runs for an agent that has fewer than the requested 8 weeks.
+		older := sampleRun("trend-agent", store.VerdictSwitch)
+		older.RunAt = time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Millisecond)
+		newer := sampleRun("trend-agent", store.VerdictKeep)
+		newer.RunAt = time.Now().UTC().Truncate(time.Millisecond)
+		if err := bs.SaveRun(ctx, older); err != nil {
+			t.Fatalf("SaveRun older: %v", err)
+		}
+		if err := bs.SaveRun(ctx, newer); err != nil {
+			t.Fatalf("SaveRun newer: %v", err)
+		}
+
+		trend, err := bs.GetVerdictTrend(ctx, "trend-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		if len(trend) != 2 {
+			t.Fatalf("expected 2 verdicts, got %d: %v", len(trend), trend)
+		}
+		// Oldest first: SWITCH then KEEP.
+		if trend[0] != string(store.VerdictSwitch) {
+			t.Errorf("trend[0]: got %q, want %q", trend[0], store.VerdictSwitch)
+		}
+		if trend[1] != string(store.VerdictKeep) {
+			t.Errorf("trend[1]: got %q, want %q", trend[1], store.VerdictKeep)
+		}
+	})
+
+	t.Run("more runs than requested returns only last N oldest first", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Insert 5 runs; request only 3.
+		verdicts := []store.VerdictType{
+			store.VerdictSwitch,
+			store.VerdictSwitch,
+			store.VerdictKeep,
+			store.VerdictKeep,
+			store.VerdictInsufficientData,
+		}
+		base := time.Now().Add(-5 * 24 * time.Hour)
+		for i, v := range verdicts {
+			r := sampleRun("limit-agent", v)
+			r.RunAt = base.Add(time.Duration(i) * 24 * time.Hour).UTC().Truncate(time.Millisecond)
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun[%d]: %v", i, err)
+			}
+		}
+
+		trend, err := bs.GetVerdictTrend(ctx, "limit-agent", 3)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		if len(trend) != 3 {
+			t.Fatalf("expected 3 verdicts, got %d: %v", len(trend), trend)
+		}
+		// Should be the 3 newest (KEEP, KEEP, INSUFFICIENT_DATA), oldest-first.
+		wantOrder := []string{
+			string(store.VerdictKeep),
+			string(store.VerdictKeep),
+			string(store.VerdictInsufficientData),
+		}
+		for i, want := range wantOrder {
+			if trend[i] != want {
+				t.Errorf("trend[%d]: got %q, want %q", i, trend[i], want)
+			}
+		}
+	})
+
+	t.Run("weeks=0 returns nil or empty", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		if err := bs.SaveRun(ctx, sampleRun("zero-agent", store.VerdictKeep)); err != nil {
+			t.Fatalf("SaveRun: %v", err)
+		}
+		trend, err := bs.GetVerdictTrend(ctx, "zero-agent", 0)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend with weeks=0: %v", err)
+		}
+		if len(trend) != 0 {
+			t.Errorf("expected nil/empty for weeks=0, got %v", trend)
+		}
+	})
+
+	t.Run("ordering is oldest first not newest first", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Insert runs in this chronological order: SWITCH (oldest), KEEP, URGENT_SWITCH (newest).
+		runs := []struct {
+			offset  time.Duration
+			verdict store.VerdictType
+		}{
+			{-72 * time.Hour, store.VerdictSwitch},
+			{-48 * time.Hour, store.VerdictKeep},
+			{-24 * time.Hour, store.VerdictUrgentSwitch},
+		}
+		for _, rc := range runs {
+			r := sampleRun("order-agent", rc.verdict)
+			r.RunAt = time.Now().Add(rc.offset).UTC().Truncate(time.Millisecond)
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+		}
+
+		trend, err := bs.GetVerdictTrend(ctx, "order-agent", 10)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		if len(trend) != 3 {
+			t.Fatalf("expected 3 verdicts, got %d: %v", len(trend), trend)
+		}
+		// Oldest first: SWITCH → KEEP → URGENT_SWITCH.
+		expected := []string{
+			string(store.VerdictSwitch),
+			string(store.VerdictKeep),
+			string(store.VerdictUrgentSwitch),
+		}
+		for i, want := range expected {
+			if trend[i] != want {
+				t.Errorf("trend[%d]: got %q, want %q (ordering must be oldest first)", i, trend[i], want)
+			}
+		}
+	})
+}
+
 // TestSaveRunWithAllVerdicts verifies all VerdictType values can be saved and retrieved.
 func TestSaveRunWithAllVerdicts(t *testing.T) {
 	ctx := context.Background()

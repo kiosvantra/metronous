@@ -276,3 +276,28 @@ func TestConfigViewInvalidValueShownWithError(t *testing.T) {
 	// Just ensure View() doesn't panic.
 	_ = m.View()
 }
+
+// TestTrendDirection verifies trendDirection handles all edge cases correctly.
+func TestTrendDirection(t *testing.T) {
+	tests := []struct {
+		name     string
+		verdicts []string
+		want     string
+	}{
+		{"switch to keep is improving", []string{"SWITCH", "KEEP"}, "↑ improving"},
+		{"keep to switch is degrading", []string{"KEEP", "SWITCH"}, "↓ degrading"},
+		{"keep to keep is stable", []string{"KEEP", "KEEP"}, "→ stable"},
+		{"switch to insufficient_data is neutral", []string{"SWITCH", "INSUFFICIENT_DATA"}, "→ stable"},
+		{"insufficient_data to keep is neutral", []string{"INSUFFICIENT_DATA", "KEEP"}, "→ stable"},
+		{"empty slice is stable", []string{}, "→ stable"},
+		{"single verdict is stable", []string{"KEEP"}, "→ stable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tui.TrendDirection(tc.verdicts)
+			if got != tc.want {
+				t.Errorf("TrendDirection(%v) = %q, want %q", tc.verdicts, got, tc.want)
+			}
+		})
+	}
+}

@@ -189,6 +189,9 @@ type BenchmarkRun struct {
 
 	// ArtifactPath is the path to the generated decision artifact JSON file.
 	ArtifactPath string
+
+	// AvgQualityScore is the mean quality_score across all rated events in the window.
+	AvgQualityScore float64
 }
 
 // BenchmarkStore is the storage interface for benchmark runs.
@@ -207,6 +210,10 @@ type BenchmarkStore interface {
 
 	// ListAgents returns the distinct agent IDs that have at least one run.
 	ListAgents(ctx context.Context) ([]string, error)
+
+	// GetVerdictTrend returns the last N weekly verdicts for the given agent,
+	// ordered oldest first. Returns an empty slice if no runs exist.
+	GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error)
 
 	// Close releases all resources held by the store.
 	Close() error
