@@ -1,0 +1,151 @@
+// Package cli provides the Cobra subcommand implementations for Metronous.
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+
+	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+
+	"github.com/enduluc/metronous/internal/mcp"
+	"github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/enduluc/metronous/internal/tracking"
+)
+
+// defaultDataDir returns the default ~/.metronous/data directory path.
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".metronous/data"
+	}
+	return filepath.Join(home, ".metronous", "data")
+}
+
+// NewServerCommand creates the `metronous server` cobra command.
+func NewServerCommand() *cobra.Command {
+	var dataDir string
+	var daemon bool
+	var configPath string
+
+	cmd := &cobra.Command{
+		Use:   "server",
+		Short: "Start the Metronous MCP server on stdio",
+		Long: `Start the Metronous MCP server listening on stdio.
+
+The server receives telemetry events from AI agent plugins via the
+Model Context Protocol and persists them to SQLite.
+
+Signals SIGINT and SIGTERM trigger graceful shutdown, draining
+any pending events before exit.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if daemon {
+				// Phase 3 feature: daemon mode runs as a background process.
+				// For now, we log the flag and proceed in foreground mode.
+				fmt.Fprintln(os.Stderr, "note: --daemon is not yet implemented; starting in foreground mode")
+			}
+			return runServer(dataDir, configPath)
+		},
+	}
+
+	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(),
+		"Directory for SQLite databases (default: ~/.metronous/data)")
+	cmd.Flags().BoolVar(&daemon, "daemon", false,
+		"Run server as a background daemon (stub — will be implemented in Phase 3)")
+	cmd.Flags().StringVar(&configPath, "config", "",
+		"Path to config file (default: ~/.metronous/config.yaml)")
+
+	return cmd
+}
+
+// runServer initializes the event store, queue, and MCP server, then serves stdio.
+// configPath is reserved for future use (Phase 3 config loading).
+func runServer(dataDir string, _ string) error {
+	logger, err := zap.NewProduction()
+	if err != nil {
+		return fmt.Errorf("init logger: %w", err)
+	}
+	defer func() { _ = logger.Sync() }()
+
+	// Ensure the data directory exists.
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return fmt.Errorf("create data directory %q: %w", dataDir, err)
+	}
+
+	trackingDBPath := filepath.Join(dataDir, "tracking.db")
+	benchmarkDBPath := filepath.Join(dataDir, "benchmark.db")
+
+	// Open event store.
+	es, err := sqlite.NewEventStore(trackingDBPath)
+	if err != nil {
+		return fmt.Errorf("open event store: %w", err)
+	}
+	defer func() {
+		if err := es.Close(); err != nil {
+			logger.Error("close event store", zap.Error(err))
+		}
+	}()
+
+	// Open benchmark store.
+	bs, err := sqlite.NewBenchmarkStore(benchmarkDBPath)
+	if err != nil {
+		return fmt.Errorf("open benchmark store: %w", err)
+	}
+	defer func() {
+		if err := bs.Close(); err != nil {
+			logger.Error("close benchmark store", zap.Error(err))
+		}
+	}()
+
+	// Start event queue.
+	queue := tracking.NewEventQueue(es, tracking.DefaultBufferSize, logger)
+	queue.Start()
+
+	// Create MCP server.
+	srv := mcp.NewStdioServer(logger)
+	// Set data-dir so the port file is instance-scoped (avoids collisions when
+	// multiple metronous instances run with different data dirs).
+	srv.SetDataDir(dataDir)
+
+	// Register the ingest handler wired to the real queue.
+	mcp.RegisterIngestHandler(srv, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return tracking.HandleIngest(ctx, req, queue)
+	})
+
+	// Register report and model_changes with real benchmark store handlers.
+	mcp.RegisterBenchmarkHandlers(srv, bs)
+
+	// Set up graceful shutdown on SIGINT/SIGTERM.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigCh
+		logger.Info("received signal, shutting down", zap.String("signal", sig.String()))
+		cancel()
+	}()
+
+	logger.Info("metronous MCP server starting",
+		zap.String("transport", "stdio+http-health"),
+		zap.String("data_dir", dataDir),
+	)
+
+	if err := srv.ServeWithHealth(ctx); err != nil && err != context.Canceled {
+		logger.Error("server error", zap.Error(err))
+		return err
+	}
+
+	// Graceful shutdown: drain queue.
+	logger.Info("draining event queue...")
+	queue.Stop()
+	logger.Info("shutdown complete")
+
+	return nil
+}

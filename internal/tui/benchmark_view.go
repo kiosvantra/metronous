@@ -1,0 +1,459 @@
+package tui
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/enduluc/metronous/internal/store"
+)
+
+const maxBenchmarkRows = 50
+
+// benchmarkRefreshInterval is the auto-refresh period for the benchmark tab,
+// matching the tracking tab's cadence.
+const benchmarkRefreshInterval = 2 * time.Second
+
+// benchmarkTickMsg is sent by the auto-refresh ticker.
+type benchmarkTickMsg struct{ t time.Time }
+
+// BenchmarkDataMsg carries fetched benchmark runs.
+type BenchmarkDataMsg struct {
+	Runs []store.BenchmarkRun
+	Err  error
+}
+
+// Verdict colour styles.
+var (
+	verdictKeep   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // green
+	verdictSwitch = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
+	verdictUrgent = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	verdictOther  = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey
+)
+
+// detailPanelStyle styles the decision rationale detail panel.
+var detailPanelStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("252"))
+
+// detailLabelStyle styles the label keys in the detail panel.
+var detailLabelStyle = lipgloss.NewStyle().
+	Bold(true).
+	Foreground(lipgloss.Color("33"))
+
+// benchColWidths / benchColNames describe the benchmark history table.
+// Columns: Date | Agent | Accuracy | P95 Latency | Verdict | → Model | Savings
+var (
+	benchColWidths = []int{12, 16, 10, 12, 18, 16, 8}
+	benchColNames  = []string{"Date", "Agent", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
+)
+
+// modelPricingSection mirrors the JSON structure of the "model_pricing" key in thresholds.json.
+type modelPricingSection struct {
+	Models map[string]float64 `json:"models"`
+}
+
+// loadModelPricing reads the "model_pricing.models" section from thresholds.json located
+// in the parent directory of dataDir (i.e. dataDir/../thresholds.json).
+// Returns an empty map if the file cannot be read or the section is absent — callers
+// treat an empty map as "pricing unknown" and display "-" for savings.
+func loadModelPricing(dataDir string) map[string]float64 {
+	if dataDir == "" {
+		return map[string]float64{}
+	}
+	thresholdsPath := filepath.Join(dataDir, "..", "thresholds.json")
+	data, err := os.ReadFile(thresholdsPath)
+	if err != nil {
+		return map[string]float64{}
+	}
+	var raw struct {
+		ModelPricing *modelPricingSection `json:"model_pricing"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || raw.ModelPricing == nil {
+		return map[string]float64{}
+	}
+	return raw.ModelPricing.Models
+}
+
+// BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
+type BenchmarkModel struct {
+	bs      store.BenchmarkStore
+	runs    []store.BenchmarkRun
+	err     error
+	cursor  int
+	loading bool
+	offset  int // for scrolling
+	pricing map[string]float64
+}
+
+// NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
+// dataDir is the Metronous data directory (e.g. ~/.metronous/data); pricing is
+// loaded from dataDir/../thresholds.json. Pass an empty string to disable pricing.
+func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string) BenchmarkModel {
+	return BenchmarkModel{
+		bs:      bs,
+		loading: true,
+		pricing: loadModelPricing(dataDir),
+	}
+}
+
+// Init returns the initial fetch command and starts the auto-refresh ticker.
+func (m BenchmarkModel) Init() tea.Cmd {
+	return tea.Batch(
+		m.fetchRuns(),
+		tea.Tick(benchmarkRefreshInterval, func(t time.Time) tea.Msg {
+			return benchmarkTickMsg{t: t}
+		}),
+	)
+}
+
+// Update handles data, tick, and key messages.
+func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
+	const pageSize = 15
+	switch msg := msg.(type) {
+	case benchmarkTickMsg:
+		// Schedule next tick and refresh data.
+		return m, tea.Batch(
+			tea.Tick(benchmarkRefreshInterval, func(t time.Time) tea.Msg {
+				return benchmarkTickMsg{t: t}
+			}),
+			m.fetchRuns(),
+		)
+
+	case BenchmarkDataMsg:
+		m.loading = false
+		m.err = msg.Err
+		if msg.Err == nil {
+			m.runs = msg.Runs
+			// Clamp offset and cursor to valid range
+			if m.offset >= len(m.runs) {
+				if len(m.runs) > pageSize {
+					m.offset = len(m.runs) - pageSize
+				} else {
+					m.offset = 0
+				}
+			}
+			if m.cursor >= len(m.runs) {
+				m.cursor = max(0, len(m.runs)-1)
+			}
+		}
+		return m, nil
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+				if m.cursor < m.offset {
+					m.offset = m.cursor
+				}
+			}
+		case "down", "j":
+			if m.cursor < len(m.runs)-1 {
+				m.cursor++
+				// update offset when cursor moves beyond visible page.
+				if m.cursor >= m.offset+pageSize {
+					m.offset++
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// fetchRuns returns a command that queries all agents' latest runs.
+func (m BenchmarkModel) fetchRuns() tea.Cmd {
+	if m.bs == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		agents, err := m.bs.ListAgents(ctx)
+		if err != nil {
+			return BenchmarkDataMsg{Err: err}
+		}
+
+		var all []store.BenchmarkRun
+		for _, agentID := range agents {
+			runs, err := m.bs.GetRuns(ctx, agentID, maxBenchmarkRows/max(1, len(agents)))
+			if err != nil {
+				continue
+			}
+			all = append(all, runs...)
+		}
+		return BenchmarkDataMsg{Runs: all}
+	}
+}
+
+// View renders the benchmark history tab.
+func (m BenchmarkModel) View() string {
+	var sb strings.Builder
+
+	sb.WriteString(titleStyle.Render("Benchmark History") + "\n\n")
+
+	if m.loading {
+		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
+		return sb.String()
+	}
+	if m.err != nil {
+		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
+		return sb.String()
+	}
+	if len(m.runs) == 0 {
+		sb.WriteString(dimStyle.Render("  No benchmark runs yet. Run a benchmark to see history here.") + "\n")
+		return sb.String()
+	}
+
+	// Header.
+	sb.WriteString(renderRow(benchColNames, benchColWidths, headerStyle))
+	sb.WriteString("\n")
+	sb.WriteString(strings.Repeat("─", totalWidth(benchColWidths)) + "\n")
+
+	// Data rows (paginated).
+	pageSize := 15
+	start := m.offset
+	end := start + pageSize
+	if end > len(m.runs) {
+		end = len(m.runs)
+	}
+	for i, run := range m.runs[start:end] {
+		absIdx := start + i
+		row := formatBenchmarkRow(run, m.pricing)
+		baseStyle := lipgloss.NewStyle()
+		if absIdx == m.cursor {
+			baseStyle = cursorStyle
+		}
+		// Render all columns except the last two (Verdict, → Model, Savings) without special colour.
+		// Verdict gets colour; → Model and Savings use dim style.
+		verdictColIdx := 4
+		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
+		// Verdict column with colour.
+		rendered += verdictStyle(run.Verdict).Render(
+			fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		// → Model column.
+		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[5], row[5]))
+		// Savings column.
+		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
+		sb.WriteString(baseStyle.Render(rendered))
+		sb.WriteString("\n")
+	}
+
+	if len(m.runs) > pageSize {
+		sb.WriteString("\n")
+		sb.WriteString(dimStyle.Render(fmt.Sprintf(
+			"  Showing %d–%d of %d  (↑/↓ to scroll)", start+1, end, len(m.runs))))
+		sb.WriteString("\n")
+	}
+
+	// Detail panel for the selected run.
+	if m.cursor >= 0 && m.cursor < len(m.runs) {
+		sb.WriteString("\n")
+		sb.WriteString(renderDetailPanel(m.runs[m.cursor], m.pricing))
+	}
+
+	return sb.String()
+}
+
+// renderDetailPanel renders the decision rationale panel for the selected run.
+func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64) string {
+	var sb strings.Builder
+
+	divider := strings.Repeat("─", totalWidth(benchColWidths))
+	sb.WriteString(dimStyle.Render(divider) + "\n")
+	sb.WriteString(detailLabelStyle.Render("Decision Rationale") + "\n")
+	sb.WriteString(dimStyle.Render(divider) + "\n")
+
+	// Verdict line: show switch arrow if applicable.
+	verdictLine := string(run.Verdict)
+	if (run.Verdict == store.VerdictSwitch || run.Verdict == store.VerdictUrgentSwitch) && run.RecommendedModel != "" {
+		verdictLine = fmt.Sprintf("%s → %s", run.Verdict, run.RecommendedModel)
+	}
+
+	// Cost savings for detail panel.
+	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
+
+	// Format fields with aligned labels.
+	writeDetailField(&sb, "Agent", run.AgentID)
+	writeDetailField(&sb, "Model", run.Model)
+	writeDetailField(&sb, "Verdict", verdictLine)
+	writeDetailField(&sb, "Cost", fmt.Sprintf("$%.2f  Savings: %s", run.TotalCostUSD, savingsStr))
+	writeDetailField(&sb, "Samples", fmt.Sprintf("%d events", run.SampleSize))
+	sb.WriteString("\n")
+	writeDetailField(&sb, "Reason", run.DecisionReason)
+	writeDetailField(&sb, "Context", evaluateAgentContext(run))
+
+	return sb.String()
+}
+
+// evaluateAgentContext returns a short qualitative assessment of whether the agent
+// fulfilled its mission, based on its known role and available telemetry metrics.
+func evaluateAgentContext(run store.BenchmarkRun) string {
+	switch run.AgentID {
+	case "sdd-orchestrator":
+		// Mission: coordinate, never do work inline
+		// Good: high tool_success (delegates correctly)
+		// Bad: if tool success < 0.8, likely doing inline work
+		if run.ToolSuccessRate >= 0.9 {
+			return "Coordinating effectively — delegations succeeding at expected rate"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some delegation failures detected — may be attempting inline work"
+		}
+		return "High failure rate — orchestrator may be bypassing delegation pattern"
+
+	case "sdd-apply":
+		// Mission: implement code changes
+		// Good: high tool success (edits, writes working)
+		// Bad: low success means broken implementations
+		if run.ToolSuccessRate >= 0.9 {
+			return "Implementations landing correctly — code changes applied successfully"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some implementation failures — review task definitions for clarity"
+		}
+		return "High implementation failure rate — task definitions may be incomplete"
+
+	case "sdd-explore":
+		// Mission: investigate codebase and think through ideas
+		// Good: high tool success (reads, searches working)
+		// Check: sample size indicates depth of exploration
+		if run.SampleSize >= 50 && run.ToolSuccessRate >= 0.9 {
+			return "Deep exploration with high read success — investigations thorough"
+		} else if run.ToolSuccessRate >= 0.8 {
+			return "Adequate exploration — consider deeper codebase analysis"
+		}
+		return "Shallow exploration detected — may be missing critical context"
+
+	case "sdd-verify":
+		// Mission: validate implementation against specs
+		// Good: high tool success (reads, comparisons working)
+		if run.ToolSuccessRate >= 0.9 {
+			return "Validation passing — spec compliance checks executing correctly"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some validation failures — specs may need clarification"
+		}
+		return "Validation failing frequently — implementation may not match specs"
+
+	case "sdd-spec":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Spec writing succeeding — requirements captured correctly"
+		}
+		return "Spec generation issues — proposal inputs may be incomplete"
+
+	case "sdd-design":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Design artifacts generated successfully"
+		}
+		return "Design generation issues — proposal may need more detail"
+
+	case "sdd-propose":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Proposals being created from explorations correctly"
+		}
+		return "Proposal failures — exploration output may be insufficient"
+
+	case "sdd-tasks":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Task breakdown succeeding — specs and designs well-structured"
+		}
+		return "Task breakdown failures — specs may be ambiguous"
+
+	case "sdd-init":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Bootstrap executing correctly"
+		}
+		return "Bootstrap failures — check project configuration"
+
+	case "sdd-archive":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Archiving completing correctly"
+		}
+		return "Archive failures — verify change artifacts are complete"
+
+	default:
+		if run.ToolSuccessRate >= 0.9 {
+			return "Agent performing within normal parameters"
+		}
+		return "Performance below expected thresholds for this agent role"
+	}
+}
+
+// writeDetailField writes a single label: value line to the string builder.
+func writeDetailField(sb *strings.Builder, label, value string) {
+	sb.WriteString(detailLabelStyle.Render(fmt.Sprintf("%-9s", label+":")))
+	sb.WriteString(" ")
+	sb.WriteString(detailPanelStyle.Render(value))
+	sb.WriteString("\n")
+}
+
+// formatBenchmarkRow converts a BenchmarkRun into display columns.
+func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []string {
+	date := run.RunAt.Local().Format("2006-01-02")
+	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
+	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
+
+	// → Model column: show RecommendedModel only for SWITCH/URGENT_SWITCH with a non-empty value.
+	recommendedModel := "-"
+	if run.RecommendedModel != "" &&
+		(run.Verdict == store.VerdictSwitch || run.Verdict == store.VerdictUrgentSwitch) {
+		recommendedModel = run.RecommendedModel
+	}
+
+	// Savings column.
+	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
+
+	return []string{date, run.AgentID, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
+}
+
+// computeSavings returns the savings ratio (0.0–1.0) and a formatted string
+// (e.g. "~45%") given the current and recommended model names.
+// Returns (0, "-") when the calculation is not applicable or pricing is unknown.
+func computeSavings(currentModel, recommendedModel string, verdict store.VerdictType, pricing map[string]float64) (float64, string) {
+	if verdict != store.VerdictSwitch && verdict != store.VerdictUrgentSwitch {
+		return 0, "-"
+	}
+	if recommendedModel == "" {
+		return 0, "-"
+	}
+	if len(pricing) == 0 {
+		return 0, "-"
+	}
+	currentPrice, ok1 := pricing[currentModel]
+	recommendedPrice, ok2 := pricing[recommendedModel]
+	if !ok1 || !ok2 || currentPrice <= 0 || recommendedPrice <= 0 {
+		return 0, "-"
+	}
+	savings := (1 - recommendedPrice/currentPrice) * 100
+	if savings <= 0 {
+		return 0, "-"
+	}
+	return savings, fmt.Sprintf("~%.0f%%", savings)
+}
+
+// verdictStyle returns the lipgloss style for a verdict.
+func verdictStyle(v store.VerdictType) lipgloss.Style {
+	switch v {
+	case store.VerdictKeep:
+		return verdictKeep
+	case store.VerdictSwitch:
+		return verdictSwitch
+	case store.VerdictUrgentSwitch:
+		return verdictUrgent
+	default:
+		return verdictOther
+	}
+}
+
+// max returns the larger of two ints.
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

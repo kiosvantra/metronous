@@ -1,0 +1,65 @@
+# Binaries
+metronous
+metronous-*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Data files
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# Build artifacts
+dist/
+bin/
+
+# Config (keep defaults, not user-specific)
+!configs/thresholds.json
+
+# Node
+node_modules/
+package-lock.json
+
+# Dev artifacts
+exploration.md
+demo-tracking.sh
+live-demo.sh
+live-demo*.sh
+coverage.out
+
+# Agent tooling
+.atl/
+
+# Environment
+.env
+.env.*
+package.json
