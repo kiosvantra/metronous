@@ -76,15 +76,15 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 	}
 
 	var (
-		durations    []int
-		totalCost    float64
-		totalQuality float64
-		qualityCount int
-		errorCount   int
-		toolTotal    int
-		toolSuccess  int
-		modelCounts  = make(map[string]int)
-		sessionSeen  = make(map[string]struct{})
+		durations      []int
+		totalQuality   float64
+		qualityCount   int
+		errorCount     int
+		toolTotal      int
+		toolSuccess    int
+		modelCounts    = make(map[string]int)
+		sessionSeen    = make(map[string]struct{})
+		sessionMaxCost = make(map[string]float64) // max cost_usd per session (cumulative values)
 	)
 
 	for _, e := range events {
@@ -104,8 +104,11 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 			durations = append(durations, *e.DurationMs)
 		}
 
-		if e.CostUSD != nil {
-			totalCost += *e.CostUSD
+		// cost_usd is cumulative per session — track max per session, not sum across events
+		if e.CostUSD != nil && e.SessionID != "" {
+			if *e.CostUSD > sessionMaxCost[e.SessionID] {
+				sessionMaxCost[e.SessionID] = *e.CostUSD
+			}
 		}
 
 		if e.QualityScore != nil {
@@ -135,7 +138,11 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 	// Tool success rate.
 	m.ToolSuccessRate = CalculateToolSuccessRate(toolSuccess, toolTotal)
 
-	// Cost.
+	// Cost: sum the MAX cost_usd per session (each session's final cumulative total).
+	var totalCost float64
+	for _, maxCost := range sessionMaxCost {
+		totalCost += maxCost
+	}
 	m.TotalCostUSD = totalCost
 
 	// Session count.

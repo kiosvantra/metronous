@@ -170,8 +170,11 @@ func TestAggregateMetricsBasic(t *testing.T) {
 	if m.ToolSuccessRate != 1.0 {
 		t.Errorf("ToolSuccessRate: got %f, want 1.0", m.ToolSuccessRate)
 	}
-	if m.TotalCostUSD != 0.1 {
-		t.Errorf("TotalCostUSD: got %f, want 0.1", m.TotalCostUSD)
+	// Events have no SessionID → sessionMaxCost gets no entries → TotalCostUSD=0.
+	// (cost_usd is only tracked when a SessionID is present, to avoid summing
+	// cumulative values from multiple events in the same session.)
+	if m.TotalCostUSD != 0.0 {
+		t.Errorf("TotalCostUSD: got %f, want 0.0 (no session IDs — cost cannot be de-duplicated)", m.TotalCostUSD)
 	}
 	// No SessionIDs set → SessionCount=0 → costPerSession=0 → ROIScore=0.
 	if m.SessionCount != 0 {
