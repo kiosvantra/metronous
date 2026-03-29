@@ -28,9 +28,10 @@ type benchmarkTickMsg struct{ t time.Time }
 
 // BenchmarkDataMsg carries fetched benchmark runs.
 type BenchmarkDataMsg struct {
-	Runs     []store.BenchmarkRun
-	TypeByID map[string]string // agentID → type label (primary/subagent/built-in/all)
-	Err      error
+	Runs      []store.BenchmarkRun
+	TypeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
+	TrendByID map[string][]string // agentID → verdict trend (oldest first)
+	Err       error
 }
 
 // Verdict colour styles.
@@ -90,16 +91,17 @@ func loadModelPricing(dataDir string) map[string]float64 {
 
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
-	bs       store.BenchmarkStore
-	runs     []store.BenchmarkRun
-	agents   []discovery.AgentInfo
-	typeByID map[string]string // agentID → type label (primary/subagent/built-in/all)
-	err      error
-	cursor   int
-	loading  bool
-	offset   int // for scrolling
-	pricing  map[string]float64
-	workDir  string
+	bs        store.BenchmarkStore
+	runs      []store.BenchmarkRun
+	agents    []discovery.AgentInfo
+	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
+	trendByID map[string][]string // agentID → verdict trend (oldest first)
+	err       error
+	cursor    int
+	loading   bool
+	offset    int // for scrolling
+	pricing   map[string]float64
+	workDir   string
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -146,6 +148,9 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			m.runs = msg.Runs
 			if msg.TypeByID != nil {
 				m.typeByID = msg.TypeByID
+			}
+			if msg.TrendByID != nil {
+				m.trendByID = msg.TrendByID
 			}
 			// Clamp offset and cursor to valid range
 			if m.offset >= len(m.runs) {
@@ -269,7 +274,16 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			return all[i].AgentID < all[j].AgentID
 		})
 
-		return BenchmarkDataMsg{Runs: all, TypeByID: typeByID}
+		// Fetch verdict trends for each agent (last 8 weeks).
+		trendByID := make(map[string][]string, len(allIDs))
+		for _, agentID := range allIDs {
+			trend, err := m.bs.GetVerdictTrend(ctx, agentID, 8)
+			if err == nil {
+				trendByID[agentID] = trend
+			}
+		}
+
+		return BenchmarkDataMsg{Runs: all, TypeByID: typeByID, TrendByID: trendByID}
 	}
 }
 
@@ -343,14 +357,17 @@ func (m BenchmarkModel) View() string {
 	// Detail panel for the selected run.
 	if m.cursor >= 0 && m.cursor < len(m.runs) {
 		sb.WriteString("\n")
-		sb.WriteString(renderDetailPanel(m.runs[m.cursor], m.pricing))
+		selectedRun := m.runs[m.cursor]
+		trend := m.trendByID[selectedRun.AgentID]
+		sb.WriteString(renderDetailPanel(selectedRun, m.pricing, trend))
 	}
 
 	return sb.String()
 }
 
 // renderDetailPanel renders the decision rationale panel for the selected run.
-func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64) string {
+// trend is the verdict history for the agent (oldest first); pass nil if unavailable.
+func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend []string) string {
 	var sb strings.Builder
 
 	divider := strings.Repeat("─", totalWidth(benchColWidths))
@@ -384,7 +401,65 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64) strin
 	writeDetailField(&sb, "Reason", run.DecisionReason)
 	writeDetailField(&sb, "Context", evaluateAgentContext(run))
 
+	// Trend line: show last N verdicts with direction indicator.
+	if len(trend) > 0 {
+		trendStr := formatVerdictTrend(trend)
+		writeDetailField(&sb, "Trend", trendStr)
+	}
+
 	return sb.String()
+}
+
+// formatVerdictTrend formats a slice of verdict strings into a human-readable trend line.
+// e.g. "SWITCH → SWITCH → KEEP → KEEP  (↑ improving)"
+func formatVerdictTrend(trend []string) string {
+	if len(trend) == 0 {
+		return "-"
+	}
+	trendLine := strings.Join(trend, " → ")
+	direction := trendDirection(trend)
+	return fmt.Sprintf("%s  (%s)", trendLine, direction)
+}
+
+// verdictSeverity returns a numeric severity for a verdict (lower = better).
+func verdictSeverity(v string) int {
+	switch store.VerdictType(v) {
+	case store.VerdictKeep:
+		return 0
+	case store.VerdictSwitch:
+		return 2
+	case store.VerdictUrgentSwitch:
+		return 3
+	default:
+		return 1
+	}
+}
+
+// trendDirection returns a direction indicator string for a slice of verdict strings.
+// INSUFFICIENT_DATA at either endpoint is treated as a neutral sentinel — it does not
+// imply improvement or degradation from data gaps.
+func trendDirection(verdicts []string) string {
+	if len(verdicts) < 2 {
+		return "→ stable"
+	}
+	first := verdicts[0]
+	last := verdicts[len(verdicts)-1]
+
+	// Data gaps are neutral — don't signal improvement or degradation.
+	if first == string(store.VerdictInsufficientData) || last == string(store.VerdictInsufficientData) {
+		return "→ stable"
+	}
+
+	firstSev := verdictSeverity(first)
+	lastSev := verdictSeverity(last)
+
+	if lastSev < firstSev {
+		return "↑ improving"
+	}
+	if lastSev > firstSev {
+		return "↓ degrading"
+	}
+	return "→ stable"
 }
 
 // evaluateAgentContext returns a short qualitative assessment of whether the agent

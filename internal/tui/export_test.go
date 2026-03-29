@@ -9,3 +9,8 @@ import "github.com/enduluc/metronous/internal/config"
 func DefaultThresholdValuesForTest() config.Thresholds {
 	return config.DefaultThresholdValues()
 }
+
+// TrendDirection exposes the internal trendDirection function for testing.
+func TrendDirection(verdicts []string) string {
+	return trendDirection(verdicts)
+}

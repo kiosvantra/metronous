@@ -220,6 +220,9 @@ func TestAggregateMetricsWithSession(t *testing.T) {
 	if m.ROIScore != wantROI {
 		t.Errorf("ROIScore: got %f, want %f (1.0/0.25)", m.ROIScore, wantROI)
 	}
+	if m.AvgQuality == 0 {
+		t.Error("AvgQuality should be > 0 when events have quality scores")
+	}
 }
 
 // TestAggregateMetricsEmptyEvents handles no events gracefully.

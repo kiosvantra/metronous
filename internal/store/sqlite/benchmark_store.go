@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     verdict           TEXT NOT NULL,
     recommended_model TEXT NOT NULL DEFAULT '',
     decision_reason   TEXT NOT NULL DEFAULT '',
-    artifact_path     TEXT NOT NULL DEFAULT ''
+    artifact_path     TEXT NOT NULL DEFAULT '',
+    avg_quality_score REAL NOT NULL DEFAULT 0.0
 );
 
 -- Indexes for common queries
@@ -41,6 +42,11 @@ CREATE INDEX IF NOT EXISTS idx_benchmark_agent_ts ON benchmark_runs(agent_id, ru
 CREATE INDEX IF NOT EXISTS idx_benchmark_run_at ON benchmark_runs(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_verdict ON benchmark_runs(verdict, run_at DESC);
 `
+
+// benchmarkMigrations contains ALTER TABLE statements to apply to existing databases.
+// Each migration is guarded by checking for the column's existence first (SQLite
+// returns an error on duplicate column add, which we ignore).
+const addAvgQualityScoreColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_quality_score REAL NOT NULL DEFAULT 0.0`
 
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
 type BenchmarkStore struct {
@@ -86,11 +92,21 @@ func NewBenchmarkStore(path string) (*BenchmarkStore, error) {
 	}, nil
 }
 
-// ApplyBenchmarkMigrations creates all tables and indexes for benchmark.db.
-// It is idempotent (uses CREATE IF NOT EXISTS) and safe to call at startup.
+// ApplyBenchmarkMigrations creates all tables and indexes for benchmark.db,
+// then applies any additive column migrations for existing databases.
+// It is idempotent and safe to call at startup.
 func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, benchmarkSchema); err != nil {
 		return fmt.Errorf("apply benchmark schema: %w", err)
+	}
+	// Apply additive column migration — ignore "duplicate column name" errors from
+	// databases that already have the column (e.g. newly created with the full schema).
+	if _, err := db.ExecContext(ctx, addAvgQualityScoreColumn); err != nil {
+		// SQLite returns "duplicate column name" as an error; this is expected for
+		// fresh databases where the CREATE TABLE already includes the column.
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply avg_quality_score migration: %w", err)
+		}
 	}
 	return nil
 }
@@ -106,12 +122,12 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			id, run_at, window_days, agent_id, model,
 			accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
-			verdict, recommended_model, decision_reason, artifact_path
+			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?, ?
+			?, ?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -133,6 +149,7 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		run.RecommendedModel,
 		run.DecisionReason,
 		run.ArtifactPath,
+		run.AvgQualityScore,
 	)
 	if err != nil {
 		return fmt.Errorf("save benchmark run: %w", err)
@@ -165,7 +182,7 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 	q := `SELECT id, run_at, window_days, agent_id, model,
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
-		verdict, recommended_model, decision_reason, artifact_path
+		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -189,7 +206,7 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 	const q = `SELECT id, run_at, window_days, agent_id, model,
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
-		verdict, recommended_model, decision_reason, artifact_path
+		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -287,6 +304,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&run.RecommendedModel,
 			&run.DecisionReason,
 			&run.ArtifactPath,
+			&run.AvgQualityScore,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan benchmark run row: %w", err)
@@ -332,6 +350,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&run.RecommendedModel,
 		&run.DecisionReason,
 		&run.ArtifactPath,
+		&run.AvgQualityScore,
 	)
 	if err != nil {
 		return nil, err
@@ -339,4 +358,41 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	run.RunAt = time.UnixMilli(runAtMs).UTC()
 	run.Verdict = store.VerdictType(verdict)
 	return &run, nil
+}
+
+// GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
+// Returns an empty slice if the agent has no runs or fewer than requested.
+func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
+	if weeks <= 0 {
+		return nil, nil
+	}
+	// Fetch newest-first, then reverse for oldest-first order.
+	const q = `SELECT verdict FROM benchmark_runs
+		WHERE agent_id = ?
+		ORDER BY run_at DESC
+		LIMIT ?`
+
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, weeks)
+	if err != nil {
+		return nil, fmt.Errorf("get verdict trend for %q: %w", agentID, err)
+	}
+	defer rows.Close()
+
+	var verdicts []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan verdict: %w", err)
+		}
+		verdicts = append(verdicts, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate verdict rows: %w", err)
+	}
+
+	// Reverse to get oldest-first order.
+	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
+		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
+	}
+	return verdicts, nil
 }

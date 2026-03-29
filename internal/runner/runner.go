@@ -162,6 +162,7 @@ func (r *Runner) processAgent(ctx context.Context, agentID string, start, end ti
 		Verdict:          verdict.Type,
 		RecommendedModel: verdict.RecommendedModel,
 		DecisionReason:   verdict.Reason,
+		AvgQualityScore:  metrics.AvgQuality,
 		// ArtifactPath is set by RunWeekly after GenerateArtifact completes.
 	}
 
