@@ -127,7 +127,7 @@ func runInstall() error {
 		// Non-fatal: print warning.
 		fmt.Printf("\nWarning: could not patch opencode.json: %v\n", err)
 		fmt.Println("Manually add to ~/.config/opencode/opencode.json:")
-		fmt.Println(`  "mcpServers": {"metronous": {"command": ["metronous", "mcp"]}}`)
+		fmt.Println(`  "mcp": {"metronous": {"command": ["metronous", "mcp"], "type": "local"}}`)
 	}
 
 	fmt.Println("\nMetronous service installed and started.")
@@ -165,8 +165,8 @@ func patchOpencodeJSON(userHome string) error {
 		return fmt.Errorf("parse opencode.json: %w", err)
 	}
 
-	// Ensure mcpServers map exists.
-	mcpServers, _ := cfg["mcpServers"].(map[string]interface{})
+	// Ensure mcp map exists (OpenCode uses "mcp", not "mcpServers").
+	mcpServers, _ := cfg["mcp"].(map[string]interface{})
 	if mcpServers == nil {
 		mcpServers = make(map[string]interface{})
 	}
@@ -174,8 +174,9 @@ func patchOpencodeJSON(userHome string) error {
 	// Set or overwrite the metronous entry.
 	mcpServers["metronous"] = map[string]interface{}{
 		"command": []interface{}{"metronous", "mcp"},
+		"type":    "local",
 	}
-	cfg["mcpServers"] = mcpServers
+	cfg["mcp"] = mcpServers
 
 	patched, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

@@ -45,7 +45,7 @@ func TestPatchOpencodeJSON(t *testing.T) {
 
 	initial := map[string]interface{}{
 		"theme": "dark",
-		"mcpServers": map[string]interface{}{
+		"mcp": map[string]interface{}{
 			"other": map[string]interface{}{"command": []string{"other-tool"}},
 		},
 	}
@@ -69,13 +69,13 @@ func TestPatchOpencodeJSON(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	mcpServers, ok := result["mcpServers"].(map[string]interface{})
+	mcp, ok := result["mcp"].(map[string]interface{})
 	if !ok {
-		t.Fatal("mcpServers not a map")
+		t.Fatal("mcp not a map")
 	}
-	metronousEntry, ok := mcpServers["metronous"].(map[string]interface{})
+	metronousEntry, ok := mcp["metronous"].(map[string]interface{})
 	if !ok {
-		t.Fatal("mcpServers.metronous not found")
+		t.Fatal("mcp.metronous not found")
 	}
 	command, ok := metronousEntry["command"].([]interface{})
 	if !ok || len(command) != 2 {
@@ -89,8 +89,8 @@ func TestPatchOpencodeJSON(t *testing.T) {
 	if result["theme"] != "dark" {
 		t.Errorf("theme key was lost")
 	}
-	if _, exists := mcpServers["other"]; !exists {
-		t.Errorf("pre-existing mcpServers.other was removed")
+	if _, exists := mcp["other"]; !exists {
+		t.Errorf("pre-existing mcp.other was removed")
 	}
 }
 

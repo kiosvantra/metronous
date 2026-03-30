@@ -165,7 +165,7 @@ func NewMCPShimCommand() *cobra.Command {
 Metronous daemon over HTTP.
 
 This command is intended to be used as the MCP server command in opencode.json:
-  {"mcpServers": {"metronous": {"command": ["metronous", "mcp"]}}}
+  {"mcp": {"metronous": {"command": ["metronous", "mcp"], "type": "local"}}}
 
 The shim reads JSON-RPC messages from stdin, handles MCP lifecycle messages
 locally (initialize, tools/list, ping), and proxies tool calls to the daemon
