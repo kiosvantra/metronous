@@ -61,3 +61,11 @@ echo ""
 
 # Verify version
 "${INSTALL_DIR}/metronous" --version
+
+# Check if in PATH
+if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
+    echo "IMPORTANT: Add Go bin to your PATH if not already present:"
+    echo "  export PATH=\"\$HOME/go/bin:\$PATH\""
+    echo ""
+    echo "Add to ~/.bashrc or ~/.profile to make permanent."
+fi
