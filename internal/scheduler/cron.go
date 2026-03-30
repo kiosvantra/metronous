@@ -10,7 +10,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/runner"
+	"github.com/kiosvantra/metronous/internal/runner"
 )
 
 const (

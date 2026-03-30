@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/mcp"
 )
 
 // TestAcquirePIDFile_NoExisting verifies that when no PID file exists,

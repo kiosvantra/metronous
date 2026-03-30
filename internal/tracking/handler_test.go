@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/mcp"
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // --- Helpers ---

@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/enduluc/metronous/internal/config"
-	"github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // defaultMetronousHome returns the default ~/.metronous directory.

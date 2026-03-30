@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/enduluc/metronous/internal/store"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/store"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // NewReportCommand creates the `metronous report` cobra command.

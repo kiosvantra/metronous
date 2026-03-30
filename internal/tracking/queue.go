@@ -10,7 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 const (

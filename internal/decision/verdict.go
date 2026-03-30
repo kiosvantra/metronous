@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/enduluc/metronous/internal/benchmark"
-	"github.com/enduluc/metronous/internal/config"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // Verdict holds the decision engine's recommendation for a single agent.

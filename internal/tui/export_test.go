@@ -2,7 +2,7 @@
 // It is only compiled during testing.
 package tui
 
-import "github.com/enduluc/metronous/internal/config"
+import "github.com/kiosvantra/metronous/internal/config"
 
 // DefaultThresholdValuesForTest returns the default threshold values.
 // Exposed so external tests can inject realistic data.

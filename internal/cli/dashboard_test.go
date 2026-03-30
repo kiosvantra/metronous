@@ -3,7 +3,7 @@ package cli_test
 import (
 	"testing"
 
-	"github.com/enduluc/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/cli"
 )
 
 func TestDashboardCommandStartsProgram(t *testing.T) {

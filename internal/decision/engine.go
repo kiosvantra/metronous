@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/enduluc/metronous/internal/benchmark"
-	"github.com/enduluc/metronous/internal/config"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // DecisionEngine applies threshold rules to benchmark metrics and produces verdicts.

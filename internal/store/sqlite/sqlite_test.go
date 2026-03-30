@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // newTestStore creates an in-memory EventStore for testing.

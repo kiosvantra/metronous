@@ -12,10 +12,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/config"
-	"github.com/enduluc/metronous/internal/decision"
-	"github.com/enduluc/metronous/internal/runner"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/runner"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 func main() {

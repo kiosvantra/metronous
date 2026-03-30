@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/enduluc/metronous/internal/cli"
-	"github.com/enduluc/metronous/internal/store"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/store"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // setupReportTest creates a temporary benchmark.db with pre-populated runs and returns

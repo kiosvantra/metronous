@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/daemon"
+	"github.com/kiosvantra/metronous/internal/daemon"
 )
 
 // NewServiceCommand creates the `metronous service` cobra command group.

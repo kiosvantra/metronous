@@ -8,9 +8,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/benchmark"
-	"github.com/enduluc/metronous/internal/store"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/store"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // ptr returns a pointer to the given float64 value.

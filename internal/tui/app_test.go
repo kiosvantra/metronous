@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/tui"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/tui"
 )
 
 // ----- helpers ----------------------------------------------------------------

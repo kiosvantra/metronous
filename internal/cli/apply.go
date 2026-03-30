@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/discovery"
+	"github.com/kiosvantra/metronous/internal/discovery"
 )
 
 // NewApplyModelChangeCommand creates the `metronous apply-model-change` cobra command.

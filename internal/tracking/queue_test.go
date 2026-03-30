@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // --- Mock EventStore ---

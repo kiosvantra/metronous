@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/enduluc/metronous/internal/discovery"
+	"github.com/kiosvantra/metronous/internal/discovery"
 )
 
 func TestParseAgentConfigFromDirectory(t *testing.T) {

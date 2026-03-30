@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/store"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/store"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // newTestBenchmarkStore creates an in-memory BenchmarkStore for testing.

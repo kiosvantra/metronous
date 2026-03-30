@@ -11,9 +11,9 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/benchmark"
-	"github.com/enduluc/metronous/internal/decision"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // Runner orchestrates the weekly benchmark pipeline for all known agents.

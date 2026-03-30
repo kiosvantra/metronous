@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/enduluc/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/config"
 )
 
 // ConfigSavedMsg is sent after a successful save.

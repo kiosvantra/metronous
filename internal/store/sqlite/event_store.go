@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // EventStore is a SQLite-backed implementation of store.EventStore.

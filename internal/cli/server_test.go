@@ -11,10 +11,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/cli"
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/store/sqlite"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // makeTestEvent creates a minimal test event for server tests.

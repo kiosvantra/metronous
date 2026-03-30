@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/discovery"
+	"github.com/kiosvantra/metronous/internal/discovery"
 )
 
 func TestWatcherEmitsCreateWriteRemove(t *testing.T) {

@@ -12,9 +12,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/mcp"
-	"github.com/enduluc/metronous/internal/store/sqlite"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // defaultDataDir returns the default ~/.metronous/data directory path.

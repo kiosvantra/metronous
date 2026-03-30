@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // TestEventMetadataRoundTrip verifies that metadata can be serialized to JSON

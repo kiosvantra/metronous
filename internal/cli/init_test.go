@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/enduluc/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/cli"
 )
 
 // TestInitCommandCreatesHomeLayout verifies the full directory structure is created.

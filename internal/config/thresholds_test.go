@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/enduluc/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/config"
 )
 
 // TestThresholdsJSONDecode verifies that a thresholds.json payload decodes

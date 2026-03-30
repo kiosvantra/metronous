@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/enduluc/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/cli"
 )
 
 // executeCommand runs a cobra command with the given args and returns stdout/stderr.

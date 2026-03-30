@@ -9,7 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/daemon"
+	"github.com/kiosvantra/metronous/internal/daemon"
 )
 
 func TestServiceProgramStartStop(t *testing.T) {

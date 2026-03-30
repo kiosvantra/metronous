@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/enduluc/metronous/internal/mcp"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // ValidEventTypes is the set of accepted event_type values for ingest requests.

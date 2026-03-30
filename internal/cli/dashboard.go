@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/term"
 
-	"github.com/enduluc/metronous/internal/store/sqlite"
-	"github.com/enduluc/metronous/internal/tui"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/tui"
 )
 
 // NewDashboardCommand creates the `metronous dashboard` cobra command.

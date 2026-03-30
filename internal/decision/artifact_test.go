@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/benchmark"
-	"github.com/enduluc/metronous/internal/decision"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // sampleVerdict builds a Verdict for testing artifact generation.

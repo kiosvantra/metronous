@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/enduluc/metronous/internal/decision"
-	"github.com/enduluc/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/store"
 )
 
 // HandleReport handles the "report" MCP tool call.

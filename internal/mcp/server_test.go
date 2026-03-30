@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enduluc/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/mcp"
 )
 
 // --- Helpers ---

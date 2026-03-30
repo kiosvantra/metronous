@@ -5,11 +5,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/config"
-	"github.com/enduluc/metronous/internal/decision"
-	"github.com/enduluc/metronous/internal/runner"
-	"github.com/enduluc/metronous/internal/scheduler"
-	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/runner"
+	"github.com/kiosvantra/metronous/internal/scheduler"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // newTestScheduler creates a Scheduler backed by in-memory stores.

@@ -12,9 +12,9 @@ import (
 	"github.com/kardianos/service"
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/mcp"
-	"github.com/enduluc/metronous/internal/store/sqlite"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // Config holds the parameters needed to launch the Metronous daemon.

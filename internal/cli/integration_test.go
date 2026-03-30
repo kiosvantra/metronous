@@ -14,11 +14,11 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/enduluc/metronous/internal/cli"
-	"github.com/enduluc/metronous/internal/mcp"
-	"github.com/enduluc/metronous/internal/store"
-	"github.com/enduluc/metronous/internal/store/sqlite"
-	"github.com/enduluc/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/tracking"
 )
 
 // integrationSetup runs `metronous init` in a temp home and returns the home path.
