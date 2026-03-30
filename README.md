@@ -52,7 +52,7 @@ metronous install
 ### Via Go (alternative)
 
 ```bash
-go install github.com/kiosvantra/metronous/cmd/metronous@latest
+go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.9
 ```
 
 ### Manual installation (alternative)
@@ -83,7 +83,7 @@ go build -o metronous ./cmd/metronous
 ### Windows installation
 
 ```powershell
-go install github.com/kiosvantra/metronous/cmd/metronous@latest
+go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.9
 metronous install
 # Done — service registered via Windows SCM, OpenCode configured
 ```
