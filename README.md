@@ -126,7 +126,12 @@ All data lives in `~/.metronous/`:
 
 ## Agents tracked
 
-Metronous automatically discovers and benchmarks any agent in your `opencode.json` that has a mission defined. Here's an example with the Gentle AI SDD agents:
+Metronous automatically discovers all agents from your OpenCode configuration:
+
+- **Built-in agents**: `build`, `plan`, `general`, `explore`  
+- **Custom agents**: any agent defined in `opencode.json` or `~/.config/opencode/agents/*.md` (at global or project level), with type `primary`, `subagent`, or `all`
+
+For benchmarking, Metronous requires each agent to have a **mission** defined (via the `description` field in `opencode.json` or YAML frontmatter in the agent's markdown file). Here's an example with the Gentle AI SDD agents:
 
 | Agent | Mission |
 |-------|---------|
