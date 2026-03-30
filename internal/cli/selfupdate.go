@@ -207,7 +207,16 @@ func downloadBinary(url, destPath string) error {
 			return fmt.Errorf("failed to copy binary: %w", err)
 		}
 
-		os.Chmod(destPath, 0755)
+		if err := dst.Close(); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to flush binary: %w", err)
+		}
+
+		if err := os.Chmod(destPath, 0755); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to set permissions: %w", err)
+		}
+
 		os.Remove(tmpPath)
 	}
 
