@@ -23,13 +23,13 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 > For benchmark methodology, see [docs/how-it-works.md](docs/how-it-works.md).
 
 ```
-OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service) → SQLite
+OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service) → SQLite
                                                                         ↓
                                                               ./metronous dashboard
 ```
 
 - **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
-- **Daemon (metronous)**: Long-lived systemd user service that handles telemetry ingestion, storage, and weekly benchmarks
+- **Daemon (metronous)**: Long-lived system service (systemd on Linux, Windows SCM on Windows) that handles telemetry ingestion, storage, and weekly benchmarks
 - **HTTP Endpoint**: Dynamic port (written to `~/.metronous/mcp.port`) for shim-to-daemon communication
 - **TUI Dashboard**: 3-tab terminal UI (Tracking / Benchmark / Config)
 
@@ -78,6 +78,24 @@ go build -o metronous ./cmd/metronous
 #   c) systemctl --user enable metronous
 #   d) systemctl --user start metronous
 #   e) patches ~/.config/opencode/opencode.json to use ["metronous", "mcp"]
+```
+
+### Windows installation
+
+```powershell
+go install github.com/kiosvantra/metronous/cmd/metronous@latest
+metronous install
+# Done — service registered via Windows SCM, OpenCode configured
+```
+
+> **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service. Use `metronous service status` or `sc query metronous` to verify.
+
+For manual control:
+```powershell
+metronous service start    # Start the service
+metronous service stop     # Stop the service
+metronous service status   # Check service status
+metronous service uninstall # Remove the service
 ```
 
 ### Configure OpenCode (automatically done by `metronous install`)

@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"github.com/kiosvantra/metronous/internal/daemon"
 	"github.com/kiosvantra/metronous/internal/mcp"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
 	"github.com/kiosvantra/metronous/internal/tracking"
@@ -58,9 +60,38 @@ any pending events before exit.`,
 	return cmd
 }
 
+// runAsService delegates the full server lifecycle to kardianos/service,
+// which handles platform-specific service manager protocols (Windows SCM,
+// macOS Launchd, Linux systemd). The daemon.Program implements
+// service.Interface (Start/Stop) and runs the MCP server in a goroutine.
+func runAsService(dataDir string) error {
+	logger, _ := zap.NewProduction()
+	prog := daemon.NewProgram(daemon.Config{DataDir: dataDir}, logger)
+	cfg := daemon.ServiceConfig()
+	svc, err := daemon.New(prog, cfg)
+	if err != nil {
+		return fmt.Errorf("create service wrapper: %w", err)
+	}
+	return svc.Run()
+}
+
 // runServer initializes the event store, queue, and MCP server, then serves.
 // When daemonMode is true, it runs HTTP-only (no stdio) — used by systemd unit.
+//
+// When running as a managed service (not interactive), it delegates to
+// runAsService which uses kardianos/service to handle the platform-specific
+// service control protocol (Windows SCM, macOS Launchd).
 func runServer(dataDir string, daemonMode bool) error {
+	// Managed service detection: when the process was NOT started from an
+	// interactive terminal (Windows SCM, macOS Launchd, Linux systemd),
+	// delegate to kardianos/service so the platform's service manager
+	// receives proper lifecycle signals. This check is independent of
+	// the --daemon-mode flag because the service manager sets its own
+	// Arguments (see cli/service.go) which may or may not include it.
+	if !service.Interactive() {
+		return runAsService(dataDir)
+	}
+
 	logger, err := zap.NewProduction()
 	if err != nil {
 		return fmt.Errorf("init logger: %w", err)
