@@ -28,7 +28,7 @@ const (
 	ServerName = "metronous"
 
 	// ServerVersion matches the CLI version.
-	ServerVersion = "0.8.0"
+	ServerVersion = "0.9.0"
 
 	// gracefulShutdownTimeout is how long to wait for an existing instance
 	// to exit cleanly before sending SIGKILL.
