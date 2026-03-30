@@ -43,7 +43,8 @@ Model Context Protocol and persists them to SQLite.
 Signals SIGINT and SIGTERM trigger graceful shutdown, draining
 any pending events before exit.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServer(dataDir, configPath, daemonMode)
+			// configPath is reserved for future use.
+			return runServer(dataDir, daemonMode)
 		},
 	}
 
@@ -52,15 +53,14 @@ any pending events before exit.`,
 	cmd.Flags().BoolVar(&daemonMode, "daemon-mode", false,
 		"Run in HTTP-only daemon mode (no stdio); used by the systemd unit file")
 	cmd.Flags().StringVar(&configPath, "config", "",
-		"Path to config file (default: ~/.metronous/config.yaml)")
+		"Path to config file (reserved for future use)")
 
 	return cmd
 }
 
 // runServer initializes the event store, queue, and MCP server, then serves.
 // When daemonMode is true, it runs HTTP-only (no stdio) — used by systemd unit.
-// configPath is reserved for future use (Phase 3 config loading).
-func runServer(dataDir string, _ string, daemonMode bool) error {
+func runServer(dataDir string, daemonMode bool) error {
 	logger, err := zap.NewProduction()
 	if err != nil {
 		return fmt.Errorf("init logger: %w", err)
@@ -145,7 +145,11 @@ func runServer(dataDir string, _ string, daemonMode bool) error {
 		return err
 	}
 
-	// Graceful shutdown: drain queue.
+	// Graceful shutdown: flush WAL and drain queue.
+	logger.Info("flushing WAL checkpoint...")
+	if err := es.Checkpoint(); err != nil {
+		logger.Warn("WAL checkpoint failed", zap.Error(err))
+	}
 	logger.Info("draining event queue...")
 	queue.Stop()
 	logger.Info("shutdown complete")

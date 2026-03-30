@@ -28,7 +28,7 @@ const (
 	ServerName = "metronous"
 
 	// ServerVersion matches the CLI version.
-	ServerVersion = "0.1.0"
+	ServerVersion = "0.8.0"
 
 	// gracefulShutdownTimeout is how long to wait for an existing instance
 	// to exit cleanly before sending SIGKILL.
@@ -309,7 +309,7 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		// Non-fatal: log the error and proceed with stdio-only mode.
 		s.logger.Warn("could not start health HTTP server; continuing in stdio-only mode",
@@ -391,7 +391,7 @@ func (s *Server) ServeDaemon(ctx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		return fmt.Errorf("start health HTTP server: %w", err)
 	}
@@ -456,13 +456,14 @@ func (s *Server) ServeDaemon(ctx context.Context) error {
 	case err := <-serveDone:
 		// Server returned an error, wait for shutdown to complete
 		<-shutdownDone
-		return fmt.Errorf("serve HTTP server: %w", err)
+		// Only return error if it's not a normal shutdown
+		if err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("serve HTTP server: %w", err)
+		}
+		return nil
 	case <-shutdownDone:
 		// Shutdown completed, wait for server to finish
 		<-serveDone
-		if serveErr != nil && serveErr != http.ErrServerClosed {
-			return fmt.Errorf("serve HTTP server: %w", serveErr)
-		}
 		return nil
 	}
 }
@@ -506,7 +507,13 @@ func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
 		}
 
 		var arguments map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&arguments); err != nil {
+		// Limit request body to 1MB to prevent memory exhaustion attacks.
+		maxBytes := int64(1024 * 1024)
+		if r.ContentLength > maxBytes {
+			http.Error(w, "payload too large (max 1MB)", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes)).Decode(&arguments); err != nil {
 			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -521,8 +528,7 @@ func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
 		}
 
 		req := CallToolRequest{Name: "ingest", Arguments: arguments}
-		// Use background context for handler timeout to avoid using cancelled ctx during shutdown
-		handlerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		handlerCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 
 		result, err := handler(handlerCtx, req)
@@ -659,6 +665,10 @@ func AcquirePIDFile(path string) error {
 		if err == nil {
 			// We exclusively created the file — write our PID and done.
 			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
+			if werr != nil {
+				f.Close()
+				return fmt.Errorf("write pid file: %w", werr)
+			}
 			if err := f.Sync(); err != nil {
 				f.Close()
 				return fmt.Errorf("sync pid file: %w", err)
@@ -666,7 +676,7 @@ func AcquirePIDFile(path string) error {
 			if err := f.Close(); err != nil {
 				return fmt.Errorf("close pid file: %w", err)
 			}
-			return werr
+			return nil
 		}
 
 		if !os.IsExist(err) {
@@ -685,7 +695,10 @@ func AcquirePIDFile(path string) error {
 			return fmt.Errorf("read pid file: %w", readErr)
 		}
 
-		existingPID, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		existingPID, pidErr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if pidErr != nil {
+			return fmt.Errorf("invalid PID in file %q: %w", path, pidErr)
+		}
 
 		// Already us — nothing to do.
 		if existingPID == os.Getpid() {

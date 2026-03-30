@@ -5,15 +5,18 @@ package discovery
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/fsnotify/fsnotify"
 )
 
 // EventType classifies the kind of filesystem change that was detected.
 type EventType string
+
+func (e EventType) String() string { return string(e) }
 
 const (
 	// EventCreate is emitted when a file is created.
@@ -43,22 +46,29 @@ type Watcher struct {
 	fw     *fsnotify.Watcher
 	events chan WatchEvent
 	done   chan struct{}
+	logger *zap.Logger
 
 	mu      sync.Mutex
 	timers  map[string]*time.Timer
 	lastEvt map[string]time.Time
+	closed  bool
 }
 
 // NewWatcher creates a new Watcher. Call Watch() to start observing a directory.
-func NewWatcher() (*Watcher, error) {
+// If logger is nil, a no-op logger is used.
+func NewWatcher(logger *zap.Logger) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	w := &Watcher{
 		fw:      fw,
 		events:  make(chan WatchEvent, 64),
 		done:    make(chan struct{}),
+		logger:  logger,
 		timers:  make(map[string]*time.Timer),
 		lastEvt: make(map[string]time.Time),
 	}
@@ -86,6 +96,7 @@ func (w *Watcher) Close() error {
 		t.Stop()
 		delete(w.timers, path)
 	}
+	w.closed = true
 	w.mu.Unlock()
 
 	err := w.fw.Close()
@@ -145,6 +156,10 @@ func (w *Watcher) debounce(path string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if w.closed {
+		return
+	}
+
 	if t, ok := w.timers[path]; ok {
 		t.Reset(debounceDuration)
 		return
@@ -153,7 +168,12 @@ func (w *Watcher) debounce(path string) {
 	w.timers[path] = time.AfterFunc(debounceDuration, func() {
 		w.mu.Lock()
 		delete(w.timers, path)
+		closed := w.closed
 		w.mu.Unlock()
+
+		if closed {
+			return
+		}
 
 		w.emit(WatchEvent{
 			Type:      EventWrite,
@@ -168,7 +188,9 @@ func (w *Watcher) emit(evt WatchEvent) {
 	select {
 	case w.events <- evt:
 	default:
-		// Buffer full — log the dropped event so operators can diagnose backpressure.
-		log.Printf("discovery: watcher event dropped (buffer full): type=%s path=%s", evt.Type, evt.Path)
+		w.logger.Warn("watcher event dropped (buffer full)",
+			zap.Stringer("type", evt.Type),
+			zap.String("path", evt.Path),
+		)
 	}
 }

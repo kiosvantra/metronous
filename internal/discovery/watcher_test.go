@@ -6,13 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/enduluc/metronous/internal/discovery"
 )
 
 func TestWatcherEmitsCreateWriteRemove(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := discovery.NewWatcher()
+	w, err := discovery.NewWatcher(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -46,7 +48,7 @@ func TestWatcherEmitsCreateWriteRemove(t *testing.T) {
 func TestWatcherDebouncesDuplicateWrites(t *testing.T) {
 	dir := t.TempDir()
 
-	w, err := discovery.NewWatcher()
+	w, err := discovery.NewWatcher(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}
@@ -90,7 +92,7 @@ func TestWatcherDebouncesDuplicateWrites(t *testing.T) {
 }
 
 func TestWatcherClose(t *testing.T) {
-	w, err := discovery.NewWatcher()
+	w, err := discovery.NewWatcher(zap.NewNop())
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}

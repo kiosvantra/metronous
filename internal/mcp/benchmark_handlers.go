@@ -29,14 +29,7 @@ func HandleReport(bs store.BenchmarkStore) ToolHandler {
 			}
 		}
 
-		var runs []store.BenchmarkRun
-		var err error
-
-		if agentID != "" {
-			runs, err = bs.GetRuns(ctx, agentID, 0)
-		} else {
-			runs, err = bs.GetRuns(ctx, "", 0)
-		}
+		runs, err := bs.GetRuns(ctx, agentID, 0)
 		if err != nil {
 			return nil, fmt.Errorf("query benchmark runs: %w", err)
 		}
@@ -73,14 +66,7 @@ func HandleModelChanges(bs store.BenchmarkStore) ToolHandler {
 	return func(ctx context.Context, req CallToolRequest) (*CallToolResult, error) {
 		agentID, _ := req.Arguments["agent_id"].(string)
 
-		var runs []store.BenchmarkRun
-		var err error
-
-		if agentID != "" {
-			runs, err = bs.GetRuns(ctx, agentID, 0)
-		} else {
-			runs, err = bs.GetRuns(ctx, "", 0)
-		}
+		runs, err := bs.GetRuns(ctx, agentID, 0)
 		if err != nil {
 			return nil, fmt.Errorf("query benchmark runs: %w", err)
 		}

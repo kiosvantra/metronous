@@ -27,6 +27,8 @@ type Scheduler struct {
 	runner     *runner.Runner
 	logger     *zap.Logger
 	windowDays int
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 // NewScheduler creates a Scheduler with the given runner and logger.
@@ -38,11 +40,14 @@ func NewScheduler(r *runner.Runner, windowDays int, logger *zap.Logger) *Schedul
 	if windowDays <= 0 {
 		windowDays = DefaultWindowDays
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		cron:       cron.New(cron.WithSeconds()),
 		runner:     r,
 		logger:     logger,
 		windowDays: windowDays,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -56,7 +61,7 @@ func (s *Scheduler) RegisterWeeklyJob(schedule string) (cron.EntryID, error) {
 			zap.Int("window_days", s.windowDays),
 		)
 
-		ctx := context.Background()
+		ctx := s.ctx
 		if err := s.runner.RunWeekly(ctx, s.windowDays); err != nil {
 			s.logger.Error("weekly benchmark run failed", zap.Error(err))
 		}
@@ -79,6 +84,7 @@ func (s *Scheduler) Start() {
 
 // Stop halts the cron scheduler, waiting for any running job to complete.
 func (s *Scheduler) Stop() context.Context {
+	s.cancel()
 	return s.cron.Stop()
 }
 

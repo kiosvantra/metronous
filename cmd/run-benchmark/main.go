@@ -21,11 +21,17 @@ import (
 func main() {
 	dataDir := os.Getenv("METRONOUS_DATA_DIR")
 	if dataDir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatal("cannot determine home directory:", err)
+		}
 		dataDir = filepath.Join(home, ".metronous", "data")
 	}
 
-	logger, _ := zap.NewDevelopment()
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		log.Fatal("failed to initialize logger:", err)
+	}
 
 	// Open stores
 	eventStore, err := sqlitestore.NewEventStore(filepath.Join(dataDir, "tracking.db"))

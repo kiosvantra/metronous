@@ -232,7 +232,7 @@ func runMCPShim(in io.Reader, out io.Writer) error {
 				Result: map[string]interface{}{
 					"protocolVersion": "2024-11-05",
 					"capabilities":    map[string]interface{}{"tools": map[string]interface{}{"listChanged": false}},
-					"serverInfo":      map[string]interface{}{"name": "metronous", "version": "0.1.0"},
+					"serverInfo":      map[string]interface{}{"name": "metronous", "version": "0.8.0"},
 				},
 			})
 
@@ -320,7 +320,8 @@ func shimForwardToolCall(baseURL string, rawParams json.RawMessage) (interface{}
 	}
 
 	var result interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	// Limit response body to 1MB to prevent memory exhaustion.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1024*1024)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode daemon response: %w", err)
 	}
 
