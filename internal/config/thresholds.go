@@ -34,6 +34,16 @@ type UrgentTriggers struct {
 	MaxCostSpikeMultiplier float64 `json:"max_cost_spike_multiplier"`
 }
 
+// ModelRecommendations defines the model names to recommend for different failure scenarios.
+type ModelRecommendations struct {
+	// AccuracyModel is the model to recommend for accuracy failures.
+	AccuracyModel string `json:"accuracy_model"`
+	// PerformanceModel is the model to recommend for latency or ROI failures.
+	PerformanceModel string `json:"performance_model"`
+	// DefaultModel is the fallback model recommendation.
+	DefaultModel string `json:"default_model"`
+}
+
 // AgentThresholds allows per-agent overrides of the default thresholds.
 // Only fields set to non-zero values override the defaults.
 type AgentThresholds struct {
@@ -64,6 +74,9 @@ type Thresholds struct {
 	// UrgentTriggers defines critical-failure thresholds.
 	UrgentTriggers UrgentTriggers `json:"urgent_triggers"`
 
+	// ModelRecommendations defines the model names to recommend for different failure scenarios.
+	ModelRecommendations ModelRecommendations `json:"model_recommendations"`
+
 	// PerAgent maps agent IDs to agent-specific threshold overrides.
 	PerAgent map[string]AgentThresholds `json:"per_agent,omitempty"`
 }
@@ -85,13 +98,30 @@ func DefaultThresholdValues() Thresholds {
 			MaxErrorRate:           0.30,
 			MaxCostSpikeMultiplier: 3.0,
 		},
+		ModelRecommendations: ModelRecommendations{
+			AccuracyModel:    "claude-opus-4-5",
+			PerformanceModel: "claude-haiku-4-5",
+			DefaultModel:     "claude-sonnet-4-5",
+		},
 		PerAgent: make(map[string]AgentThresholds),
 	}
+}
+
+// EffectiveModelRecommendations returns the model recommendations to apply.
+// Returns default values if not configured.
+func (t *Thresholds) EffectiveModelRecommendations() ModelRecommendations {
+	if t.ModelRecommendations.AccuracyModel == "" {
+		return DefaultThresholdValues().ModelRecommendations
+	}
+	return t.ModelRecommendations
 }
 
 // EffectiveThresholds returns the thresholds to apply for a given agent ID,
 // merging defaults with any per-agent overrides.
 func (t *Thresholds) EffectiveThresholds(agentID string) DefaultThresholds {
+	if t == nil {
+		return DefaultThresholds{}
+	}
 	effective := t.Defaults
 	override, ok := t.PerAgent[agentID]
 	if !ok {

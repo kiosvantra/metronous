@@ -32,7 +32,7 @@ func TestHotReloadUpdatesRegistry(t *testing.T) {
 	}
 
 	// Set up watcher + hot-reloader.
-	w, err := discovery.NewWatcher()
+	w, err := discovery.NewWatcher(zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}

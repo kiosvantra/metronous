@@ -2,9 +2,9 @@ package benchmark
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/enduluc/metronous/internal/store"
 )
@@ -69,7 +69,7 @@ func FetchEventsForWindow(ctx context.Context, es store.EventStore, agentID stri
 // If the event slice has fewer than MinSampleSize events, the returned
 // WindowMetrics will have SampleSize < MinSampleSize and the decision
 // engine should assign INSUFFICIENT_DATA.
-func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
+func AggregateMetrics(logger *zap.Logger, agentID string, events []store.Event) WindowMetrics {
 	m := WindowMetrics{
 		AgentID:    agentID,
 		SampleSize: len(events),
@@ -116,7 +116,12 @@ func AggregateMetrics(agentID string, events []store.Event) WindowMetrics {
 					sessionMaxCost[e.SessionID] = *e.CostUSD
 				}
 			} else if *e.CostUSD > 0 {
-				fmt.Fprintf(os.Stderr, "metronous/benchmark: dropping cost %.4f for agent %s — missing session_id\n", *e.CostUSD, agentID)
+				if logger != nil {
+					logger.Warn("dropping cost for event with missing session_id",
+						zap.Float64("cost_usd", *e.CostUSD),
+						zap.String("agent_id", agentID),
+					)
+				}
 			}
 		}
 

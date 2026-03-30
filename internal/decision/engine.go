@@ -40,14 +40,17 @@ func LoadThresholds(path string) (*config.Thresholds, error) {
 
 // Evaluate produces a Verdict for the given WindowMetrics using the engine's thresholds.
 // Per-agent overrides are applied automatically.
-func (e *DecisionEngine) Evaluate(_ context.Context, m benchmark.WindowMetrics) Verdict {
+// ctx is reserved for future use (e.g., timeout, cancellation).
+func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics) Verdict {
+	_ = ctx // reserved for future use
 	// Resolve effective thresholds (merges per-agent overrides).
 	effective := e.thresholds.EffectiveThresholds(m.AgentID)
 	urgent := e.thresholds.UrgentTriggers
+	models := e.thresholds.EffectiveModelRecommendations()
 
 	vt := EvaluateRules(m, effective, urgent)
 	reason := BuildReason(vt, m, effective, urgent)
-	recommended := recommendModel(vt, m, effective)
+	recommended := recommendModel(vt, m, effective, models)
 
 	return Verdict{
 		AgentID:          m.AgentID,
@@ -66,7 +69,7 @@ func (e *DecisionEngine) Evaluate(_ context.Context, m benchmark.WindowMetrics) 
 //   - Accuracy or error-rate failures → recommend a stronger/smarter model
 //   - Latency or cost failures        → recommend a faster/cheaper model
 //   - Both accuracy and latency fail  → accuracy takes precedence (correctness first)
-func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds) string {
+func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations) string {
 	if vt != store.VerdictSwitch && vt != store.VerdictUrgentSwitch {
 		return ""
 	}
@@ -77,16 +80,16 @@ func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds 
 
 	// Accuracy issues require a stronger model regardless of other failures.
 	if accuracyFailed {
-		return "claude-opus-4-5"
+		return models.AccuracyModel
 	}
 
 	// Latency or cost/ROI issues → cheaper, faster model.
 	if latencyFailed || roiFailed {
-		return "claude-haiku-4-5"
+		return models.PerformanceModel
 	}
 
 	// Fallback for other switch triggers (tool success rate, etc.).
-	return "claude-sonnet-4-5"
+	return models.DefaultModel
 }
 
 // EvaluateAll evaluates multiple agents' metrics, returning one Verdict per agent.

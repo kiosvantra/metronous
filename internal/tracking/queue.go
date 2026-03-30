@@ -40,12 +40,13 @@ var ErrQueueFull = errors.New("event queue is full: timeout exceeded")
 //	defer q.Stop()
 //	q.Enqueue(event)
 type EventQueue struct {
-	events  chan store.Event
-	store   store.EventStore
-	logger  *zap.Logger
-	wg      sync.WaitGroup
-	closed  atomic.Bool
-	timeout time.Duration
+	events        chan store.Event
+	store         store.EventStore
+	logger        *zap.Logger
+	wg            sync.WaitGroup
+	closed        atomic.Bool
+	timeout       time.Duration
+	droppedEvents atomic.Int64
 }
 
 // NewEventQueue creates a new EventQueue with the given buffer size.
@@ -99,10 +100,13 @@ func (q *EventQueue) Enqueue(event store.Event) error {
 		return ErrQueueClosed
 	}
 
+	timer := time.NewTimer(q.timeout)
+	defer timer.Stop()
+
 	select {
 	case q.events <- event:
 		return nil
-	case <-time.After(q.timeout):
+	case <-timer.C:
 		return ErrQueueFull
 	}
 }
@@ -115,6 +119,11 @@ func (q *EventQueue) Len() int {
 // Cap returns the total buffer capacity of the queue.
 func (q *EventQueue) Cap() int {
 	return cap(q.events)
+}
+
+// DroppedEvents returns the number of events that were dropped after max retries.
+func (q *EventQueue) DroppedEvents() int64 {
+	return q.droppedEvents.Load()
 }
 
 // MaxRetries is the maximum number of retry attempts before dropping an event
@@ -153,7 +162,7 @@ func (q *EventQueue) writer() {
 				zap.Int("retries", MaxRetries),
 				zap.Error(lastErr),
 			)
-			// Event dropped after max retries — consider implementing dead-letter queue
+			q.droppedEvents.Add(1)
 		}
 	}
 }

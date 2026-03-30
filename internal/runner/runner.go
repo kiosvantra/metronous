@@ -81,6 +81,7 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 
 	// Compute metrics and evaluate for each agent; collect results before saving.
 	var results []agentResult
+	var failedAgents []string
 	for _, agentID := range agents {
 		res, err := r.processAgent(ctx, agentID, start, end, windowDays)
 		if err != nil {
@@ -88,7 +89,7 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 				zap.String("agent_id", agentID),
 				zap.Error(err),
 			)
-			// Continue with other agents on error.
+			failedAgents = append(failedAgents, agentID)
 			continue
 		}
 		results = append(results, res)
@@ -124,7 +125,13 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 		}
 	}
 
-	r.logger.Info("weekly benchmark run complete", zap.Int("agents_processed", len(results)))
+	r.logger.Info("weekly benchmark run complete",
+		zap.Int("agents_processed", len(results)),
+		zap.Int("agents_failed", len(failedAgents)),
+	)
+	if len(failedAgents) > 0 {
+		r.logger.Warn("agents failed during processing", zap.Strings("failed_agent_ids", failedAgents))
+	}
 	return nil
 }
 
@@ -139,7 +146,7 @@ func (r *Runner) processAgent(ctx context.Context, agentID string, start, end ti
 	}
 
 	// 2. Aggregate metrics.
-	metrics := benchmark.AggregateMetrics(agentID, events)
+	metrics := benchmark.AggregateMetrics(r.logger, agentID, events)
 
 	// 3. Evaluate thresholds → verdict.
 	verdict := r.engine.Evaluate(ctx, metrics)

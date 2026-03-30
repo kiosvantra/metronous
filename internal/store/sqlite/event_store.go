@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -97,7 +96,13 @@ func (es *EventStore) InsertEvent(ctx context.Context, event store.Event) (strin
 		toolSuccessInt = &v
 	}
 
-	_, err := es.writeDB.ExecContext(ctx, q,
+	// Use a single transaction for both event insert and summary upsert to ensure consistency.
+	tx, txErr := es.writeDB.BeginTx(ctx, nil)
+	if txErr != nil {
+		return "", fmt.Errorf("start transaction: %w", txErr)
+	}
+
+	_, err := tx.ExecContext(ctx, q,
 		event.ID,
 		event.AgentID,
 		event.SessionID,
@@ -115,21 +120,38 @@ func (es *EventStore) InsertEvent(ctx context.Context, event store.Event) (strin
 		nullableString(metaJSON),
 	)
 	if err != nil {
+		_ = tx.Rollback()
 		return "", fmt.Errorf("insert event: %w", err)
 	}
 
-	// Update agent_summaries cache in the same transaction would require
-	// BEGIN/COMMIT — for simplicity we do a best-effort upsert separately.
-	if err := es.upsertAgentSummary(ctx, event); err != nil {
-		// Non-fatal: summary cache is best-effort, but log so it's not silent.
-		log.Printf("warn: upsertAgentSummary for agent %q: %v", event.AgentID, err)
+	if err := es.upsertAgentSummaryTx(ctx, tx, event); err != nil {
+		_ = tx.Rollback()
+		return "", fmt.Errorf("upsert agent summary: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit transaction: %w", err)
 	}
 
 	return event.ID, nil
 }
 
 // upsertAgentSummary maintains the materialized summary cache for an agent.
+// Deprecated: Use upsertAgentSummaryTx for transactional consistency.
 func (es *EventStore) upsertAgentSummary(ctx context.Context, event store.Event) error {
+	tx, err := es.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := es.upsertAgentSummaryTx(ctx, tx, event); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertAgentSummaryTx maintains the materialized summary cache for an agent using the provided transaction.
+func (es *EventStore) upsertAgentSummaryTx(ctx context.Context, tx *sql.Tx, event store.Event) error {
 	// The running average formula uses the OLD total_events value (before +1).
 	// In SQLite ON CONFLICT DO UPDATE SET, unqualified column references use
 	// the existing row's values (pre-update), not the new values being set.
@@ -159,7 +181,7 @@ func (es *EventStore) upsertAgentSummary(ctx context.Context, event store.Event)
 	}
 	now := time.Now().UTC().UnixMilli()
 
-	_, err := es.writeDB.ExecContext(ctx, q,
+	_, err := tx.ExecContext(ctx, q,
 		event.AgentID,
 		event.Timestamp.UTC().UnixMilli(),
 		costUSD,

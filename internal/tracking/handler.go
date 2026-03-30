@@ -100,6 +100,12 @@ func validateIngestRequest(args map[string]interface{}) (*IngestRequest, error) 
 			Message: "must be a valid RFC3339 / ISO 8601 timestamp (e.g. 2026-01-01T00:00:00Z)",
 		}
 	}
+	if ts.IsZero() {
+		return nil, &ValidationError{
+			Field:   "timestamp",
+			Message: "timestamp cannot be zero",
+		}
+	}
 	req.Timestamp = ts.UTC()
 
 	// --- Optional fields ---

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/enduluc/metronous/internal/benchmark"
 	"github.com/enduluc/metronous/internal/store"
 	sqlitestore "github.com/enduluc/metronous/internal/store/sqlite"
@@ -152,7 +154,7 @@ func TestAggregateMetricsBasic(t *testing.T) {
 		{AgentID: "agent-a", EventType: "error", Model: "claude-sonnet"},
 	}
 
-	m := benchmark.AggregateMetrics("agent-a", events)
+	m := benchmark.AggregateMetrics(zap.NewNop(), "agent-a", events)
 
 	if m.SampleSize != 3 {
 		t.Errorf("SampleSize: got %d, want 3", m.SampleSize)
@@ -204,7 +206,7 @@ func TestAggregateMetricsWithSession(t *testing.T) {
 		{AgentID: "agent-b", SessionID: "sess-2", EventType: "complete", Model: "claude-sonnet", DurationMs: &dur500},
 	}
 
-	m := benchmark.AggregateMetrics("agent-b", events)
+	m := benchmark.AggregateMetrics(zap.NewNop(), "agent-b", events)
 
 	// 2 distinct sessions.
 	if m.SessionCount != 2 {
@@ -227,7 +229,7 @@ func TestAggregateMetricsWithSession(t *testing.T) {
 
 // TestAggregateMetricsEmptyEvents handles no events gracefully.
 func TestAggregateMetricsEmptyEvents(t *testing.T) {
-	m := benchmark.AggregateMetrics("empty-agent", nil)
+	m := benchmark.AggregateMetrics(zap.NewNop(), "empty-agent", nil)
 
 	if m.SampleSize != 0 {
 		t.Errorf("SampleSize: got %d, want 0", m.SampleSize)
@@ -247,7 +249,7 @@ func TestInsufficientDataClassification(t *testing.T) {
 		events[i] = store.Event{AgentID: "small-agent", EventType: "complete", Model: "m"}
 	}
 
-	m := benchmark.AggregateMetrics("small-agent", events)
+	m := benchmark.AggregateMetrics(zap.NewNop(), "small-agent", events)
 
 	if m.SampleSize >= benchmark.MinSampleSize {
 		t.Errorf("expected SampleSize < %d, got %d", benchmark.MinSampleSize, m.SampleSize)
@@ -267,7 +269,7 @@ func TestAggregateMetricsMultiEventCostDeduplication(t *testing.T) {
 		{SessionID: "session-2", CostUSD: ptr(0.30), Model: "m"},
 		{SessionID: "session-2", CostUSD: ptr(0.80), Model: "m"},
 	}
-	m := benchmark.AggregateMetrics("test-agent", events)
+	m := benchmark.AggregateMetrics(zap.NewNop(), "test-agent", events)
 	if math.Abs(m.TotalCostUSD-1.30) > 0.001 {
 		t.Errorf("TotalCostUSD: got %f, want 1.30", m.TotalCostUSD)
 	}
