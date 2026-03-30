@@ -170,10 +170,14 @@ func downloadBinary(url, destPath string) error {
 
 	// Download to temp file
 	_, err = io.Copy(tmpFile, resp.Body)
-	tmpFile.Close()
 	if err != nil {
+		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("failed to download: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
 	// Make executable before rename
