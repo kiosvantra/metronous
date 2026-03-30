@@ -19,6 +19,9 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 
 ## Architecture
 
+> For component details and protocols, see [docs/architecture.md](docs/architecture.md).  
+> For benchmark methodology, see [docs/how-it-works.md](docs/how-it-works.md).
+
 ```
 OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service) → SQLite
                                                                         ↓
