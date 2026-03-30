@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -41,12 +43,26 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nMetronous has been updated to the latest version.")
 
-	// Show the new version
-	versionCmd := exec.Command("metronous", "version")
+	// Show the new version using full path from GOBIN to avoid stale cached binaries
+	gobin, err := exec.Command("go", "env", "GOBIN").Output()
+	binPath := ""
+	if err != nil || strings.TrimSpace(string(gobin)) == "" {
+		// Fallback to GOPATH/bin
+		gopath, err := exec.Command("go", "env", "GOPATH").Output()
+		if err != nil {
+			fmt.Println("Note: Run 'metronous version' in a new shell to see the updated version.")
+		} else {
+			binPath = filepath.Join(strings.TrimSpace(string(gopath)), "bin", "metronous")
+		}
+	} else {
+		binPath = filepath.Join(strings.TrimSpace(string(gobin)), "metronous")
+	}
+
+	versionCmd := exec.Command(binPath, "version")
 	versionCmd.Stdout = os.Stdout
 	versionCmd.Stderr = os.Stderr
 	if err := versionCmd.Run(); err != nil {
-		fmt.Printf("Warning: could not show new version: %v\n", err)
+		fmt.Printf("Note: Run 'metronous version' in a new shell to see the updated version.\n")
 	}
 
 	return nil
