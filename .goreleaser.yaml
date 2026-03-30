@@ -1,15 +1,9 @@
 project_name: metronous
 version: 1
-format: yaml
 archives:
-  - name: metronous
-    ids:
-      - metronous
+  - format: tar.gz
 checksum:
-  name: checksums.txt
-  type: sha256
-snapshot:
-  name_template: "{{ .Tag }}"
+  name_template: checksums.txt
 changelog:
   sort: asc
   filters:
