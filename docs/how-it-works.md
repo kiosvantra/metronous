@@ -1,6 +1,6 @@
 # How Metronous Works
 
-Metronous is a local telemetry, benchmarking, and model calibration system for AI agents built on top of the Gentle AI SDD (Spec-Driven Development) framework. Its goal is to help teams make data‑driven decisions about which language models to use for their agents, balancing accuracy, latency, tool usage, and cost.
+Metronous is a local telemetry, benchmarking, and model calibration system for OpenCode AI agents, with seamless integration for agents built following the SDD methodology. Its goal is to help teams make data‑driven decisions about which language models to use for their agents, balancing accuracy, latency, tool usage, and cost.
 
 This document explains the **methodology** behind Metronous: what data it collects, how it aggregates and scores models, and how it arrives at actionable SWITCH/KEEP verdicts.
 

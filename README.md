@@ -4,14 +4,16 @@
 
 # Metronous
 
-> Local AI agent telemetry, benchmarking, and model calibration for the [Gentle AI](https://github.com/Gentleman-Programming/gentle-ai) ecosystem.
+> Local AI agent telemetry, benchmarking, and model calibration for OpenCode agents.
+
+*Originally developed within the Gentle AI ecosystem.*
 
 Metronous tracks every tool call, session, and cost from your OpenCode agents — then runs weekly benchmarks to tell you which agents are underperforming and which model would save you money.
 
 ## What it does
 
 - **Tracks** agent sessions, tool calls, tokens, and cost in real-time
-- **Benchmarks** each SDD agent (sdd-orchestrator, sdd-apply, sdd-explore, etc.) against its mission
+- **Benchmarks** each agent with a defined mission against its performance criteria
 - **Recommends** model switches with estimated cost savings
 - **Visualizes** everything in a terminal dashboard (TUI)
 
@@ -32,7 +34,7 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service
 
 - [OpenCode](https://opencode.ai) with [OpenCode Zen](https://opencode.ai/docs/zen/) configured
 - Go 1.22+
-- The [Gentle AI](https://github.com/Gentleman-Programming/gentle-ai) SDD agent setup
+- OpenCode agents configured (e.g., from Gentle AI's SDD suite)
 
 ## Installation
 
@@ -121,7 +123,7 @@ All data lives in `~/.metronous/`:
 
 ## Agents tracked
 
-Metronous tracks all SDD agents defined in your `opencode.json`:
+Metronous automatically discovers and benchmarks any agent in your `opencode.json` that has a mission defined. Here's an example with the Gentle AI SDD agents:
 
 | Agent | Mission |
 |-------|---------|
