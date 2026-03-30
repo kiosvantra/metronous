@@ -1,28 +1,34 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
+
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/runner"
+	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
 // NewBenchmarkCommand creates the `metronous benchmark` cobra command.
 func NewBenchmarkCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "benchmark",
-		Short: "Run or manage benchmarks",
-		Long:  `Manage benchmark runs.`,
+		Short: "Benchmark commands",
+		Long:  `Run on-demand benchmarks and inspect agent performance.`,
 	}
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "run",
 		Short: "Run a benchmark immediately",
-		Long: `Runs a benchmark immediately using the current data.
+		Long: `Triggers an on-demand benchmark run using the last 7 days of data.
 
-This command triggers an on-demand benchmark run that analyzes
-recent agent performance and generates decisions.`,
+Analyzes agent performance, evaluates thresholds, and generates decisions.`,
 		RunE: runBenchmarkRun,
 	})
 
@@ -30,29 +36,84 @@ recent agent performance and generates decisions.`,
 }
 
 func runBenchmarkRun(cmd *cobra.Command, args []string) error {
-	// Use go run to execute the benchmark directly from source
-	runCmd := exec.Command("go", "run", "./cmd/run-benchmark")
-	runCmd.Stdout = os.Stdout
-	runCmd.Stderr = os.Stderr
-	runCmd.Dir = findProjectRoot()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
 
-	if err := runCmd.Run(); err != nil {
+	metronousHome := filepath.Join(home, ".metronous")
+
+	dataDir := os.Getenv("METRONOUS_DATA_DIR")
+	if dataDir == "" {
+		dataDir = filepath.Join(metronousHome, "data")
+	}
+
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		return fmt.Errorf("failed to initialize logger: %w", err)
+	}
+	defer logger.Sync()
+
+	eventStore, err := sqlitestore.NewEventStore(filepath.Join(dataDir, "tracking.db"))
+	if err != nil {
+		return fmt.Errorf("open event store: %w", err)
+	}
+	defer eventStore.Close()
+
+	benchmarkStore, err := sqlitestore.NewBenchmarkStore(filepath.Join(dataDir, "benchmark.db"))
+	if err != nil {
+		return fmt.Errorf("open benchmark store: %w", err)
+	}
+	defer benchmarkStore.Close()
+
+	// Thresholds live in ~/.metronous/ (not relative to dataDir)
+	thresholdsPath := filepath.Join(metronousHome, "thresholds.json")
+	thresholds, err := decision.LoadThresholds(thresholdsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load thresholds.json (%v), using defaults\n", err)
+		defaults := config.DefaultThresholdValues()
+		thresholds = &defaults
+	} else {
+		fmt.Printf("Thresholds loaded from: %s\n", thresholdsPath)
+	}
+
+	engine := decision.NewDecisionEngine(thresholds)
+	r := runner.NewRunner(eventStore, benchmarkStore, engine, dataDir, logger)
+
+	fmt.Println("Running benchmark...")
+	fmt.Printf("Data directory: %s\n\n", dataDir)
+
+	ctx := context.Background()
+	if err := r.RunWeekly(ctx, 7); err != nil {
 		return fmt.Errorf("benchmark run failed: %w", err)
 	}
 
-	return nil
-}
+	fmt.Println("\nBenchmark completed successfully!")
 
-func findProjectRoot() string {
-	// Try to find go.mod in current directory or parent
-	for i := 0; i < 5; i++ {
-		if _, err := os.Stat("go.mod"); err == nil {
-			cwd, _ := os.Getwd()
-			return cwd
-		}
-		os.Chdir("..")
+	runs, err := benchmarkStore.GetRuns(ctx, "", 5)
+	if err != nil {
+		return fmt.Errorf("get runs: %w", err)
 	}
-	// Fallback to current directory
-	cwd, _ := os.Getwd()
-	return cwd
+
+	fmt.Printf("\nLatest %d benchmark run(s):\n", len(runs))
+	fmt.Println("----------------------------------------------------------------------")
+	for i, run := range runs {
+		fmt.Printf("%d. Agent: %s\n", i+1, run.AgentID)
+		fmt.Printf("   Verdict: %s | Model: %s\n", run.Verdict, run.Model)
+		fmt.Printf("   Accuracy: %.2f | P95 Latency: %.0fms | Tool Success: %.2f\n",
+			run.Accuracy, run.P95LatencyMs, run.ToolSuccessRate)
+		fmt.Printf("   ROI Score: %.4f | Total Cost: $%.4f | Samples: %d\n",
+			run.ROIScore, run.TotalCostUSD, run.SampleSize)
+		fmt.Printf("   Reason: %s\n", run.DecisionReason)
+		if run.RecommendedModel != "" {
+			fmt.Printf("   Recommended Model: %s\n", run.RecommendedModel)
+		}
+		fmt.Println()
+	}
+
+	if len(runs) == 0 {
+		fmt.Println("No benchmark runs found.")
+	}
+
+	return nil
 }
