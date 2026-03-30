@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -34,9 +37,25 @@ jobs:
           FILENAME="metronous-${{ steps.version.outputs.VERSION }}-${GOOS}-${GOARCH}${EXT}"
           go build -ldflags "-X github.com/kiosvantra/metronous/cmd/metronous/commands.Version=${{ steps.version.outputs.VERSION }}" -o "$FILENAME" ./cmd/metronous
 
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: metronous-*
+          name: metronous-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: metronous-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
