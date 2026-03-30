@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -98,7 +99,12 @@ func TestServerCommandGracefulShutdown(t *testing.T) {
 }
 
 // TestServerCommandHandlesSignals verifies that a signal properly cancels a context.
+// On Windows, syscall.Kill is not available, so we use os.Process.Signal directly.
 func TestServerCommandHandlesSignals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal-based shutdown test requires Unix (syscall.Kill unavailable on Windows)")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -119,7 +125,11 @@ func TestServerCommandHandlesSignals(t *testing.T) {
 	// Send SIGINT to self after a short delay.
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+		proc, err := os.FindProcess(os.Getpid())
+		if err != nil {
+			return
+		}
+		_ = proc.Signal(syscall.SIGINT)
 	}()
 
 	// Wait for shutdown with timeout.
