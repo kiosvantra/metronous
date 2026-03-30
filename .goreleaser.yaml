@@ -1,0 +1,40 @@
+project_name: metronous
+version: 1
+format: yaml
+archives:
+  - name: metronous
+    ids:
+      - metronous
+checksum:
+  name: checksums.txt
+  type: sha256
+snapshot:
+  name_template: "{{ .Tag }}"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+release:
+  github:
+    owner: kiosvantra
+    name: metronous
+  draft: false
+  prerelease: auto
+builds:
+  - id: metronous
+    binary: metronous
+    main: ./cmd/metronous
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X github.com/kiosvantra/metronous/cmd/metronous/commands.Version={{ .Version }}

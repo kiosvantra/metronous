@@ -9,11 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        goos: [linux, darwin, windows]
-        goarch: [amd64, arm64]
+  goreleaser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,41 +17,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
+          goreleaser: true
 
-      - name: Get version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: |
-          EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          FILENAME="metronous-${{ steps.version.outputs.VERSION }}-${GOOS}-${GOARCH}${EXT}"
-          go build -ldflags "-X github.com/kiosvantra/metronous/cmd/metronous/commands.Version=${{ steps.version.outputs.VERSION }}" -o "$FILENAME" ./cmd/metronous
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v5
         with:
-          name: metronous-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: metronous-*
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
+          version: latest
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
