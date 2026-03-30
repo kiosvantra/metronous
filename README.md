@@ -35,7 +35,7 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service
 
 ## Prerequisites
 
-- [OpenCode](https://opencode.ai) with [OpenCode Zen](https://opencode.ai/docs/zen/) configured
+- [OpenCode](https://opencode.ai) installed and configured
 - Go 1.22+
 - OpenCode agents configured (e.g., from Gentle AI's SDD suite)
 
