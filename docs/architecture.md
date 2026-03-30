@@ -213,7 +213,7 @@ Daemon (internal timer)          Benchmark Engine          SQLite DBs           
 ## Closing Notes
 
 This architecture delivers:
-- **Zero‑friction installation** (`go install` + `metronous install` → running daemon + configured OpenCode).
+- **Zero‑friction installation** (`curl ... install.sh | sh` + `metronous install` → running daemon + configured OpenCode).
 - **True multi‑instance sharing**: all OpenCode instances (TUI, web, mobile) talk to the same daemon via the shim.
 - **Observability**: logs, SQLite files, and systemd status give full visibility into operation.
 - **Simplicity**: few moving parts, no external dependencies beyond Go and SQLite (already vendored).
