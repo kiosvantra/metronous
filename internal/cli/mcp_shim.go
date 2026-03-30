@@ -130,6 +130,10 @@ func ensureDaemonRunning() (int, error) {
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		if port, err := readShimPort(); err == nil {
+			if err := shimCheckHealth(port); err != nil {
+				// Port file exists but daemon not healthy; continue polling.
+				continue
+			}
 			return port, nil
 		}
 	}

@@ -60,9 +60,12 @@ func NewTrackingModel(es store.EventStore) TrackingModel {
 
 // Init returns the initial tick command to start auto-refresh.
 func (m TrackingModel) Init() tea.Cmd {
-	return tea.Tick(trackingRefreshInterval, func(t time.Time) tea.Msg {
-		return trackingTickMsg{t: t}
-	})
+	return tea.Batch(
+		tea.Tick(trackingRefreshInterval, func(t time.Time) tea.Msg {
+			return trackingTickMsg{t: t}
+		}),
+		m.fetchEvents(),
+	)
 }
 
 // Update handles tick and data messages.
