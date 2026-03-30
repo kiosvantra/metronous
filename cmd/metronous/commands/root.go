@@ -51,4 +51,5 @@ func init() {
 	rootCmd.AddCommand(cli.NewInstallCommand())
 	rootCmd.AddCommand(cli.NewMCPShimCommand())
 	rootCmd.AddCommand(cli.NewSelfUpdateCommand())
+	rootCmd.AddCommand(cli.NewBenchmarkCommand())
 }
