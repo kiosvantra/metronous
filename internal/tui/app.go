@@ -5,12 +5,22 @@ package tui
 
 import (
 	"fmt"
+	"net/http"
+	"os"
+	"os/exec"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kiosvantra/metronous/internal/store"
 )
+
+// UpdateCheckMsg is sent when the background update check completes.
+type UpdateCheckMsg struct {
+	Available     bool
+	LatestVersion string
+}
 
 // Tab identifies one of the three dashboard panels.
 type Tab int
@@ -67,18 +77,29 @@ type AppModel struct {
 
 	// StatusMsg is a transient message shown at the bottom of the screen.
 	StatusMsg string
+
+	// UpdateAvailable indicates a new version is available.
+	UpdateAvailable bool
+	// LatestVersion is the version string of the latest release.
+	LatestVersion string
+	// CurrentVersion is the currently running version.
+	CurrentVersion string
 }
 
 // NewAppModel creates an AppModel wired to the given stores/config path.
 // dataDir is the Metronous data directory (e.g. ~/.metronous/data); it is used
 // by the benchmark view to load model pricing from dataDir/../thresholds.json.
 // workDir is the current working directory used for project-level agent discovery.
-func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string, workDir string) AppModel {
+// version is the current application version for update checking.
+func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string, workDir string, version string) AppModel {
 	return AppModel{
-		CurrentTab: TabTracking,
-		tracking:   NewTrackingModel(es),
-		benchmark:  NewBenchmarkModel(bs, dataDir, workDir),
-		config:     NewConfigModel(configPath),
+		CurrentTab:      TabTracking,
+		tracking:        NewTrackingModel(es),
+		benchmark:       NewBenchmarkModel(bs, dataDir, workDir),
+		config:          NewConfigModel(configPath),
+		CurrentVersion:  version,
+		UpdateAvailable: false,
+		LatestVersion:   "",
 	}
 }
 
@@ -88,7 +109,54 @@ func (m AppModel) Init() tea.Cmd {
 		m.tracking.Init(),
 		m.benchmark.Init(),
 		m.config.Init(),
+		checkForUpdate,
 	)
+}
+
+// checkForUpdate fetches the latest version from GitHub and returns an UpdateCheckMsg.
+func checkForUpdate() tea.Msg {
+	cmd := exec.Command("git", "ls-remote", "--tags", "https://github.com/kiosvantra/metronous")
+	out, err := cmd.Output()
+	if err != nil {
+		return UpdateCheckMsg{Available: false, LatestVersion: ""}
+	}
+
+	tags := strings.Split(string(out), "\n")
+	var latest string
+	for _, tag := range tags {
+		parts := strings.Split(tag, "\t")
+		if len(parts) < 2 {
+			continue
+		}
+		ref := parts[1]
+		if strings.HasPrefix(ref, "refs/tags/v") && !strings.Contains(ref, "^{}") {
+			v := strings.TrimPrefix(ref, "refs/tags/v")
+			if latest == "" || v > latest {
+				latest = v
+			}
+		}
+	}
+
+	if latest == "" {
+		return UpdateCheckMsg{Available: false, LatestVersion: ""}
+	}
+
+	return UpdateCheckMsg{Available: true, LatestVersion: "v" + latest}
+}
+
+// httpGet is a simple HTTP GET wrapper for update checking.
+func httpGet(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	buf := make([]byte, 1024)
+	n, _ := resp.Body.Read(buf)
+	return buf[:n], nil
 }
 
 // Update handles all incoming messages and routes them to sub-models.
@@ -102,12 +170,43 @@ func (m AppModel) Init() tea.Cmd {
 // they are not active. Each sub-model already ignores messages it does not
 // understand via the default case in its own Update switch.
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle update check result
+	if um, ok := msg.(UpdateCheckMsg); ok {
+		m.UpdateAvailable = um.Available
+		m.LatestVersion = um.LatestVersion
+		return m, nil
+	}
+
 	// Handle app-level key events first (tab switching, quit, and
 	// tab-specific shortcuts like ctrl+s / ctrl+r).
 	if key, ok := msg.(tea.KeyMsg); ok {
 		switch key.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
+		case "u":
+			// Only allow update if update is available
+			if !m.UpdateAvailable {
+				return m, nil
+			}
+			// Use absolute path to avoid PATH issues
+			exePath, err := os.Executable()
+			if err != nil {
+				m.StatusMsg = "Error: could not find executable"
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				updateCmd := exec.Command(exePath, "self-update")
+				updateCmd.Stdout = os.Stdout
+				updateCmd.Stderr = os.Stderr
+				err := updateCmd.Run()
+				if err != nil {
+					m.StatusMsg = "Update failed: " + err.Error()
+				} else {
+					m.StatusMsg = "Update complete! Restart to use new version."
+				}
+				return nil
+			}
 
 		case "1":
 			m.CurrentTab = TabTracking
@@ -197,10 +296,24 @@ func (m AppModel) View() string {
 		content = m.config.View()
 	}
 
-	// Status bar.
-	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
+	// Update banner
+	var banner string
+	if m.UpdateAvailable {
+		bannerStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("yellow")).
+			Bold(true)
+		banner = bannerStyle.Render(fmt.Sprintf("Update available: %s (current: %s). Press 'u' to update.",
+			m.LatestVersion, m.CurrentVersion))
+		banner += "\n"
+	}
 
-	return fmt.Sprintf("%s\n%s\n%s", tabBar, content, hint)
+	// Status bar - show "u: update" only if update is available
+	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
+	if m.UpdateAvailable {
+		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
+	}
+
+	return fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
 }
 
 // renderTabBar returns the rendered tab bar string.

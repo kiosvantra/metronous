@@ -23,7 +23,7 @@ func sendSpecialKey(m tea.Model, keyType tea.KeyType) (tea.Model, tea.Cmd) {
 
 func newTestApp(t *testing.T) tui.AppModel {
 	t.Helper()
-	return tui.NewAppModel(nil, nil, "", "", "")
+	return tui.NewAppModel(nil, nil, "", "", "", "test")
 }
 
 // ----- Task 26: App shell tests -----------------------------------------------

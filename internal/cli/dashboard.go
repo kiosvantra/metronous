@@ -98,7 +98,11 @@ func runDashboard(dataDir, configPath string) error {
 	}()
 
 	workDir, _ := os.Getwd()
-	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir)
+	version := os.Getenv("METRONOUS_VERSION")
+	if version == "" {
+		version = "unknown"
+	}
+	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir, version)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
