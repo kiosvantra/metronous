@@ -196,9 +196,7 @@ func downloadBinary(url, destPath string) error {
 		}
 		defer src.Close()
 
-		// Remove old binary if exists
-		os.Remove(destPath)
-
+		// os.Create truncates existing file, no need to remove first
 		dst, err := os.Create(destPath)
 		if err != nil {
 			os.Remove(tmpPath)
