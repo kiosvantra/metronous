@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"go.uber.org/zap"
 
@@ -62,12 +63,21 @@ func main() {
 	// Create runner
 	r := runner.NewRunner(eventStore, benchmarkStore, engine, dataDir, logger)
 
-	// Run benchmark with 7-day window
+	// Run benchmark with configurable window (default 7 days)
+	windowDays := 7
+	if envWindow := os.Getenv("METRONOUS_WINDOW_DAYS"); envWindow != "" {
+		if parsed, err := strconv.Atoi(envWindow); err == nil && parsed > 0 {
+			windowDays = parsed
+		} else {
+			log.Printf("⚠️  Invalid METRONOUS_WINDOW_DAYS=%q, falling back to default %d days", envWindow, windowDays)
+		}
+	}
+
 	ctx := context.Background()
-	fmt.Println("🚀 Running manual benchmark with real data...")
+	fmt.Printf("🚀 Running benchmark (%d-day window)...\n", windowDays)
 	fmt.Printf("📁 Data directory: %s\n\n", dataDir)
 
-	if err := r.RunWeekly(ctx, 7); err != nil {
+	if err := r.RunWeekly(ctx, windowDays); err != nil {
 		log.Fatal("❌ Benchmark run failed:", err)
 	}
 
