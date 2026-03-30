@@ -44,9 +44,15 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (systemd service
 ### Zero-friction (recommended)
 
 ```bash
-go install github.com/kiosvantra/metronous/cmd/metronous@latest
+curl -fsSL https://raw.githubusercontent.com/kiosvantra/metronous/main/install.sh | sh
 metronous install
 # Done — daemon running as systemd user service, OpenCode configured to use ["metronous", "mcp"]
+```
+
+### Via Go (alternative)
+
+```bash
+go install github.com/kiosvantra/metronous/cmd/metronous@latest
 ```
 
 ### Manual installation (alternative)
