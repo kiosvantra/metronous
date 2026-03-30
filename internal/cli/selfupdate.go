@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -57,11 +59,6 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to download update: %w", err)
 	}
 
-	// Make executable
-	if err := os.Chmod(installPath, 0755); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
-	}
-
 	fmt.Printf("\nMetronous has been updated to %s.\n", version)
 	return nil
 }
@@ -75,7 +72,7 @@ func getLatestVersion() (string, error) {
 	}
 
 	tags := strings.Split(string(out), "\n")
-	var latest string
+	var versions []string
 	for _, tag := range tags {
 		parts := strings.Split(tag, "\t")
 		if len(parts) < 2 {
@@ -84,76 +81,134 @@ func getLatestVersion() (string, error) {
 		ref := parts[1]
 		if strings.HasPrefix(ref, "refs/tags/v") && !strings.Contains(ref, "^{}") {
 			v := strings.TrimPrefix(ref, "refs/tags/v")
-			if latest == "" || v > latest {
-				latest = v
+			// Filter out pre-release versions
+			if !strings.Contains(v, "-") {
+				versions = append(versions, v)
 			}
 		}
 	}
 
-	if latest == "" {
-		return "", fmt.Errorf("no tags found")
+	if len(versions) == 0 {
+		return "", fmt.Errorf("no stable tags found")
 	}
-	return "v" + latest, nil
+
+	// Sort by semantic version
+	sort.Slice(versions, func(i, j int) bool {
+		return sortVersion(versions[i], versions[j]) < 0
+	})
+
+	return "v" + versions[len(versions)-1], nil
+}
+
+// sortVersion compares two semantic version strings.
+// Returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2
+func sortVersion(v1, v2 string) int {
+	v1Parts := strings.Split(strings.TrimPrefix(v1, "v"), ".")
+	v2Parts := strings.Split(strings.TrimPrefix(v2, "v"), ".")
+
+	for i := 0; i < len(v1Parts) && i < len(v2Parts); i++ {
+		n1 := 0
+		n2 := 0
+		fmt.Sscanf(v1Parts[i], "%d", &n1)
+		fmt.Sscanf(v2Parts[i], "%d", &n2)
+		if n1 < n2 {
+			return -1
+		}
+		if n1 > n2 {
+			return 1
+		}
+	}
+
+	if len(v1Parts) < len(v2Parts) {
+		return -1
+	}
+	if len(v1Parts) > len(v2Parts) {
+		return 1
+	}
+	return 0
 }
 
 func getInstallPath() (string, error) {
 	gobin, err := exec.Command("go", "env", "GOBIN").Output()
+	path := ""
 	if err != nil || strings.TrimSpace(string(gobin)) == "" {
 		gopath, err := exec.Command("go", "env", "GOPATH").Output()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(strings.TrimSpace(string(gopath)), "bin", "metronous"), nil
+		path = strings.TrimSpace(string(gopath))
+	} else {
+		path = strings.TrimSpace(string(gobin))
 	}
-	return filepath.Join(strings.TrimSpace(string(gobin)), "metronous"), nil
+
+	binName := "metronous"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+
+	return filepath.Join(path, "bin", binName), nil
 }
 
 func downloadBinary(url, destPath string) error {
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
+		return fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
 	}
 
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "metronous-*")
+	// Create temp file in same directory as destination for atomic rename
+	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "metronous-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
 
 	// Download to temp file
-	out, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	_, err = io.Copy(tmpFile, resp.Body)
+	tmpFile.Close()
 	if err != nil {
-		return fmt.Errorf("failed to open temp file: %w", err)
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to download: %w", err)
 	}
 
-	_, err = io.Copy(out, resp.Body)
-	out.Close()
-	if err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	// Make executable before rename
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
-	// Replace existing binary
+	// Replace existing binary (atomic on same filesystem)
 	if err := os.Rename(tmpPath, destPath); err != nil {
-		// Cross-volume rename failed, copy instead
-		if src, err := os.Open(tmpPath); err != nil {
-			return err
-		} else {
-			defer src.Close()
-			dst, err := os.Create(destPath)
-			if err != nil {
-				return err
-			}
-			defer dst.Close()
-			io.Copy(dst, src)
+		// Rename failed (cross-volume), copy instead
+		src, err := os.Open(tmpPath)
+		if err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to open temp file: %w", err)
 		}
+		defer src.Close()
+
+		// Remove old binary if exists
+		os.Remove(destPath)
+
+		dst, err := os.Create(destPath)
+		if err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to create dest file: %w", err)
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, src); err != nil {
+			os.Remove(tmpPath)
+			return fmt.Errorf("failed to copy binary: %w", err)
+		}
+
+		os.Chmod(destPath, 0755)
+		os.Remove(tmpPath)
 	}
 
 	return nil
