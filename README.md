@@ -52,7 +52,7 @@ metronous install
 ### Manual installation (alternative)
 
 ```bash
-git clone https://github.com/Gentleman-Programming/metronous
+git clone https://github.com/kiosvantra/metronous
 cd metronous
 go build -o metronous ./cmd/metronous
 # Add the binary to your PATH or use the full path below
