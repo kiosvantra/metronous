@@ -15,7 +15,7 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 - **Tracks** agent sessions, tool calls, tokens, and cost in real-time
 - **Benchmarks** each agent with a defined mission against its performance criteria
 - **Recommends** model switches with estimated cost savings
-- **Visualizes** everything in a terminal dashboard (TUI)
+- **Visualizes** everything in a terminal dashboard (TUI) or browser dashboard (web)
 
 ## Architecture
 
@@ -25,7 +25,8 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 ```
 OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service) → SQLite
                                                                         ↓
-                                                              ./metronous dashboard
+                                                              ./metronous dashboard  (TUI)
+                                                              ./metronous web        (Browser → localhost:9100)
 ```
 
 - **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
@@ -124,6 +125,28 @@ metronous dashboard
 - **[4] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
 
 For TUI navigation keys, see [docs/tui-controls.md](docs/tui-controls.md).
+
+### Web Dashboard (browser-based)
+
+```bash
+metronous web
+# Dashboard available at http://localhost:9100
+```
+
+Opens a browser-based dashboard at `http://localhost:9100` with:
+
+- **Benchmark** — Agent performance with per-model scores, verdicts, and model comparison
+- **Tracking** — Real-time session stream with expandable event details
+
+Options:
+```bash
+metronous web --port 8080          # Custom port
+metronous web --data-dir /path/to  # Custom data directory
+```
+
+> The web dashboard is an alternative to the terminal dashboard (`metronous dashboard`). It works better on Windows where terminal rendering can be inconsistent.
+
+Language: Switch between English and Spanish using the EN/ES toggle in the header.
 
 ### Manual benchmark
 
