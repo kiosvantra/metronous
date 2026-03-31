@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	metronous "github.com/kiosvantra/metronous"
@@ -147,15 +146,36 @@ func TestPatchOpencodeJSONAppDataFirst(t *testing.T) {
 
 func TestPatchOpencodeJSONMissing(t *testing.T) {
 	tmpHome := t.TempDir()
-	// Ensure APPDATA also points to a temp dir without opencode.json.
-	t.Setenv("APPDATA", t.TempDir())
+	tmpAppData := t.TempDir()
+	t.Setenv("APPDATA", tmpAppData)
+	binaryPath := `C:\Tools\metronous.exe`
 
-	err := patchOpencodeJSON(tmpHome, `C:\\Tools\\metronous.exe`)
-	if err == nil {
-		t.Fatal("expected error when opencode.json is missing")
+	// opencode.json does not exist — should be created automatically.
+	if err := patchOpencodeJSON(tmpHome, binaryPath); err != nil {
+		t.Fatalf("patchOpencodeJSON should create opencode.json if missing, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("unexpected error: %v", err)
+
+	// resolveOpenCodeRoot falls back to userHome\.config\opencode since no opencode.json in APPDATA.
+	configPath := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("opencode.json not created: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("created opencode.json is invalid JSON: %v", err)
+	}
+	mcp, ok := cfg["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatal("mcp key missing")
+	}
+	entry, ok := mcp["metronous"].(map[string]interface{})
+	if !ok {
+		t.Fatal("mcp.metronous missing")
+	}
+	cmd, _ := entry["command"].([]interface{})
+	if len(cmd) != 2 || cmd[0] != binaryPath || cmd[1] != "mcp" {
+		t.Errorf("unexpected command: %v", cmd)
 	}
 }
 
