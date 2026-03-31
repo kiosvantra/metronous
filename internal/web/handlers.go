@@ -3,8 +3,10 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/kiosvantra/metronous/internal/benchmark"
@@ -41,20 +43,24 @@ func typePriority(t string) int {
 
 // overviewItem is the JSON shape for a single row in /api/overview.
 type overviewItem struct {
-	AgentID         string  `json:"agent_id"`
-	Model           string  `json:"model"`
-	Type            string  `json:"type"`
-	CompositeScore  float64 `json:"composite_score"`
-	Accuracy        float64 `json:"accuracy"`
-	P95LatencyMs    float64 `json:"p95_latency_ms"`
-	ToolSuccessRate float64 `json:"tool_success_rate"`
-	ROIScore        float64 `json:"roi_score"`
-	TotalCostUSD    float64 `json:"total_cost_usd"`
-	SampleSize      int     `json:"sample_size"`
-	Verdict         string  `json:"verdict"`
-	RecommendedModel string `json:"recommended_model"`
-	DecisionReason  string  `json:"decision_reason"`
-	RunAt           int64   `json:"run_at"`
+	AgentID          string   `json:"agent_id"`
+	Model            string   `json:"model"`
+	Type             string   `json:"type"`
+	CompositeScore   float64  `json:"composite_score"`
+	Accuracy         float64  `json:"accuracy"`
+	P95LatencyMs     float64  `json:"p95_latency_ms"`
+	ToolSuccessRate  float64  `json:"tool_success_rate"`
+	ROIScore         float64  `json:"roi_score"`
+	TotalCostUSD     float64  `json:"total_cost_usd"`
+	SampleSize       int      `json:"sample_size"`
+	Verdict          string   `json:"verdict"`
+	RecommendedModel string   `json:"recommended_model"`
+	DecisionReason   string   `json:"decision_reason"`
+	RunAt            int64    `json:"run_at"`
+	Context          string   `json:"context"`
+	Recommendation   string   `json:"recommendation"`
+	TrendVerdicts    []string `json:"trend_verdicts"`
+	TrendDirection   string   `json:"trend_direction"`
 }
 
 // handleOverview returns all latest runs per (agent, model), sorted by type
@@ -88,6 +94,7 @@ func handleOverview(bs store.BenchmarkStore, workDir string) http.HandlerFunc {
 			if !ok {
 				agentType = "primary"
 			}
+			trendVerdicts, _ := bs.GetVerdictTrendByModel(ctx, agentID, model, 8)
 			items = append(items, overviewItem{
 				AgentID:          run.AgentID,
 				Model:            run.Model,
@@ -103,6 +110,10 @@ func handleOverview(bs store.BenchmarkStore, workDir string) http.HandlerFunc {
 				RecommendedModel: run.RecommendedModel,
 				DecisionReason:   run.DecisionReason,
 				RunAt:            run.RunAt.UnixMilli(),
+				Context:          evaluateAgentContext(*run),
+				Recommendation:   verdictRecommendation(*run),
+				TrendVerdicts:    trendVerdicts,
+				TrendDirection:   trendDirection(trendVerdicts),
 			})
 		}
 
@@ -133,6 +144,9 @@ type rankItem struct {
 	Cost            float64 `json:"cost"`
 	Samples         int     `json:"samples"`
 	Label           string  `json:"label"`
+	ROIScore        float64 `json:"roi_score"`
+	Context         string  `json:"context"`
+	Recommendation  string  `json:"recommendation"`
 }
 
 // comparisonBlock is the pairwise comparison section.
@@ -208,16 +222,19 @@ func handleCompare(bs store.BenchmarkStore, workDir string) http.HandlerFunc {
 		ranking := make([]rankItem, len(runs))
 		for i, run := range runs {
 			ranking[i] = rankItem{
-				Rank:            i + 1,
-				Model:           run.Model,
-				Score:           run.CompositeScore,
-				Verdict:         string(run.Verdict),
-				Accuracy:        run.Accuracy,
-				P95LatencyMs:    run.P95LatencyMs,
+				Rank:           i + 1,
+				Model:          run.Model,
+				Score:          run.CompositeScore,
+				Verdict:        string(run.Verdict),
+				Accuracy:       run.Accuracy,
+				P95LatencyMs:   run.P95LatencyMs,
 				ToolSuccessRate: run.ToolSuccessRate,
-				Cost:            run.TotalCostUSD,
-				Samples:         run.SampleSize,
-				Label:           rankLabel(i+1, run.Verdict),
+				Cost:           run.TotalCostUSD,
+				Samples:        run.SampleSize,
+				Label:          rankLabel(i+1, run.Verdict),
+				ROIScore:       run.ROIScore,
+				Context:        evaluateAgentContext(run),
+				Recommendation: verdictRecommendation(run),
 			}
 		}
 
@@ -241,6 +258,287 @@ func handleCompare(bs store.BenchmarkStore, workDir string) http.HandlerFunc {
 		}
 
 		writeJSON(w, resp)
+	}
+}
+
+// evaluateAgentContext returns a qualitative assessment based on the agent's role and metrics.
+func evaluateAgentContext(run store.BenchmarkRun) string {
+	switch run.AgentID {
+	case "sdd-orchestrator":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Coordinating effectively — delegations succeeding at expected rate"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some delegation failures detected — may be attempting inline work"
+		}
+		return "High failure rate — orchestrator may be bypassing delegation pattern"
+	case "sdd-apply":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Implementations landing correctly — code changes applied successfully"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some implementation failures — review task definitions for clarity"
+		}
+		return "High implementation failure rate — task definitions may be incomplete"
+	case "sdd-explore":
+		if run.SampleSize >= 50 && run.ToolSuccessRate >= 0.9 {
+			return "Deep exploration with high read success — investigations thorough"
+		} else if run.ToolSuccessRate >= 0.8 {
+			return "Adequate exploration — consider deeper codebase analysis"
+		}
+		return "Shallow exploration detected — may be missing critical context"
+	case "sdd-verify":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Validation passing — spec compliance checks executing correctly"
+		} else if run.ToolSuccessRate >= 0.7 {
+			return "Some validation failures — specs may need clarification"
+		}
+		return "Validation failing frequently — implementation may not match specs"
+	case "sdd-spec":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Spec writing succeeding — requirements captured correctly"
+		}
+		return "Spec generation issues — proposal inputs may be incomplete"
+	case "sdd-design":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Design artifacts generated successfully"
+		}
+		return "Design generation issues — proposal may need more detail"
+	case "sdd-propose":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Proposals being created from explorations correctly"
+		}
+		return "Proposal failures — exploration output may be insufficient"
+	case "sdd-tasks":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Task breakdown succeeding — specs and designs well-structured"
+		}
+		return "Task breakdown failures — specs may be ambiguous"
+	case "sdd-init":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Bootstrap executing correctly"
+		}
+		return "Bootstrap failures — check project configuration"
+	case "sdd-archive":
+		if run.ToolSuccessRate >= 0.9 {
+			return "Archiving completing correctly"
+		}
+		return "Archive failures — verify change artifacts are complete"
+	default:
+		if run.ToolSuccessRate >= 0.9 {
+			return "Agent performing within normal parameters"
+		}
+		return "Performance below expected thresholds for this agent role"
+	}
+}
+
+// verdictRecommendation returns a verdict-specific recommendation sentence.
+func verdictRecommendation(run store.BenchmarkRun) string {
+	switch run.Verdict {
+	case store.VerdictKeep:
+		return "This agent+model combination is performing well. No action needed."
+	case store.VerdictSwitch:
+		if run.RecommendedModel != "" {
+			return fmt.Sprintf("Consider switching to %s for better performance.", run.RecommendedModel)
+		}
+		return "Performance degradation detected. Consider evaluating alternative models."
+	case store.VerdictUrgentSwitch:
+		if run.RecommendedModel != "" {
+			return fmt.Sprintf("Urgent: switch to %s immediately — critical thresholds breached.", run.RecommendedModel)
+		}
+		return "Urgent: critical performance thresholds breached. Immediate action required."
+	case store.VerdictInsufficientData:
+		return fmt.Sprintf("Not enough data yet (%d/%d samples). Keep using to gather more.", run.SampleSize, 50)
+	default:
+		return ""
+	}
+}
+
+// trendDirection computes trend direction from verdict history.
+func trendDirection(verdicts []string) string {
+	if len(verdicts) < 2 {
+		return "stable"
+	}
+	var first, last string
+	for _, v := range verdicts {
+		if v != "INSUFFICIENT_DATA" {
+			if first == "" {
+				first = v
+			}
+			last = v
+		}
+	}
+	if first == "" || last == "" {
+		return "stable"
+	}
+	firstSev := verdictSeverity(first)
+	lastSev := verdictSeverity(last)
+	if lastSev < firstSev {
+		return "improving"
+	}
+	if lastSev > firstSev {
+		return "degrading"
+	}
+	return "stable"
+}
+
+// verdictSeverity maps a verdict string to a numeric severity for trend comparison.
+func verdictSeverity(v string) int {
+	switch v {
+	case "KEEP":
+		return 0
+	case "INSUFFICIENT_DATA":
+		return 1
+	case "SWITCH":
+		return 2
+	case "URGENT_SWITCH":
+		return 3
+	default:
+		return 1
+	}
+}
+
+// sessionItem is the JSON shape for a single row in /api/sessions.
+type sessionItem struct {
+	SessionID        string   `json:"session_id"`
+	AgentID          string   `json:"agent_id"`
+	Model            string   `json:"model"`
+	Timestamp        int64    `json:"timestamp"`
+	PromptTokens     *int     `json:"prompt_tokens"`
+	CompletionTokens *int     `json:"completion_tokens"`
+	CostUSD          *float64 `json:"cost_usd"`
+}
+
+// sessionsResponse is the full /api/sessions response shape.
+type sessionsResponse struct {
+	Sessions []sessionItem `json:"sessions"`
+	Total    int           `json:"total"`
+	Offset   int           `json:"offset"`
+	Limit    int           `json:"limit"`
+}
+
+// handleSessions returns a paginated list of session summaries.
+func handleSessions(es store.EventStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if es == nil {
+			writeJSON(w, sessionsResponse{Sessions: []sessionItem{}, Total: 0, Offset: 0, Limit: 20})
+			return
+		}
+
+		q := r.URL.Query()
+
+		offset := 0
+		if s := q.Get("offset"); s != "" {
+			if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+				offset = v
+			}
+		}
+
+		limit := 20
+		if s := q.Get("limit"); s != "" {
+			if v, err := strconv.Atoi(s); err == nil && v > 0 {
+				if v > 100 {
+					v = 100
+				}
+				limit = v
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		sessions, err := es.QuerySessions(ctx, store.SessionQuery{Limit: limit, Offset: offset})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "query sessions: "+err.Error())
+			return
+		}
+
+		total, err := es.CountEvents(ctx, store.EventQuery{})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "count events: "+err.Error())
+			return
+		}
+
+		items := make([]sessionItem, len(sessions))
+		for i, s := range sessions {
+			items[i] = sessionItem{
+				SessionID:        s.SessionID,
+				AgentID:          s.AgentID,
+				Model:            s.Model,
+				Timestamp:        s.Timestamp.UnixMilli(),
+				PromptTokens:     s.PromptTokens,
+				CompletionTokens: s.CompletionTokens,
+				CostUSD:          s.CostUSD,
+			}
+		}
+
+		writeJSON(w, sessionsResponse{
+			Sessions: items,
+			Total:    total,
+			Offset:   offset,
+			Limit:    limit,
+		})
+	}
+}
+
+// eventItem is the JSON shape for a single event in /api/sessions/events.
+type eventItem struct {
+	ID               string   `json:"id"`
+	AgentID          string   `json:"agent_id"`
+	SessionID        string   `json:"session_id"`
+	EventType        string   `json:"event_type"`
+	Model            string   `json:"model"`
+	Timestamp        int64    `json:"timestamp"`
+	DurationMs       *int     `json:"duration_ms"`
+	PromptTokens     *int     `json:"prompt_tokens"`
+	CompletionTokens *int     `json:"completion_tokens"`
+	CostUSD          *float64 `json:"cost_usd"`
+	QualityScore     *float64 `json:"quality_score"`
+	ToolName         *string  `json:"tool_name"`
+	ToolSuccess      *bool    `json:"tool_success"`
+}
+
+// handleSessionEvents returns all events for a given session_id.
+func handleSessionEvents(es store.EventStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			writeError(w, http.StatusBadRequest, "missing required query param: session_id")
+			return
+		}
+
+		if es == nil {
+			writeJSON(w, []eventItem{})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		events, err := es.GetSessionEvents(ctx, sessionID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "get session events: "+err.Error())
+			return
+		}
+
+		items := make([]eventItem, len(events))
+		for i, e := range events {
+			items[i] = eventItem{
+				ID:               e.ID,
+				AgentID:          e.AgentID,
+				SessionID:        e.SessionID,
+				EventType:        e.EventType,
+				Model:            e.Model,
+				Timestamp:        e.Timestamp.UnixMilli(),
+				DurationMs:       e.DurationMs,
+				PromptTokens:     e.PromptTokens,
+				CompletionTokens: e.CompletionTokens,
+				CostUSD:          e.CostUSD,
+				QualityScore:     e.QualityScore,
+				ToolName:         e.ToolName,
+				ToolSuccess:      e.ToolSuccess,
+			}
+		}
+
+		writeJSON(w, items)
 	}
 }
 

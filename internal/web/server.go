@@ -23,7 +23,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 }
 
 // StartServer registers all routes and blocks on ListenAndServe.
-func StartServer(bs store.BenchmarkStore, workDir string, port int) error {
+func StartServer(bs store.BenchmarkStore, es store.EventStore, workDir string, port int) error {
 	mux := http.NewServeMux()
 
 	// Serve embedded index.html at root.
@@ -37,6 +37,10 @@ func StartServer(bs store.BenchmarkStore, workDir string, port int) error {
 	mux.HandleFunc("GET /api/overview", handleOverview(bs, workDir))
 	mux.HandleFunc("GET /api/compare", handleCompare(bs, workDir))
 	mux.HandleFunc("GET /api/trend", handleTrend(bs))
+
+	// Tracking routes.
+	mux.Handle("GET /api/sessions", corsMiddleware(handleSessions(es)))
+	mux.Handle("GET /api/sessions/events", corsMiddleware(handleSessionEvents(es)))
 
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Dashboard available at http://localhost%s\n", addr)

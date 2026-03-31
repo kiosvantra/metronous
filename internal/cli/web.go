@@ -53,6 +53,17 @@ func runWeb(dataDir string, port int) error {
 		}
 	}()
 
+	trackingDBPath := filepath.Join(dataDir, "tracking.db")
+	es, err := sqlite.NewEventStore(trackingDBPath)
+	if err != nil {
+		return fmt.Errorf("open event store: %w", err)
+	}
+	defer func() {
+		if cerr := es.Close(); cerr != nil {
+			logger.Error("close event store", zap.Error(cerr))
+		}
+	}()
+
 	workDir, _ := os.Getwd()
-	return web.StartServer(bs, workDir, port)
+	return web.StartServer(bs, es, workDir, port)
 }
