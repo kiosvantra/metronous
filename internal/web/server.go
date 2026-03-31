@@ -23,15 +23,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// StartServer registers all routes and blocks on ListenAndServe.
+// NewHandler builds the dashboard HTTP handler without starting a listener.
+// Use this to embed the dashboard into another server (e.g. the daemon).
 // The runner parameter is optional — pass nil to disable on-demand benchmark runs.
-func StartServer(bs store.BenchmarkStore, es store.EventStore, r *runner.Runner, workDir string, port int) error {
+func NewHandler(bs store.BenchmarkStore, es store.EventStore, r *runner.Runner, workDir string) (http.Handler, error) {
 	mux := http.NewServeMux()
 
 	// Serve embedded index.html at root.
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		return fmt.Errorf("embed sub-fs: %w", err)
+		return nil, fmt.Errorf("embed sub-fs: %w", err)
 	}
 	mux.Handle("GET /", http.FileServer(http.FS(sub)))
 
@@ -47,8 +48,19 @@ func StartServer(bs store.BenchmarkStore, es store.EventStore, r *runner.Runner,
 	mux.Handle("GET /api/sessions", corsMiddleware(handleSessions(es)))
 	mux.Handle("GET /api/sessions/events", corsMiddleware(handleSessionEvents(es)))
 
+	return corsMiddleware(mux), nil
+}
+
+// StartServer registers all routes and blocks on ListenAndServe.
+// The runner parameter is optional — pass nil to disable on-demand benchmark runs.
+func StartServer(bs store.BenchmarkStore, es store.EventStore, r *runner.Runner, workDir string, port int) error {
+	handler, err := NewHandler(bs, es, r, workDir)
+	if err != nil {
+		return err
+	}
+
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Dashboard available at http://localhost%s\n", addr)
 
-	return http.ListenAndServe(addr, corsMiddleware(mux))
+	return http.ListenAndServe(addr, handler)
 }

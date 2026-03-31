@@ -42,6 +42,18 @@ type Server struct {
 	in       io.Reader
 	out      io.Writer
 	dataDir  string // used to derive instance-scoped port file path
+
+	// dashboard holds the HTTP handler for the web dashboard.
+	// When non-nil, ServeDaemon starts a second listener on dashboardPort.
+	dashboard     http.Handler
+	dashboardPort int
+}
+
+// SetDashboard configures the embedded web dashboard handler and port.
+// When set, ServeDaemon will start a second HTTP listener for the browser UI.
+func (s *Server) SetDashboard(handler http.Handler, port int) {
+	s.dashboard = handler
+	s.dashboardPort = port
 }
 
 // NewServer creates a new MCP server reading from in and writing to out.
@@ -435,13 +447,39 @@ func (s *Server) ServeDaemon(outerCtx context.Context) error {
 		serveDone <- err
 	}()
 
-	// Shut down the HTTP server when the context is cancelled.
+	// ── Dashboard HTTP server (fixed port, browser-facing) ────────────────────
+	var dashSrv *http.Server
+	if s.dashboard != nil && s.dashboardPort > 0 {
+		dashAddr := fmt.Sprintf("127.0.0.1:%d", s.dashboardPort)
+		dashSrv = &http.Server{
+			Addr:         dashAddr,
+			Handler:      s.dashboard,
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 60 * time.Second, // benchmark run can take time
+		}
+		go func() {
+			s.logger.Info("dashboard available",
+				zap.Int("port", s.dashboardPort),
+				zap.String("url", fmt.Sprintf("http://localhost:%d", s.dashboardPort)),
+			)
+			if err := dashSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				s.logger.Warn("dashboard server stopped unexpectedly", zap.Error(err))
+			}
+		}()
+	}
+
+	// Shut down both HTTP servers when the context is cancelled.
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer shutdownCancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			s.logger.Warn("daemon HTTP server shutdown error", zap.Error(err))
+		}
+		if dashSrv != nil {
+			if err := dashSrv.Shutdown(shutdownCtx); err != nil {
+				s.logger.Warn("dashboard server shutdown error", zap.Error(err))
+			}
 		}
 	}()
 

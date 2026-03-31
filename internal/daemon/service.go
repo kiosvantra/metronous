@@ -12,9 +12,13 @@ import (
 	"github.com/kardianos/service"
 	"go.uber.org/zap"
 
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
 	"github.com/kiosvantra/metronous/internal/mcp"
+	"github.com/kiosvantra/metronous/internal/runner"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
 	"github.com/kiosvantra/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/web"
 )
 
 // Config holds the parameters needed to launch the Metronous daemon.
@@ -139,8 +143,29 @@ func (p *Program) run(ctx context.Context) error {
 	})
 	mcp.RegisterBenchmarkHandlers(srv, bs)
 
+	// ── Embedded web dashboard ─────────────────────────────────────────────────
+	// Build benchmark runner for on-demand runs from the dashboard.
+	metronousHome := filepath.Dir(p.cfg.DataDir)
+	thresholdsPath := filepath.Join(metronousHome, "thresholds.json")
+	thresholds, thErr := decision.LoadThresholds(thresholdsPath)
+	if thErr != nil {
+		defaults := config.DefaultThresholdValues()
+		thresholds = &defaults
+	}
+	engine := decision.NewDecisionEngine(thresholds)
+	bmRunner := runner.NewRunner(es, bs, engine, p.cfg.DataDir, p.logger)
+
+	workDir, _ := os.Getwd()
+	dashHandler, dashErr := web.NewHandler(bs, es, bmRunner, workDir)
+	if dashErr != nil {
+		p.logger.Warn("could not create dashboard handler", zap.Error(dashErr))
+	} else {
+		srv.SetDashboard(dashHandler, 9100)
+	}
+
 	p.logger.Info("metronous daemon starting",
 		zap.String("data_dir", p.cfg.DataDir),
+		zap.Int("dashboard_port", 9100),
 	)
 
 	return srv.ServeDaemon(ctx)
