@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kiosvantra/metronous/cmd/metronous/commands"
+	"github.com/kiosvantra/metronous/internal/version"
 )
 
 // TestRootCommandUsage verifies the root command prints help information.
@@ -29,7 +30,7 @@ func TestRootCommandUsage(t *testing.T) {
 
 // TestVersionSet verifies the Version variable is set.
 func TestVersionSet(t *testing.T) {
-	if commands.Version == "" {
+	if version.Version == "" {
 		t.Error("Version should not be empty")
 	}
 }

@@ -52,7 +52,7 @@ metronous install
 ### Via Go (alternative)
 
 ```bash
-go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.9
+go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.11
 ```
 
 ### Manual installation (alternative)
@@ -83,7 +83,7 @@ go build -o metronous ./cmd/metronous
 ### Windows installation
 
 ```powershell
-go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.9
+go install github.com/kiosvantra/metronous/cmd/metronous@v0.9.11
 metronous install
 # Done — service registered via Windows SCM, OpenCode configured
 ```
@@ -100,18 +100,12 @@ metronous service uninstall # Remove the service
 
 ### Configure OpenCode (automatically done by `metronous install`)
 
-After running `metronous install`, your `~/.config/opencode/opencode.json` will contain:
+After running `metronous install`, your OpenCode will be configured with:
 
-```json
-{
-  "mcp": {
-    "metronous": {
-      "command": ["metronous", "mcp"],
-      "type": "local"
-    }
-  },
-  "plugins": ["metronous-opencode"]
-}
+1. **MCP shim**: `metronous mcp` command for telemetry ingestion
+2. **OpenCode plugin**: `metronous.ts` copied to `~/.config/opencode/plugins/`
+
+The plugin captures agent sessions and forwards events to the daemon via HTTP.
 ```
 
 Then restart OpenCode and it will show **"Metronous Connected"**.
