@@ -63,17 +63,18 @@ type TrackingModel struct {
 
 // Column header widths.
 var (
-	colWidths = []int{20, 16, 12, 22, 8, 8, 8}
-	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent"}
+	colWidths = []int{20, 16, 12, 22, 8, 8, 14}
+	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent(total)"}
 
-	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	popupBgStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("33")).
-			Padding(0, 1)
+	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	errStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	spentTotalRedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	popupBgStyle       = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("33")).
+				Padding(0, 1)
 	popupHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 	popupDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	popupRowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
@@ -324,7 +325,7 @@ func (m *TrackingModel) renderBackground() string {
 	}
 
 	// Header row.
-	sb.WriteString(renderRow(colNames, colWidths, headerStyle))
+	sb.WriteString(renderRowMain(colNames, colWidths, headerStyle))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(colWidths)) + "\n")
 
@@ -336,7 +337,7 @@ func (m *TrackingModel) renderBackground() string {
 		if isCursor {
 			style = cursorStyle
 		}
-		sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
+		sb.WriteString(renderRowMain(cells, colWidths, style))
 		sb.WriteString("\n")
 	}
 
@@ -367,32 +368,8 @@ func (m *TrackingModel) renderPopup() string {
 	sb.WriteString(popupHeaderStyle.Render(title) + "\n")
 	sb.WriteString(strings.Repeat("─", min(len(title)+4, 80)) + "\n")
 
-	// Compute total spent from the session's complete event (actual final cost).
-	totalSpent := "-"
-	if !m.popupLoading {
-		var maxCost float64
-		found := false
-		for _, ev := range m.popupEvents {
-			if ev.EventType != "complete" {
-				continue
-			}
-			if ev.CostUSD == nil {
-				continue
-			}
-			if *ev.CostUSD <= 0 {
-				continue
-			}
-			if !found || *ev.CostUSD > maxCost {
-				maxCost = *ev.CostUSD
-				found = true
-			}
-		}
-		if found {
-			totalSpent = fmt.Sprintf("$%.4f", maxCost)
-		}
-	}
-	// Show in the popup header so the user can see real final cost.
-	sb.WriteString(popupDimStyle.Render(fmt.Sprintf("  Total spent: %s", totalSpent)) + "\n")
+	// Total spent is shown in the main table header (spent total from complete),
+	// so we do not duplicate it here to keep the popup layout stable.
 
 	if m.popupLoading {
 		// Show fixed-height placeholder while events are loading.
@@ -407,8 +384,9 @@ func (m *TrackingModel) renderPopup() string {
 		}
 	} else {
 		// Timeline columns (no metadata).
-		colW := []int{20, 14, 24, 8, 8, 8}
-		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent"}
+		// Spent values here are cumulative snapshots at the time of each event.
+		colW := []int{20, 14, 24, 8, 8, 14}
+		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent(acc)"}
 		sb.WriteString(popupHeaderStyle.Render(renderRow(colH, colW, lipgloss.NewStyle())) + "\n")
 		sb.WriteString(strings.Repeat("─", totalWidth(colW)) + "\n")
 
@@ -453,49 +431,19 @@ func (m *TrackingModel) renderPopup() string {
 
 // overlayPopup places the popup box in the center of the background string.
 func overlayPopup(bg, popup string) string {
+	// Avoid mid-line splicing (ANSI codes + rune width) which can cause
+	// misalignment artifacts. Instead, replace whole lines where the popup
+	// should appear.
 	bgLines := strings.Split(bg, "\n")
 	popupLines := strings.Split(popup, "\n")
-
-	// Find popup width.
-	popupW := 0
-	for _, l := range popupLines {
-		if len(l) > popupW {
-			popupW = len(l)
-		}
-	}
-
-	// Find background width.
-	bgW := 0
-	for _, l := range bgLines {
-		if len(l) > bgW {
-			bgW = len(l)
-		}
-	}
-
-	// Position: horizontally centered, vertically at row 4 (after header).
 	startRow := 4
-	startCol := (bgW - popupW) / 2
-	if startCol < 2 {
-		startCol = 2
-	}
 
-	// Merge popup into background lines.
 	for pi, pline := range popupLines {
 		bi := startRow + pi
 		if bi >= len(bgLines) {
 			bgLines = append(bgLines, "")
 		}
-		bgLine := bgLines[bi]
-		// Pad bgLine to startCol if needed.
-		if len(bgLine) < startCol {
-			bgLine += strings.Repeat(" ", startCol-len(bgLine))
-		}
-		// Replace characters in the bg line with the popup line.
-		if startCol+len(pline) <= len(bgLine) {
-			bgLines[bi] = bgLine[:startCol] + pline + bgLine[startCol+len(pline):]
-		} else {
-			bgLines[bi] = bgLine[:startCol] + pline
-		}
+		bgLines[bi] = pline
 	}
 
 	return strings.Join(bgLines, "\n")
@@ -566,6 +514,31 @@ func formatEventRowCompact(ev store.Event) []string {
 	}
 
 	return []string{ts, ev.EventType, ev.Model, in, out, spent}
+}
+
+// renderRowMain renders rows for the main (background) Tracking table.
+// It colorizes the Spent column (values that look like $...) in bright red.
+func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
+	var sb strings.Builder
+	spentCol := 6
+	for i, col := range cols {
+		if i >= len(widths) {
+			break
+		}
+		w := widths[i]
+		cell := col
+		if len(cell) > w {
+			cell = cell[:w-1] + "…"
+		}
+
+		cellStyle := style
+		if i == spentCol && strings.HasPrefix(strings.TrimSpace(cell), "$") {
+			cellStyle = style.Copy().Foreground(lipgloss.Color("196"))
+		}
+		sb.WriteString(cellStyle.Render(fmt.Sprintf("%-*s", w, cell)))
+		sb.WriteString(" ")
+	}
+	return sb.String()
 }
 
 // renderRow renders a table row given columns, widths, and a base style.
