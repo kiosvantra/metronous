@@ -4,6 +4,9 @@ package tui
 
 import "github.com/kiosvantra/metronous/internal/config"
 
+// TrackingSessionEventsMsg exports the internal trackingSessionEventsMsg for tests.
+type TrackingSessionEventsMsg = trackingSessionEventsMsg
+
 // DefaultThresholdValuesForTest returns the default threshold values.
 // Exposed so external tests can inject realistic data.
 func DefaultThresholdValuesForTest() config.Thresholds {
@@ -36,4 +39,39 @@ func GetBenchmarkDetailFrozen(m BenchmarkModel) bool {
 // GetBenchmarkFrozenRun returns the frozen run for tests.
 func GetBenchmarkFrozenRun(m BenchmarkModel) interface{} {
 	return m.frozenRun
+}
+
+// --- Tracking session helpers (for tests) ---
+
+// TrackingPageSize exposes maxTrackingRows for pagination tests.
+const TrackingPageSize = maxTrackingRows
+
+// GetTrackingPageOffset returns the current session pageOffset for tests.
+func GetTrackingPageOffset(m TrackingModel) int {
+	return m.pageOffset
+}
+
+// GetTrackingCursor returns the current flat-row cursor for tests.
+func GetTrackingCursor(m TrackingModel) int {
+	return m.cursor
+}
+
+// GetTrackingSessionCount returns the number of session summaries loaded.
+func GetTrackingSessionCount(m TrackingModel) int {
+	return len(m.sessions)
+}
+
+// IsTrackingSessionExpanded returns whether the session at the given sessions index is expanded.
+func IsTrackingSessionExpanded(m TrackingModel, sessionID string) bool {
+	st := m.sessionStates[sessionID]
+	return st != nil && st.expanded
+}
+
+// GetTrackingSessionEvents returns the cached events for a given session (may be nil).
+func GetTrackingSessionEvents(m TrackingModel, sessionID string) interface{} {
+	st := m.sessionStates[sessionID]
+	if st == nil {
+		return nil
+	}
+	return st.events
 }

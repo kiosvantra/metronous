@@ -20,52 +20,64 @@ const (
 // trackingTickMsg is sent by the auto-refresh ticker.
 type trackingTickMsg struct{ t time.Time }
 
-// TrackingDataMsg carries a fresh batch of events from the store.
+// TrackingDataMsg carries a fresh batch of session summaries from the store.
 // Exported so tests can inject synthetic data.
 type TrackingDataMsg struct {
-	Events []store.Event
-	Err    error
+	Sessions []store.SessionSummary
+	Err      error
 }
 
-// trackingDataMsg is the internal alias retained for the fetchEvents command.
+// trackingDataMsg is the internal alias retained for fetchSessions command.
 type trackingDataMsg = TrackingDataMsg
+
+// trackingSessionEventsMsg carries the events for an expanded session.
+type trackingSessionEventsMsg struct {
+	SessionID string
+	Events    []store.Event
+	Err       error
+}
+
+// sessionState holds the expand/collapse state and cached events for a session row.
+type sessionState struct {
+	expanded bool
+	events   []store.Event
+	loading  bool
+}
 
 // TrackingModel is the Bubble Tea sub-model for the real-time tracking tab.
 type TrackingModel struct {
-	es     store.EventStore
-	events []store.Event
-	err    error
-	// cursor is the local row index within the current page (0..maxTrackingRows-1).
+	es       store.EventStore
+	sessions []store.SessionSummary
+	// sessionStates maps session_id → expand state and cached events.
+	sessionStates map[string]*sessionState
+	err           error
+	// cursor is the index into the flat rendered list (collapsed or expanded rows).
 	cursor int
-	// pageOffset is the number of events skipped from the newest (timestamp DESC).
-	// PgDn increases pageOffset (moves toward older events).
-	// PgUp decreases pageOffset (moves toward newer events).
+	// pageOffset is the number of sessions skipped (newest first).
+	// PgDn increases pageOffset (moves toward older sessions).
+	// PgUp decreases pageOffset (moves toward newer sessions).
 	pageOffset int
 	loading    bool
-	// detailOpen toggles an event detail overlay.
-	detailOpen  bool
-	detailIndex int
-	// detailEvent freezes the selected event so the overlay content does not change
-	// while the background auto-refresh updates m.events.
-	detailEvent store.Event
 }
 
-// Column header widths.
+// Column header widths (same columns as before; no extra columns in step 1).
 var (
 	colWidths = []int{20, 16, 12, 22, 8, 8, 8}
 	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent"}
 
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle   = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	expandedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 )
 
 // NewTrackingModel creates a TrackingModel wired to the given EventStore.
 func NewTrackingModel(es store.EventStore) TrackingModel {
 	return TrackingModel{
-		es:      es,
-		loading: true,
+		es:            es,
+		loading:       true,
+		sessionStates: make(map[string]*sessionState),
 	}
 }
 
@@ -75,106 +87,167 @@ func (m TrackingModel) Init() tea.Cmd {
 		tea.Tick(trackingRefreshInterval, func(t time.Time) tea.Msg {
 			return trackingTickMsg{t: t}
 		}),
-		m.fetchEvents(),
+		m.fetchSessions(),
 	)
 }
 
-// Update handles tick and data messages.
+// flatRow represents one rendered row in the tracking view.
+// It is either a collapsed session row or one event inside an expanded session.
+type flatRow struct {
+	// isSession is true when this row represents the collapsed/header session line.
+	isSession bool
+	// sessionIdx is the index into m.sessions for this row's session.
+	sessionIdx int
+	// eventIdx is the index into the session's events slice (only valid when !isSession).
+	eventIdx int
+}
+
+// buildFlatRows builds the ordered list of visible rows based on expand state.
+func (m TrackingModel) buildFlatRows() []flatRow {
+	var rows []flatRow
+	for i, s := range m.sessions {
+		rows = append(rows, flatRow{isSession: true, sessionIdx: i})
+		st := m.sessionStates[s.SessionID]
+		if st != nil && st.expanded {
+			for j := range st.events {
+				rows = append(rows, flatRow{isSession: false, sessionIdx: i, eventIdx: j})
+			}
+		}
+	}
+	return rows
+}
+
+// Update handles tick, data, and key messages.
 func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case trackingTickMsg:
-		// Schedule next tick and fetch data.
+		// Schedule next tick and fetch sessions.
 		return m, tea.Batch(
 			tea.Tick(trackingRefreshInterval, func(t time.Time) tea.Msg {
 				return trackingTickMsg{t: t}
 			}),
-			m.fetchEvents(),
+			m.fetchSessions(),
 		)
 
 	case trackingDataMsg:
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
-			m.events = msg.Events
-			// Clamp cursor to actual result size.
-			if m.cursor >= len(m.events) {
-				if len(m.events) > 0 {
-					m.cursor = len(m.events) - 1
+			// Preserve expand state for sessions still in the new list.
+			if m.sessionStates == nil {
+				m.sessionStates = make(map[string]*sessionState)
+			}
+			m.sessions = msg.Sessions
+			// Clamp cursor to flat row count.
+			rows := m.buildFlatRows()
+			if m.cursor >= len(rows) {
+				if len(rows) > 0 {
+					m.cursor = len(rows) - 1
 				} else {
 					m.cursor = 0
 				}
 			}
 		}
 
-	case tea.KeyMsg:
-		if m.detailOpen {
-			switch msg.String() {
-			case "esc", "escape":
-				m.detailOpen = false
-				return m, nil
-			}
-			return m, nil
+	case trackingSessionEventsMsg:
+		if m.sessionStates == nil {
+			m.sessionStates = make(map[string]*sessionState)
 		}
+		st := m.sessionStates[msg.SessionID]
+		if st == nil {
+			st = &sessionState{}
+			m.sessionStates[msg.SessionID] = st
+		}
+		st.loading = false
+		if msg.Err == nil {
+			st.events = msg.Events
+		}
+
+	case tea.KeyMsg:
+		rows := m.buildFlatRows()
+
 		switch msg.String() {
 		case "up", "k":
-			// Move selection one row up within the current page.
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			// Move selection one row down within the current page.
-			if m.cursor < len(m.events)-1 {
+			if m.cursor < len(rows)-1 {
 				m.cursor++
 			}
+		case " ", "enter":
+			// Toggle expand/collapse for the session at the current cursor row.
+			if m.cursor >= 0 && m.cursor < len(rows) {
+				row := rows[m.cursor]
+				sid := m.sessions[row.sessionIdx].SessionID
+				if m.sessionStates == nil {
+					m.sessionStates = make(map[string]*sessionState)
+				}
+				st := m.sessionStates[sid]
+				if st == nil {
+					st = &sessionState{}
+					m.sessionStates[sid] = st
+				}
+				if st.expanded {
+					// Collapse: move cursor to the session header row.
+					// Find the header index for this session.
+					for ri, r := range rows {
+						if r.isSession && r.sessionIdx == row.sessionIdx {
+							m.cursor = ri
+							break
+						}
+					}
+					st.expanded = false
+				} else {
+					// Expand: if events not yet loaded, fetch them.
+					st.expanded = true
+					if len(st.events) == 0 && !st.loading {
+						st.loading = true
+						return m, m.fetchSessionEvents(sid)
+					}
+				}
+			}
 		case "pgdown":
-			// Slide window toward older events (increase offset).
 			m.pageOffset += maxTrackingRows
 			m.cursor = 0
-			return m, m.fetchEvents()
+			return m, m.fetchSessions()
 		case "pgup":
-			// Slide window toward newer events (decrease offset).
 			if m.pageOffset >= maxTrackingRows {
 				m.pageOffset -= maxTrackingRows
 			} else {
 				m.pageOffset = 0
 			}
 			m.cursor = 0
-			return m, m.fetchEvents()
+			return m, m.fetchSessions()
 		case "end":
-			// Jump to the newest (latest) event.
 			m.pageOffset = 0
 			m.cursor = 0
-			return m, m.fetchEvents()
+			return m, m.fetchSessions()
 		case "home":
-			// Jump to the oldest (first registered) event.
+			// Jump to oldest page using event count as approximation.
 			if m.es != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				total, err := m.es.CountEvents(ctx, store.EventQuery{})
 				if err == nil && total > 0 {
+					// Rough estimate: total events / avg events per session ≈ total/3, capped.
+					// For simplicity, jump to a large offset and let the query return empty.
 					lastPageOffset := ((total - 1) / maxTrackingRows) * maxTrackingRows
 					m.pageOffset = lastPageOffset
-					m.cursor = maxTrackingRows - 1
-					return m, m.fetchEvents()
+					m.cursor = 0
+					return m, m.fetchSessions()
 				}
 			}
 			m.pageOffset = 0
 			m.cursor = 0
-			return m, m.fetchEvents()
-		case "enter":
-			if m.cursor >= 0 && m.cursor < len(m.events) {
-				m.detailOpen = true
-				m.detailIndex = m.cursor
-				m.detailEvent = m.events[m.cursor]
-			}
+			return m, m.fetchSessions()
 		}
 	}
 	return m, nil
 }
 
-// fetchEvents returns a command that queries the EventStore for the current page of events.
-// Events are ordered timestamp DESC; pageOffset slides the window toward older events.
-func (m TrackingModel) fetchEvents() tea.Cmd {
+// fetchSessions returns a command that queries the EventStore for the current page of sessions.
+func (m TrackingModel) fetchSessions() tea.Cmd {
 	if m.es == nil {
 		return nil
 	}
@@ -182,11 +255,24 @@ func (m TrackingModel) fetchEvents() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		events, err := m.es.QueryEvents(ctx, store.EventQuery{
+		sessions, err := m.es.QuerySessions(ctx, store.SessionQuery{
 			Limit:  maxTrackingRows,
 			Offset: offset,
 		})
-		return TrackingDataMsg{Events: events, Err: err}
+		return TrackingDataMsg{Sessions: sessions, Err: err}
+	}
+}
+
+// fetchSessionEvents returns a command that loads events for a specific session.
+func (m TrackingModel) fetchSessionEvents(sessionID string) tea.Cmd {
+	if m.es == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		events, err := m.es.GetSessionEvents(ctx, sessionID)
+		return trackingSessionEventsMsg{SessionID: sessionID, Events: events, Err: err}
 	}
 }
 
@@ -204,13 +290,9 @@ func (m TrackingModel) View() string {
 		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
 		return sb.String()
 	}
-	if len(m.events) == 0 {
+	if len(m.sessions) == 0 {
 		sb.WriteString(dimStyle.Render("  No events yet. Start tracking to see data here.") + "\n")
 		return sb.String()
-	}
-
-	if m.detailOpen {
-		return sb.String() + renderEventDetail(m.detailEvent)
 	}
 
 	// Header row.
@@ -218,102 +300,84 @@ func (m TrackingModel) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(colWidths)) + "\n")
 
-	// Data rows.
-	for i, ev := range m.events {
-		row := formatEventRow(ev)
-		style := lipgloss.NewStyle()
-		if i == m.cursor {
-			style = cursorStyle
+	rows := m.buildFlatRows()
+
+	for ri, row := range rows {
+		s := m.sessions[row.sessionIdx]
+		st := m.sessionStates[s.SessionID]
+
+		isCursor := ri == m.cursor
+
+		if row.isSession {
+			// Collapsed session header: use complete event data from summary.
+			prefix := "+ "
+			if st != nil && st.expanded {
+				prefix = "- "
+			}
+			cells := formatSessionRow(s, prefix)
+			style := lipgloss.NewStyle()
+			if isCursor {
+				style = cursorStyle
+			}
+			sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
+			sb.WriteString("\n")
+		} else {
+			// Expanded event row: indented, dimmed.
+			if st == nil || row.eventIdx >= len(st.events) {
+				continue
+			}
+			ev := st.events[row.eventIdx]
+			cells := formatEventRow(ev)
+			// Indent the first cell (Time) to show nesting.
+			if len(cells) > 0 {
+				cells[0] = "  " + cells[0]
+			}
+			style := expandedStyle
+			if isCursor {
+				style = cursorStyle
+			}
+			sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
+			sb.WriteString("\n")
 		}
-		sb.WriteString(style.Render(renderRow(row, colWidths, lipgloss.NewStyle())))
-		sb.WriteString("\n")
 	}
 
 	// Pagination footer.
 	sb.WriteString("\n")
 	pageNum := m.pageOffset/maxTrackingRows + 1
-	footer := fmt.Sprintf("  %d events shown  |  page %d  (PgUp/PgDn to navigate, ↑↓ to select)",
-		len(m.events), pageNum)
+	footer := fmt.Sprintf("  %d sessions shown  |  page %d  (PgUp/PgDn, ↑↓, Space/Enter to expand)",
+		len(m.sessions), pageNum)
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
 	return sb.String()
 }
 
-func renderEventDetail(ev store.Event) string {
-	// Basic overlay with a border; no metadata by design.
-	box := lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).Padding(0, 1)
+// formatSessionRow converts a SessionSummary into display columns for the collapsed row.
+func formatSessionRow(s store.SessionSummary, prefix string) []string {
+	ts := s.Timestamp.Local().Format("2006-01-02 15:04:05")
 
-	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
-
-	getNonNegInt := func(p *int) string {
-		if p == nil || *p <= 0 {
-			return "-"
-		}
-		return fmt.Sprintf("%d", *p)
+	in := "-"
+	out := "-"
+	if s.PromptTokens != nil && *s.PromptTokens > 0 {
+		in = fmt.Sprintf("%d", *s.PromptTokens)
 	}
-	getInt := func(p *int) string {
-		if p == nil {
-			return "-"
-		}
-		return fmt.Sprintf("%d", *p)
-	}
-	getFloat := func(p *float64) string {
-		if p == nil {
-			return "-"
-		}
-		return fmt.Sprintf("%.4f", *p)
-	}
-	getBool := func(p *bool) string {
-		if p == nil {
-			return "-"
-		}
-		return fmt.Sprintf("%v", *p)
-	}
-	getStr := func(p *string) string {
-		if p == nil {
-			return "-"
-		}
-		return *p
+	if s.CompletionTokens != nil && *s.CompletionTokens > 0 {
+		out = fmt.Sprintf("%d", *s.CompletionTokens)
 	}
 
-	// Duration/cost are often nil; match the table behavior.
-	duration := getInt(ev.DurationMs)
-	quality := getFloat(ev.QualityScore)
-	rework := getInt(ev.ReworkCount)
-	cost := "-"
-	if ev.CostUSD != nil && *ev.CostUSD > 0 {
-		cost = fmt.Sprintf("$%.4f", *ev.CostUSD)
+	spent := "-"
+	if s.CostUSD != nil && *s.CostUSD > 0 {
+		spent = fmt.Sprintf("$%.4f", *s.CostUSD)
 	}
 
-	spent := cost
+	// Prefix the agent column with +/- expand indicator.
+	agentCell := prefix + s.AgentID
 
-	lines := []string{
-		"Event Detail",
-		fmt.Sprintf("Time:   %s", ts),
-		fmt.Sprintf("Agent:  %s", ev.AgentID),
-		fmt.Sprintf("Type:   %s", ev.EventType),
-		fmt.Sprintf("Model:  %s", ev.Model),
-		fmt.Sprintf("In:     %s", getNonNegInt(ev.PromptTokens)),
-		fmt.Sprintf("Out:    %s", getNonNegInt(ev.CompletionTokens)),
-		fmt.Sprintf("Spent:  %s", spent),
-		fmt.Sprintf("DurationMs: %s", duration),
-		fmt.Sprintf("QualityScore: %s", quality),
-		fmt.Sprintf("ReworkCount: %s", rework),
-		fmt.Sprintf("ToolName: %s", getStr(ev.ToolName)),
-		fmt.Sprintf("ToolSuccess: %s", getBool(ev.ToolSuccess)),
-		fmt.Sprintf("ID: %s", ev.ID),
-		fmt.Sprintf("SessionID: %s", ev.SessionID),
-		"",
-		"Press Esc to return.",
-	}
-
-	return "\n" + box.Render(strings.Join(lines, "\n")) + "\n"
+	return []string{ts, agentCell, "complete", s.Model, in, out, spent}
 }
 
 // formatEventRow converts a store.Event into display columns.
 func formatEventRow(ev store.Event) []string {
-	// Example: 2006-01-02 15:04:05
 	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
 
 	in := "-"

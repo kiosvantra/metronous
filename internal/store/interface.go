@@ -103,6 +103,46 @@ type AgentSummary struct {
 	AvgQuality float64
 }
 
+// SessionSummary holds the representative data for a single session,
+// derived from the session's "complete" event (or the latest event if none).
+// It is used by the Tracking TUI to show one collapsed row per session.
+type SessionSummary struct {
+	// SessionID is the unique session identifier.
+	SessionID string
+
+	// AgentID is the agent that produced this session.
+	AgentID string
+
+	// Model is the LLM model used (from the complete event).
+	Model string
+
+	// Timestamp is the time of the representative event (complete, or latest).
+	Timestamp time.Time
+
+	// PromptTokens is the total input tokens for the session (nullable).
+	PromptTokens *int
+
+	// CompletionTokens is the total output tokens for the session (nullable).
+	CompletionTokens *int
+
+	// CostUSD is the total cost for the session (nullable).
+	CostUSD *float64
+}
+
+// SessionQuery defines filter criteria for querying sessions.
+type SessionQuery struct {
+	// AgentID filters sessions by agent (empty = all agents).
+	AgentID string
+
+	// Limit caps the number of sessions returned (0 = no limit).
+	Limit int
+
+	// Offset skips the first N sessions in the result set (0 = no skip).
+	// Sessions are ordered by their most recent event timestamp DESC,
+	// so offset=0 returns the newest sessions.
+	Offset int
+}
+
 // EventStore is the primary storage interface for telemetry events.
 // Implementations must be safe for concurrent reads, but writes should
 // be funneled through the EventQueue (single-writer channel pattern).
@@ -116,6 +156,16 @@ type EventStore interface {
 	// CountEvents returns the total number of events matching the supplied filter criteria.
 	// This is primarily used to implement UI pagination navigation (e.g. Home/End).
 	CountEvents(ctx context.Context, query EventQuery) (int, error)
+
+	// QuerySessions returns a page of SessionSummary rows, one per distinct session_id,
+	// ordered by the session's most recent event timestamp DESC.
+	// Each summary is populated from the session's "complete" event when present,
+	// falling back to the latest event otherwise.
+	QuerySessions(ctx context.Context, query SessionQuery) ([]SessionSummary, error)
+
+	// GetSessionEvents returns all events for the given session_id, ordered
+	// by timestamp ASC (chronological order for the expand view).
+	GetSessionEvents(ctx context.Context, sessionID string) ([]Event, error)
 
 	// GetAgentEvents returns all events for a specific agent since a given time.
 	GetAgentEvents(ctx context.Context, agentID string, since time.Time) ([]Event, error)

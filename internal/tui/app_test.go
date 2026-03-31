@@ -143,10 +143,10 @@ func TestTrackingViewRendersRecentEvents(t *testing.T) {
 	tokens := 100
 	cost := 0.001
 	m, _ = m.Update(tui.TrackingDataMsg{
-		Events: []store.Event{
+		Sessions: []store.SessionSummary{
 			{
+				SessionID:        "sess-1",
 				AgentID:          "test-agent",
-				EventType:        "complete",
 				Model:            "gpt-4",
 				Timestamp:        time.Now(),
 				PromptTokens:     &tokens,
@@ -160,6 +160,7 @@ func TestTrackingViewRendersRecentEvents(t *testing.T) {
 	if !strings.Contains(view, "test-agent") {
 		t.Errorf("expected 'test-agent' in view, got: %q", view)
 	}
+	// Collapsed session rows always show "complete" as the Type column.
 	if !strings.Contains(view, "complete") {
 		t.Errorf("expected 'complete' in view, got: %q", view)
 	}
@@ -175,7 +176,7 @@ func TestTrackingViewPollsEveryTwoSeconds(t *testing.T) {
 
 func TestTrackingViewShowsEmptyState(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
-	m, _ = m.Update(tui.TrackingDataMsg{Events: nil})
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: nil})
 	view := m.View()
 	if !strings.Contains(view, "No events") {
 		t.Errorf("expected empty state message, got: %q", view)
@@ -593,5 +594,278 @@ func TestTrendDirection(t *testing.T) {
 				t.Errorf("TrendDirection(%v) = %q, want %q", tc.verdicts, got, tc.want)
 			}
 		})
+	}
+}
+
+// ----- Tracking session grouping tests (Step 1) --------------------------------
+
+// makeSessionSummaries builds N SessionSummary entries with distinct timestamps and session IDs.
+func makeSessionSummaries(n int) []store.SessionSummary {
+	sessions := make([]store.SessionSummary, n)
+	base := time.Now()
+	tokens := 100
+	cost := 0.001
+	for i := 0; i < n; i++ {
+		sessions[i] = store.SessionSummary{
+			SessionID:        fmt.Sprintf("sess-%02d", i),
+			AgentID:          fmt.Sprintf("agent-%02d", i),
+			Model:            "gpt-4",
+			Timestamp:        base.Add(time.Duration(-i) * time.Hour),
+			PromptTokens:     &tokens,
+			CompletionTokens: &tokens,
+			CostUSD:          &cost,
+		}
+	}
+	return sessions
+}
+
+// TestTrackingPageSizeIs20 verifies the page-size constant is 20.
+func TestTrackingPageSizeIs20(t *testing.T) {
+	if tui.TrackingPageSize != 20 {
+		t.Errorf("expected TrackingPageSize == 20, got %d", tui.TrackingPageSize)
+	}
+}
+
+// TestTrackingViewRendersCollapsedSessions verifies that injecting sessions renders
+// one collapsed row per session (Type column shows "complete").
+func TestTrackingViewRendersCollapsedSessions(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(5)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	view := m.View()
+	for _, s := range sessions {
+		if !strings.Contains(view, s.AgentID) {
+			t.Errorf("expected session agent %q in collapsed view", s.AgentID)
+		}
+	}
+	// All collapsed rows should show "complete" as the type column.
+	if !strings.Contains(view, "complete") {
+		t.Errorf("expected 'complete' type in collapsed rows")
+	}
+}
+
+// TestTrackingCollapsedRowShowsPlusPrefix verifies the "+" prefix on collapsed rows.
+func TestTrackingCollapsedRowShowsPlusPrefix(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: makeSessionSummaries(3)})
+
+	view := m.View()
+	if !strings.Contains(view, "+") {
+		t.Errorf("expected '+' prefix on collapsed session rows, got: %q", view)
+	}
+}
+
+// TestTrackingSessionExpandToggle verifies Space expands a collapsed session and
+// a second Space collapses it again.
+func TestTrackingSessionExpandToggle(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(3)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+
+	// Initially collapsed.
+	if tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session to be collapsed initially")
+	}
+
+	// Press Space → should expand.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session to be expanded after Space")
+	}
+
+	// Press Space again → should collapse.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	if tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session to be collapsed after second Space")
+	}
+}
+
+// TestTrackingEnterAlsoTogglesExpand verifies Enter also expands/collapses.
+func TestTrackingEnterAlsoTogglesExpand(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(2)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+
+	// Press Enter → should expand.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session to be expanded after Enter")
+	}
+}
+
+// TestTrackingExpandedRowsAppearInView verifies that after expanding, the session's
+// events appear in the view.
+func TestTrackingExpandedRowsAppearInView(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(1)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+
+	// Expand (no es store → events arrive via msg injection).
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+
+	// Inject events for the session (simulating fetchSessionEvents result).
+	evts := []store.Event{
+		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "start", Model: "gpt-4", Timestamp: time.Now().Add(-2 * time.Minute)},
+		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "tool_call", Model: "gpt-4", Timestamp: time.Now().Add(-1 * time.Minute)},
+		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "complete", Model: "gpt-4", Timestamp: time.Now()},
+	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
+
+	view := m.View()
+	if !strings.Contains(view, "start") {
+		t.Errorf("expected 'start' event in expanded view, got: %q", view)
+	}
+	if !strings.Contains(view, "tool_call") {
+		t.Errorf("expected 'tool_call' event in expanded view, got: %q", view)
+	}
+}
+
+// TestTrackingExpandedShowsMinusPrefixOnHeader verifies the "-" prefix when expanded.
+func TestTrackingExpandedShowsMinusPrefixOnHeader(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(1)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+
+	// Expand.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	// Inject empty events so it won't be in loading state.
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: []store.Event{}})
+
+	view := m.View()
+	if !strings.Contains(view, "-") {
+		t.Errorf("expected '-' prefix on expanded session header, got: %q", view)
+	}
+}
+
+// TestTrackingPgDnIncreasesPageOffset verifies PgDn moves pageOffset forward.
+func TestTrackingPgDnIncreasesPageOffset(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: makeSessionSummaries(20)})
+
+	if tui.GetTrackingPageOffset(m) != 0 {
+		t.Fatalf("expected initial pageOffset = 0, got %d", tui.GetTrackingPageOffset(m))
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetTrackingPageOffset(m) != tui.TrackingPageSize {
+		t.Errorf("after PgDn: expected pageOffset = %d, got %d", tui.TrackingPageSize, tui.GetTrackingPageOffset(m))
+	}
+}
+
+// TestTrackingPgUpDecreasesPageOffset verifies PgUp moves pageOffset backward without underflow.
+func TestTrackingPgUpDecreasesPageOffset(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: makeSessionSummaries(20)})
+
+	// Two PgDn to get offset = 2 * pageSize.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetTrackingPageOffset(m) != 2*tui.TrackingPageSize {
+		t.Fatalf("setup: expected pageOffset = %d", 2*tui.TrackingPageSize)
+	}
+
+	// One PgUp → subtract one page.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetTrackingPageOffset(m) != tui.TrackingPageSize {
+		t.Errorf("after PgUp: expected pageOffset = %d, got %d", tui.TrackingPageSize, tui.GetTrackingPageOffset(m))
+	}
+
+	// Another PgUp → 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetTrackingPageOffset(m) != 0 {
+		t.Errorf("after second PgUp: expected pageOffset = 0, got %d", tui.GetTrackingPageOffset(m))
+	}
+
+	// Third PgUp → stays at 0, no underflow.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetTrackingPageOffset(m) != 0 {
+		t.Errorf("after third PgUp from 0: expected pageOffset = 0, got %d", tui.GetTrackingPageOffset(m))
+	}
+}
+
+// TestTrackingCursorMovesWithinSessions verifies up/down navigation across session rows.
+func TestTrackingCursorMovesWithinSessions(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: makeSessionSummaries(5)})
+
+	if tui.GetTrackingCursor(m) != 0 {
+		t.Fatalf("expected initial cursor = 0, got %d", tui.GetTrackingCursor(m))
+	}
+
+	// Down → cursor 1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetTrackingCursor(m) != 1 {
+		t.Errorf("after down: expected cursor = 1, got %d", tui.GetTrackingCursor(m))
+	}
+
+	// Up → cursor 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetTrackingCursor(m) != 0 {
+		t.Errorf("after up: expected cursor = 0, got %d", tui.GetTrackingCursor(m))
+	}
+
+	// Up at 0 → stays at 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetTrackingCursor(m) != 0 {
+		t.Errorf("after up at 0: expected cursor = 0, got %d", tui.GetTrackingCursor(m))
+	}
+}
+
+// TestTrackingRefreshPreservesExpandState verifies that a background refresh
+// does not collapse an expanded session.
+func TestTrackingRefreshPreservesExpandState(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(3)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+
+	// Expand session 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session to be expanded")
+	}
+
+	// Simulate background refresh with same sessions.
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	// Session should remain expanded.
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("refresh collapsed the session unexpectedly")
+	}
+}
+
+// TestTrackingAutoRefreshDoesNotRollbackExpandOnNewSessions verifies
+// that a refresh with different sessions still retains expand state for
+// sessions that remain in the new list.
+func TestTrackingAutoRefreshDoesNotRollbackExpandOnNewSessions(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(3)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[1].SessionID
+
+	// Move to session 1 and expand.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("expected session 1 to be expanded")
+	}
+
+	// Inject a refresh with 3 refreshed sessions (same IDs).
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	// Session 1 should still be expanded.
+	if !tui.IsTrackingSessionExpanded(m, sid) {
+		t.Fatal("refresh unexpectedly collapsed session 1")
 	}
 }
