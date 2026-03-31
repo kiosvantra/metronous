@@ -61,8 +61,9 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to download update: %w", err)
 	}
 
-	fmt.Printf("\nMetronous has been updated to %s. Restart the service to use the new version.\n", latestTag)
-	fmt.Println("  systemctl --user restart metronous")
+	fmt.Printf("\nMetronous has been updated to %s.\n", latestTag)
+	fmt.Println("  Close and reopen the dashboard to use the new version.")
+	fmt.Println("  Restart the metronous service only if you also want the MCP daemon to run the updated binary.")
 	return nil
 }
 
