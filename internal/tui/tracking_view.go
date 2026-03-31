@@ -56,8 +56,9 @@ type TrackingModel struct {
 	// pageOffset is the number of sessions skipped (newest first).
 	// PgDn increases pageOffset (moves toward older sessions).
 	// PgUp decreases pageOffset (moves toward newer sessions).
-	pageOffset int
-	loading    bool
+	pageOffset    int
+	loading       bool
+	lastViewLines int
 }
 
 // Column header widths (same columns as before; no extra columns in step 1).
@@ -277,7 +278,7 @@ func (m TrackingModel) fetchSessionEvents(sessionID string) tea.Cmd {
 }
 
 // View renders the tracking tab.
-func (m TrackingModel) View() string {
+func (m *TrackingModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Real-time Event Stream") + "\n\n")
@@ -349,7 +350,22 @@ func (m TrackingModel) View() string {
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
-	return sb.String()
+	out := sb.String()
+	// Prevent terminal “remanent lines” when the expanded/collapsed content
+	// becomes shorter than the previous render.
+	lineCount := strings.Count(out, "\n")
+	if lineCount < m.lastViewLines {
+		out += strings.Repeat("\n", m.lastViewLines-lineCount)
+	}
+	m.lastViewLines = max(m.lastViewLines, lineCount)
+	return out
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // formatSessionRow converts a SessionSummary into display columns for the collapsed row.
