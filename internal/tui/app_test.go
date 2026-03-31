@@ -22,9 +22,10 @@ func sendSpecialKey(m tea.Model, keyType tea.KeyType) (tea.Model, tea.Cmd) {
 	return m.Update(tea.KeyMsg{Type: keyType})
 }
 
-func newTestApp(t *testing.T) tui.AppModel {
+func newTestApp(t *testing.T) *tui.AppModel {
 	t.Helper()
-	return tui.NewAppModel(nil, nil, "", "", "", "test")
+	m := tui.NewAppModel(nil, nil, "", "", "", "test")
+	return &m
 }
 
 // ----- Task 26: App shell tests -----------------------------------------------
@@ -48,19 +49,19 @@ func TestAppTabSwitchingByNumber(t *testing.T) {
 	m := newTestApp(t)
 
 	updated, _ := sendKey(m, "2")
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmark {
 		t.Errorf("expected TabBenchmark after pressing 2, got %d", m.CurrentTab)
 	}
 
 	updated, _ = sendKey(m, "3")
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
 		t.Errorf("expected TabConfig after pressing 3, got %d", m.CurrentTab)
 	}
 
 	updated, _ = sendKey(m, "1")
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabTracking {
 		t.Errorf("expected TabTracking after pressing 1, got %d", m.CurrentTab)
 	}
@@ -70,19 +71,19 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	m := newTestApp(t)
 
 	updated, _ := sendSpecialKey(m, tea.KeyRight)
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmark {
 		t.Errorf("expected TabBenchmark after right arrow, got %d", m.CurrentTab)
 	}
 
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
 		t.Errorf("expected TabConfig after right arrow, got %d", m.CurrentTab)
 	}
 
 	updated, _ = sendSpecialKey(m, tea.KeyLeft)
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmark {
 		t.Errorf("expected TabBenchmark after left arrow, got %d", m.CurrentTab)
 	}
@@ -92,15 +93,15 @@ func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 	m := newTestApp(t)
 
 	updated, _ := sendSpecialKey(m, tea.KeyLeft)
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabTracking {
 		t.Errorf("expected tab to stay at TabTracking, got %d", m.CurrentTab)
 	}
 
 	updated, _ = sendKey(m, "3")
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
 		t.Errorf("expected tab to stay at TabConfig, got %d", m.CurrentTab)
 	}
@@ -109,7 +110,7 @@ func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 func TestAppWindowResize(t *testing.T) {
 	m := newTestApp(t)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	m = updated.(tui.AppModel)
+	m = updated.(*tui.AppModel)
 	if m.Width != 120 || m.Height != 40 {
 		t.Errorf("expected Width=120 Height=40, got %d/%d", m.Width, m.Height)
 	}
@@ -129,7 +130,7 @@ func TestAppView(t *testing.T) {
 	_ = m.View()
 	// With window size should contain tab names.
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	v := updated.(tui.AppModel).View()
+	v := updated.(*tui.AppModel).View()
 	if !strings.Contains(v, "Tracking") {
 		t.Errorf("view should contain 'Tracking', got: %q", v)
 	}

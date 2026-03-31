@@ -217,7 +217,7 @@ func httpGet(url string) ([]byte, error) {
 // ALL sub-models so that background tabs continue receiving data even when
 // they are not active. Each sub-model already ignores messages it does not
 // understand via the default case in its own Update switch.
-func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle update check result
 	if um, ok := msg.(UpdateCheckMsg); ok {
 		m.UpdateAvailable = um.Available
@@ -325,7 +325,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the full dashboard.
-func (m AppModel) View() string {
+func (m *AppModel) View() string {
 	if m.Width == 0 {
 		return "loading…"
 	}
