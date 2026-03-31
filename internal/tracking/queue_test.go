@@ -52,6 +52,12 @@ func (m *mockStore) GetAgentSummary(_ context.Context, _ string) (store.AgentSum
 
 func (m *mockStore) Close() error { return nil }
 
+func (m *mockStore) CountEvents(_ context.Context, _ store.EventQuery) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.events), nil
+}
+
 func (m *mockStore) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

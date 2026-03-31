@@ -242,6 +242,48 @@ func (es *EventStore) QueryEvents(ctx context.Context, query store.EventQuery) (
 	return scanEvents(rows)
 }
 
+// CountEvents returns the total number of events matching the supplied filter criteria.
+// It is used by the Tracking TUI for absolute navigation (Home/End).
+func (es *EventStore) CountEvents(ctx context.Context, query store.EventQuery) (int, error) {
+	var (
+		conditions []string
+		args       []interface{}
+	)
+
+	if query.AgentID != "" {
+		conditions = append(conditions, "agent_id = ?")
+		args = append(args, query.AgentID)
+	}
+	if query.SessionID != "" {
+		conditions = append(conditions, "session_id = ?")
+		args = append(args, query.SessionID)
+	}
+	if query.EventType != "" {
+		conditions = append(conditions, "event_type = ?")
+		args = append(args, query.EventType)
+	}
+	if !query.Since.IsZero() {
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, query.Since.UTC().UnixMilli())
+	}
+	if !query.Until.IsZero() {
+		conditions = append(conditions, "timestamp <= ?")
+		args = append(args, query.Until.UTC().UnixMilli())
+	}
+
+	q := "SELECT COUNT(*) FROM events"
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	row := es.readDB.QueryRowContext(ctx, q, args...)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("count events: %w", err)
+	}
+	return count, nil
+}
+
 // GetAgentEvents returns all events for a specific agent since the given time.
 func (es *EventStore) GetAgentEvents(ctx context.Context, agentID string, since time.Time) ([]store.Event, error) {
 	return es.QueryEvents(ctx, store.EventQuery{
