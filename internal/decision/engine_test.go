@@ -265,6 +265,62 @@ func TestLoadThresholdsNotFound(t *testing.T) {
 	}
 }
 
+// TestDecisionEngine_ScoreWeights_UsesConfigWhenPresent verifies that ScoreWeights()
+// returns the configured weights when ScoreWeights.Accuracy is set.
+func TestDecisionEngine_ScoreWeights_UsesConfigWhenPresent(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	thresholds.ScoreWeights = config.ScoreWeights{
+		Accuracy: 0.60, Latency: 0.10, ToolSuccessRate: 0.20, ROIScore: 0.10,
+	}
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	got := engine.ScoreWeights()
+	if got.Accuracy != 0.60 {
+		t.Errorf("ScoreWeights().Accuracy = %v, want 0.60", got.Accuracy)
+	}
+}
+
+// TestDecisionEngine_ScoreWeights_FallsBackToDefault verifies that ScoreWeights()
+// returns DefaultScoreWeights() when the config ScoreWeights is zero-valued.
+func TestDecisionEngine_ScoreWeights_FallsBackToDefault(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	thresholds.ScoreWeights = config.ScoreWeights{} // zero → fall back to defaults
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	got := engine.ScoreWeights()
+	defaults := config.DefaultScoreWeights()
+	if got.Accuracy != defaults.Accuracy {
+		t.Errorf("ScoreWeights().Accuracy = %v, want %v (default)", got.Accuracy, defaults.Accuracy)
+	}
+}
+
+// TestDecisionEngine_EffectiveMaxLatencyP95_Global verifies the global default is returned
+// when no per-agent override exists.
+func TestDecisionEngine_EffectiveMaxLatencyP95_Global(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	got := engine.EffectiveMaxLatencyP95("unknown-agent")
+	if got != thresholds.Defaults.MaxLatencyP95Ms {
+		t.Errorf("EffectiveMaxLatencyP95 = %d, want %d", got, thresholds.Defaults.MaxLatencyP95Ms)
+	}
+}
+
+// TestDecisionEngine_EffectiveMaxLatencyP95_PerAgent verifies that the per-agent override is returned.
+func TestDecisionEngine_EffectiveMaxLatencyP95_PerAgent(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	maxLat := 5000
+	thresholds.PerAgent["fast-agent"] = config.AgentThresholds{
+		MaxLatencyP95Ms: &maxLat,
+	}
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	got := engine.EffectiveMaxLatencyP95("fast-agent")
+	if got != 5000 {
+		t.Errorf("EffectiveMaxLatencyP95(fast-agent) = %d, want 5000", got)
+	}
+}
+
 // TestIsPendingSwitch verifies the helper function.
 func TestIsPendingSwitch(t *testing.T) {
 	tests := []struct {
