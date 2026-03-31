@@ -31,4 +31,6 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -X github.com/kiosvantra/metronous/cmd/metronous/commands.Version={{ .Version }}
+      - -X github.com/kiosvantra/metronous/internal/version.Version={{ .Version }}
+    files:
+      - metronous-plugin.ts
