@@ -395,11 +395,20 @@ func TestHTTPIngestEndpoint(t *testing.T) {
 		errCh <- srv.ServeWithHealth(ctx)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
-
-	port, err := srv.ReadPortFile()
-	if err != nil {
-		t.Fatalf("ReadPortFile: %v", err)
+	// Wait until the server writes mcp.port.
+	// On slower CI runners, a fixed sleep can flake.
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	payload := map[string]interface{}{
