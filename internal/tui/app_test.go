@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,299 @@ func TestConfigViewInvalidValueShownWithError(t *testing.T) {
 	m, _ = m.Update(tui.ConfigErrMsg{Err: nil})
 	// Just ensure View() doesn't panic.
 	_ = m.View()
+}
+
+// ----- Benchmark pagination tests (Task: Benchmark tab improvements) ---------
+
+// makeRuns builds N BenchmarkRun entries with distinct timestamps.
+func makeRuns(n int) []store.BenchmarkRun {
+	runs := make([]store.BenchmarkRun, n)
+	base := time.Now()
+	for i := 0; i < n; i++ {
+		runs[i] = store.BenchmarkRun{
+			AgentID:  fmt.Sprintf("agent-%02d", i),
+			Model:    "gpt-4",
+			RunAt:    base.Add(time.Duration(-i) * time.Hour),
+			Accuracy: 0.9,
+			Verdict:  store.VerdictKeep,
+		}
+	}
+	return runs
+}
+
+// TestBenchmarkPageSizeIs20 verifies the page-size constant is 20.
+func TestBenchmarkPageSizeIs20(t *testing.T) {
+	if tui.BenchmarkPageSize != 20 {
+		t.Errorf("expected BenchmarkPageSize == 20, got %d", tui.BenchmarkPageSize)
+	}
+}
+
+// TestBenchmarkViewRendersMax20Rows verifies that injecting 25 runs renders at most 20 rows.
+func TestBenchmarkViewRendersMax20Rows(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(25)})
+
+	// Count table data rows by counting lines that contain "agent-" followed by a space
+	// (column padding) — this matches only table rows, not the detail panel.
+	view := m.View()
+	tableRowCount := 0
+	for _, line := range strings.Split(view, "\n") {
+		// Table data rows contain "agent-XX" padded with spaces to column width.
+		// The detail panel shows "Agent:    agent-XX" which won't match this pattern.
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "2026-") || strings.HasPrefix(trimmed, "-  ") {
+			// Lines starting with a date/time (data rows) or "-" (no-data rows).
+			if strings.Contains(trimmed, "agent-") {
+				tableRowCount++
+			}
+		}
+	}
+	if tableRowCount > 20 {
+		t.Errorf("expected at most 20 table data rows rendered, got %d", tableRowCount)
+	}
+	if tableRowCount == 0 {
+		t.Errorf("expected some rows rendered, got 0 (view: %q)", view)
+	}
+}
+
+// TestBenchmarkPgDnIncreasesPageOffset verifies PgDn moves pageOffset forward by one page.
+func TestBenchmarkPgDnIncreasesPageOffset(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	// Inject data so the model is not in loading state.
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(20)})
+
+	initialOffset := tui.GetBenchmarkPageOffset(m)
+	if initialOffset != 0 {
+		t.Fatalf("expected initial pageOffset = 0, got %d", initialOffset)
+	}
+
+	// Send PgDn.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	afterOffset := tui.GetBenchmarkPageOffset(m)
+	if afterOffset != tui.BenchmarkPageSize {
+		t.Errorf("after PgDn: expected pageOffset = %d, got %d", tui.BenchmarkPageSize, afterOffset)
+	}
+}
+
+// TestBenchmarkPgUpDecreasesPageOffset verifies PgUp moves pageOffset backward without underflow.
+func TestBenchmarkPgUpDecreasesPageOffset(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(20)})
+
+	// Simulate two PgDn presses to get pageOffset = 2*pageSize.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetBenchmarkPageOffset(m) != 2*tui.BenchmarkPageSize {
+		t.Fatalf("setup: expected pageOffset = %d, got %d", 2*tui.BenchmarkPageSize, tui.GetBenchmarkPageOffset(m))
+	}
+
+	// One PgUp should subtract one page.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetBenchmarkPageOffset(m) != tui.BenchmarkPageSize {
+		t.Errorf("after PgUp: expected pageOffset = %d, got %d", tui.BenchmarkPageSize, tui.GetBenchmarkPageOffset(m))
+	}
+
+	// Another PgUp should go to 0, not negative.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetBenchmarkPageOffset(m) != 0 {
+		t.Errorf("after second PgUp: expected pageOffset = 0, got %d", tui.GetBenchmarkPageOffset(m))
+	}
+
+	// A third PgUp should stay at 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetBenchmarkPageOffset(m) != 0 {
+		t.Errorf("after third PgUp from 0: expected pageOffset = 0, got %d", tui.GetBenchmarkPageOffset(m))
+	}
+}
+
+// TestBenchmarkCursorMovesWithinPage verifies up/down move within the current page.
+func TestBenchmarkCursorMovesWithinPage(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
+
+	// Cursor starts at 0.
+	if tui.GetBenchmarkCursor(m) != 0 {
+		t.Fatalf("expected initial cursor = 0, got %d", tui.GetBenchmarkCursor(m))
+	}
+
+	// Down moves cursor to 1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetBenchmarkCursor(m) != 1 {
+		t.Errorf("after down: expected cursor = 1, got %d", tui.GetBenchmarkCursor(m))
+	}
+
+	// Up moves cursor back to 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetBenchmarkCursor(m) != 0 {
+		t.Errorf("after up: expected cursor = 0, got %d", tui.GetBenchmarkCursor(m))
+	}
+
+	// Up at 0 should not go negative.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetBenchmarkCursor(m) != 0 {
+		t.Errorf("after up at 0: expected cursor = 0, got %d", tui.GetBenchmarkCursor(m))
+	}
+}
+
+// TestBenchmarkDetailFreezeOnEnter verifies Enter freezes the detail panel.
+func TestBenchmarkDetailFreezeOnEnter(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	runs := makeRuns(3)
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: runs})
+
+	// Initially the detail is not frozen.
+	if tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to not be frozen initially")
+	}
+
+	// Move cursor down then press Enter to freeze.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if !tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to be frozen after Enter")
+	}
+
+	// The frozen run should match runs[1] (cursor was at 1).
+	frozen := tui.GetBenchmarkFrozenRun(m)
+	frozenRun, ok := frozen.(store.BenchmarkRun)
+	if !ok {
+		t.Fatalf("expected BenchmarkRun, got %T", frozen)
+	}
+	if frozenRun.AgentID != runs[1].AgentID {
+		t.Errorf("frozen run AgentID = %q, want %q", frozenRun.AgentID, runs[1].AgentID)
+	}
+
+	// Background refresh should NOT change the detail panel content when frozen.
+	// Inject new data simulating a refresh.
+	newRuns := makeRuns(3)
+	newRuns[1].Accuracy = 0.5 // change a field to ensure it would show differently
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: newRuns})
+
+	// Detail must still be frozen.
+	if !tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to remain frozen after background refresh")
+	}
+	// Frozen run must still be the original one.
+	stillFrozen := tui.GetBenchmarkFrozenRun(m)
+	stillFrozenRun := stillFrozen.(store.BenchmarkRun)
+	if stillFrozenRun.Accuracy != runs[1].Accuracy {
+		t.Errorf("frozen run accuracy changed after refresh: got %f, want %f",
+			stillFrozenRun.Accuracy, runs[1].Accuracy)
+	}
+}
+
+// TestBenchmarkDetailUnfreezeOnEsc verifies Esc unfreezes the detail panel.
+func TestBenchmarkDetailUnfreezeOnEsc(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(3)})
+
+	// Freeze.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to be frozen after Enter")
+	}
+
+	// Unfreeze with Esc.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to be unfrozen after Esc")
+	}
+}
+
+// TestBenchmarkDetailUnfreezeOnNavigation verifies cursor movement unfreezes the detail.
+func TestBenchmarkDetailUnfreezeOnNavigation(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(3)})
+
+	// Freeze with Enter.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to be frozen")
+	}
+
+	// Moving the cursor should unfreeze.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to be unfrozen after cursor movement")
+	}
+}
+
+// TestBenchmarkViewShowsDateAndTime verifies the Time column shows date+time not just date.
+func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	// Use a fixed timestamp in the local timezone to avoid UTC conversion differences.
+	ts := time.Date(2026, 3, 15, 14, 30, 0, 0, time.Local)
+	m, _ = m.Update(tui.BenchmarkDataMsg{
+		Runs: []store.BenchmarkRun{
+			{
+				AgentID:  "time-agent",
+				Model:    "gpt-4",
+				RunAt:    ts,
+				Accuracy: 0.9,
+				Verdict:  store.VerdictKeep,
+			},
+		},
+	})
+
+	view := m.View()
+	// The Time column should show the date portion (YYYY-MM-DD).
+	if !strings.Contains(view, "2026-03-15") {
+		t.Errorf("expected date '2026-03-15' in view, got: %q", view)
+	}
+	// The Time column should show the hour portion (HH:MM) — time.Local is preserved.
+	expectedTime := ts.Format("15:04")
+	if !strings.Contains(view, expectedTime) {
+		t.Errorf("expected time %q in view, got: %q", expectedTime, view)
+	}
+}
+
+// TestBenchmarkPgDnResetsCursor verifies PgDn resets cursor to 0.
+func TestBenchmarkPgDnResetsCursor(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
+
+	// Move cursor to row 3.
+	for i := 0; i < 3; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+	if tui.GetBenchmarkCursor(m) != 3 {
+		t.Fatalf("expected cursor = 3, got %d", tui.GetBenchmarkCursor(m))
+	}
+
+	// PgDn should reset cursor to 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetBenchmarkCursor(m) != 0 {
+		t.Errorf("after PgDn: expected cursor = 0, got %d", tui.GetBenchmarkCursor(m))
+	}
+}
+
+// TestBenchmarkViewFrozenDetailNotAffectedByPageChange verifies that the frozen detail
+// does not change when navigating to a different page.
+func TestBenchmarkViewFrozenDetailNotAffectedByPageChange(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	runs := makeRuns(5)
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: runs})
+
+	// Move to row 2 and freeze.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	frozenID := tui.GetBenchmarkFrozenRun(m).(store.BenchmarkRun).AgentID
+
+	// Simulate a page change message arriving (PgDn sends fetchRuns but we inject BenchmarkDataMsg).
+	newRuns := makeRuns(5)
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: newRuns})
+
+	// Detail must still be frozen with the original agent.
+	if !tui.GetBenchmarkDetailFrozen(m) {
+		t.Fatal("expected detail to remain frozen after page data changed")
+	}
+	gotID := tui.GetBenchmarkFrozenRun(m).(store.BenchmarkRun).AgentID
+	if gotID != frozenID {
+		t.Errorf("frozen agent ID changed: got %q, want %q", gotID, frozenID)
+	}
 }
 
 // TestTrendDirection verifies trendDirection handles all edge cases correctly.

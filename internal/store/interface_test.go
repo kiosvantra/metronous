@@ -253,6 +253,12 @@ func (m *mockBenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun
 func (m *mockBenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int) ([]store.BenchmarkRun, error) {
 	return nil, nil
 }
+func (m *mockBenchmarkStore) QueryRuns(ctx context.Context, _ store.BenchmarkQuery) ([]store.BenchmarkRun, error) {
+	return nil, nil
+}
+func (m *mockBenchmarkStore) CountRuns(ctx context.Context, _ store.BenchmarkQuery) (int, error) {
+	return 0, nil
+}
 func (m *mockBenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*store.BenchmarkRun, error) {
 	return nil, nil
 }

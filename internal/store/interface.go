@@ -204,6 +204,20 @@ type BenchmarkRun struct {
 	AvgQualityScore float64
 }
 
+// BenchmarkQuery defines filter criteria for querying benchmark runs.
+type BenchmarkQuery struct {
+	// AgentID filters runs by agent (empty = all agents).
+	AgentID string
+
+	// Limit caps the number of runs returned (0 = no limit).
+	Limit int
+
+	// Offset skips the first N runs in the result set (0 = no skip).
+	// The query orders by run_at DESC, so offset=0 returns the newest runs
+	// and increasing offset moves toward older runs.
+	Offset int
+}
+
 // BenchmarkStore is the storage interface for benchmark runs.
 // Implementations must be safe for concurrent reads. Writes should
 // follow the same single-writer pattern used by EventStore.
@@ -214,6 +228,14 @@ type BenchmarkStore interface {
 	// GetRuns returns up to limit benchmark runs for the given agent, ordered by
 	// run_at DESC. Pass limit=0 for no cap.
 	GetRuns(ctx context.Context, agentID string, limit int) ([]BenchmarkRun, error)
+
+	// QueryRuns retrieves benchmark runs matching the supplied filter criteria.
+	// Supports Offset/Limit for sliding-window pagination.
+	QueryRuns(ctx context.Context, query BenchmarkQuery) ([]BenchmarkRun, error)
+
+	// CountRuns returns the total number of benchmark runs matching the supplied filter.
+	// Used for pagination navigation (e.g. Home/End).
+	CountRuns(ctx context.Context, query BenchmarkQuery) (int, error)
 
 	// GetLatestRun returns the most recent benchmark run for the agent, or nil if none.
 	GetLatestRun(ctx context.Context, agentID string) (*BenchmarkRun, error)

@@ -17,7 +17,8 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
-const maxBenchmarkRows = 50
+// maxBenchmarkRows is the maximum number of rows to fetch per page in the benchmark tab.
+const maxBenchmarkRows = 20
 
 // benchmarkRefreshInterval is the auto-refresh period for the benchmark tab,
 // matching the tracking tab's cadence.
@@ -52,10 +53,11 @@ var detailLabelStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("33"))
 
 // benchColWidths / benchColNames describe the benchmark history table.
-// Columns: Date | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
+// Columns: Time | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
+// "Time" shows full date+time (YYYY-MM-DD HH:MM) so width is 17 to avoid truncation.
 var (
-	benchColWidths = []int{12, 16, 9, 10, 12, 18, 16, 8}
-	benchColNames  = []string{"Date", "Agent", "Type", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
+	benchColWidths = []int{17, 16, 9, 10, 12, 18, 16, 8}
+	benchColNames  = []string{"Time", "Agent", "Type", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
 )
 
 // verdictColIdx is the index of the Verdict column in benchColNames/benchColWidths.
@@ -97,11 +99,22 @@ type BenchmarkModel struct {
 	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
 	trendByID map[string][]string // agentID → verdict trend (oldest first)
 	err       error
-	cursor    int
-	loading   bool
-	offset    int // for scrolling
-	pricing   map[string]float64
-	workDir   string
+	// cursor is the local row index within the current page (0..maxBenchmarkRows-1).
+	cursor  int
+	loading bool
+	// pageOffset is the number of runs skipped from the top (run_at DESC).
+	// PgDn increases pageOffset (moves toward older runs).
+	// PgUp decreases pageOffset (moves toward newer runs).
+	pageOffset int
+	// detailFrozen indicates whether the detail panel is locked to frozenRun/frozenTrend.
+	// When true, the detail does not update even if the background refresh changes m.runs.
+	detailFrozen bool
+	// frozenRun is the run whose detail panel is displayed when detailFrozen == true.
+	frozenRun store.BenchmarkRun
+	// frozenTrend is the verdict trend for frozenRun, captured at freeze time.
+	frozenTrend []string
+	pricing     map[string]float64
+	workDir     string
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -130,7 +143,6 @@ func (m BenchmarkModel) Init() tea.Cmd {
 
 // Update handles data, tick, and key messages.
 func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
-	const pageSize = 15
 	switch msg := msg.(type) {
 	case benchmarkTickMsg:
 		// Schedule next tick and refresh data.
@@ -145,23 +157,25 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
-			m.runs = msg.Runs
+			// Enforce page size — the view always renders at most maxBenchmarkRows rows.
+			runs := msg.Runs
+			if len(runs) > maxBenchmarkRows {
+				runs = runs[:maxBenchmarkRows]
+			}
+			m.runs = runs
 			if msg.TypeByID != nil {
 				m.typeByID = msg.TypeByID
 			}
 			if msg.TrendByID != nil {
 				m.trendByID = msg.TrendByID
 			}
-			// Clamp offset and cursor to valid range
-			if m.offset >= len(m.runs) {
-				if len(m.runs) > pageSize {
-					m.offset = len(m.runs) - pageSize
-				} else {
-					m.offset = 0
-				}
-			}
+			// Clamp cursor to actual result size.
 			if m.cursor >= len(m.runs) {
-				m.cursor = max(0, len(m.runs)-1)
+				if len(m.runs) > 0 {
+					m.cursor = len(m.runs) - 1
+				} else {
+					m.cursor = 0
+				}
 			}
 		}
 		return m, nil
@@ -169,20 +183,45 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
+			// Move selection one row up within the current page.
 			if m.cursor > 0 {
 				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
-				}
 			}
+			// Unfreeze detail so it follows the cursor.
+			m.detailFrozen = false
 		case "down", "j":
+			// Move selection one row down within the current page.
 			if m.cursor < len(m.runs)-1 {
 				m.cursor++
-				// update offset when cursor moves beyond visible page.
-				if m.cursor >= m.offset+pageSize {
-					m.offset++
-				}
 			}
+			// Unfreeze detail so it follows the cursor.
+			m.detailFrozen = false
+		case "pgdown":
+			// Slide window toward older runs (increase pageOffset by one full page).
+			m.pageOffset += maxBenchmarkRows
+			m.cursor = 0
+			m.detailFrozen = false
+			return m, m.fetchRuns()
+		case "pgup":
+			// Slide window toward newer runs (decrease pageOffset by one full page).
+			if m.pageOffset >= maxBenchmarkRows {
+				m.pageOffset -= maxBenchmarkRows
+			} else {
+				m.pageOffset = 0
+			}
+			m.cursor = 0
+			m.detailFrozen = false
+			return m, m.fetchRuns()
+		case "enter":
+			// Freeze the detail panel on the currently selected run.
+			if m.cursor >= 0 && m.cursor < len(m.runs) {
+				m.detailFrozen = true
+				m.frozenRun = m.runs[m.cursor]
+				m.frozenTrend = m.trendByID[m.frozenRun.AgentID]
+			}
+		case "esc", "escape":
+			// Unfreeze the detail panel.
+			m.detailFrozen = false
 		}
 	}
 	return m, nil
@@ -208,12 +247,14 @@ func agentTypeOrder(t string) int {
 
 // fetchRuns returns a command that queries all discovered agents' latest runs.
 // Agents with no data are included as placeholder rows (Verdict == "").
+// The pageOffset field controls which window of sorted rows is returned.
 func (m BenchmarkModel) fetchRuns() tea.Cmd {
 	if m.bs == nil {
 		return nil
 	}
-	// Snapshot the agent list at scheduling time so the closure is self-contained.
+	// Snapshot the agent list and pageOffset at scheduling time so the closure is self-contained.
 	agents := m.agents
+	pageOffset := m.pageOffset
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -252,7 +293,7 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Build one row per agent.
+		// Build one row per agent (latest run only).
 		var all []store.BenchmarkRun
 		for _, agentID := range allIDs {
 			runs, err := m.bs.GetRuns(ctx, agentID, 1)
@@ -274,16 +315,27 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			return all[i].AgentID < all[j].AgentID
 		})
 
-		// Fetch verdict trends for each agent (last 8 weeks).
-		trendByID := make(map[string][]string, len(allIDs))
-		for _, agentID := range allIDs {
-			trend, err := m.bs.GetVerdictTrend(ctx, agentID, 8)
+		// Apply sliding-window pagination: slice out the current page.
+		start := pageOffset
+		if start > len(all) {
+			start = len(all)
+		}
+		end := start + maxBenchmarkRows
+		if end > len(all) {
+			end = len(all)
+		}
+		page := all[start:end]
+
+		// Fetch verdict trends for each agent in the current page (last 8 weeks).
+		trendByID := make(map[string][]string, len(page))
+		for _, run := range page {
+			trend, err := m.bs.GetVerdictTrend(ctx, run.AgentID, 8)
 			if err == nil {
-				trendByID[agentID] = trend
+				trendByID[run.AgentID] = trend
 			}
 		}
 
-		return BenchmarkDataMsg{Runs: all, TypeByID: typeByID, TrendByID: trendByID}
+		return BenchmarkDataMsg{Runs: page, TypeByID: typeByID, TrendByID: trendByID}
 	}
 }
 
@@ -315,23 +367,17 @@ func (m BenchmarkModel) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(benchColWidths)) + "\n")
 
-	// Data rows (paginated).
-	pageSize := 15
-	start := m.offset
-	end := start + pageSize
-	if end > len(m.runs) {
-		end = len(m.runs)
-	}
-	for i, run := range m.runs[start:end] {
-		absIdx := start + i
+	// Data rows — m.runs already contains only the current page (maxBenchmarkRows rows max).
+	// The cursor is a local index within this page.
+	for i, run := range m.runs {
 		agentType := m.typeByID[run.AgentID]
 		row := formatBenchmarkRow(run, agentType, m.pricing)
 		baseStyle := lipgloss.NewStyle()
-		if absIdx == m.cursor {
+		if i == m.cursor {
 			baseStyle = cursorStyle
 		}
 		// Render columns before Verdict without special colour.
-		// verdictColIdx = 5 (Date, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
+		// verdictColIdx = 5 (Time, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
 		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
 		// Verdict column with colour — combine cursor background with verdict foreground.
 		verdictCell := verdictStyle(run.Verdict).Inherit(baseStyle).Render(
@@ -347,19 +393,29 @@ func (m BenchmarkModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	if len(m.runs) > pageSize {
-		sb.WriteString("\n")
-		sb.WriteString(dimStyle.Render(fmt.Sprintf(
-			"  Showing %d–%d of %d  (↑/↓ to scroll)", start+1, end, len(m.runs))))
-		sb.WriteString("\n")
-	}
+	// Pagination footer.
+	sb.WriteString("\n")
+	pageNum := m.pageOffset/maxBenchmarkRows + 1
+	footer := fmt.Sprintf("  %d entries shown  |  page %d  (PgUp/PgDn to navigate, ↑↓ to select, Enter to freeze detail)",
+		len(m.runs), pageNum)
+	sb.WriteString(dimStyle.Render(footer))
+	sb.WriteString("\n")
 
 	// Detail panel for the selected run.
+	// When detailFrozen, show the frozen snapshot — it won't change on background refresh.
 	if m.cursor >= 0 && m.cursor < len(m.runs) {
 		sb.WriteString("\n")
-		selectedRun := m.runs[m.cursor]
-		trend := m.trendByID[selectedRun.AgentID]
-		sb.WriteString(renderDetailPanel(selectedRun, m.pricing, trend))
+		var detailRun store.BenchmarkRun
+		var trend []string
+		if m.detailFrozen {
+			detailRun = m.frozenRun
+			trend = m.frozenTrend
+			sb.WriteString(dimStyle.Render("  [Detail frozen — press Esc to unfreeze]") + "\n")
+		} else {
+			detailRun = m.runs[m.cursor]
+			trend = m.trendByID[detailRun.AgentID]
+		}
+		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend))
 	}
 
 	return sb.String()
@@ -580,7 +636,7 @@ func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[st
 		return []string{"-", run.AgentID, agentType, "-", "-", "NO DATA", "-", "-"}
 	}
 
-	date := run.RunAt.Local().Format("2006-01-02")
+	date := run.RunAt.Local().Format("2006-01-02 15:04")
 	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
 	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
 

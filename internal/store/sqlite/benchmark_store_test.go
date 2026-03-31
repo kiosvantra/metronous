@@ -358,6 +358,173 @@ func TestGetVerdictTrend(t *testing.T) {
 	})
 }
 
+// TestQueryRunsPagination verifies QueryRuns supports offset+limit sliding-window pagination.
+func TestQueryRunsPagination(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	// Insert 5 runs for agent-a ordered newest to oldest (run_at DESC).
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	for i := 0; i < 5; i++ {
+		r := sampleRun("page-agent", store.VerdictKeep)
+		r.RunAt = base.Add(time.Duration(-i) * time.Hour)
+		r.Accuracy = float64(i) * 0.1 // distinct value to identify each row
+		if err := bs.SaveRun(ctx, r); err != nil {
+			t.Fatalf("SaveRun[%d]: %v", i, err)
+		}
+	}
+
+	// Page 1: offset=0, limit=3 — should return rows 0,1,2 (newest first).
+	page1, err := bs.QueryRuns(ctx, store.BenchmarkQuery{Limit: 3, Offset: 0})
+	if err != nil {
+		t.Fatalf("QueryRuns page1: %v", err)
+	}
+	if len(page1) != 3 {
+		t.Fatalf("page1: expected 3 runs, got %d", len(page1))
+	}
+	// Newest run should be first (Accuracy=0.0, i=0).
+	if page1[0].Accuracy != 0.0 {
+		t.Errorf("page1[0].Accuracy: expected 0.0 (newest), got %f", page1[0].Accuracy)
+	}
+
+	// Page 2: offset=3, limit=3 — should return rows 3,4 (only 2 remain).
+	page2, err := bs.QueryRuns(ctx, store.BenchmarkQuery{Limit: 3, Offset: 3})
+	if err != nil {
+		t.Fatalf("QueryRuns page2: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2: expected 2 runs, got %d", len(page2))
+	}
+	// Row at offset 3 should be older than page1[0] (i=3 → smaller RunAt).
+	if !page2[0].RunAt.Before(page1[2].RunAt) {
+		t.Errorf("page2[0] should be older than page1[2]: page2[0].RunAt=%v page1[2].RunAt=%v",
+			page2[0].RunAt, page1[2].RunAt)
+	}
+}
+
+// TestQueryRunsWithAgentFilter verifies QueryRuns filters by agent_id.
+func TestQueryRunsWithAgentFilter(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	for i := 0; i < 3; i++ {
+		r := sampleRun("alpha", store.VerdictKeep)
+		r.RunAt = time.Now().Add(time.Duration(-i) * time.Hour)
+		if err := bs.SaveRun(ctx, r); err != nil {
+			t.Fatalf("SaveRun alpha: %v", err)
+		}
+	}
+	if err := bs.SaveRun(ctx, sampleRun("beta", store.VerdictSwitch)); err != nil {
+		t.Fatalf("SaveRun beta: %v", err)
+	}
+
+	// Filter to alpha only.
+	runs, err := bs.QueryRuns(ctx, store.BenchmarkQuery{AgentID: "alpha", Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryRuns: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Errorf("expected 3 runs for alpha, got %d", len(runs))
+	}
+	for _, r := range runs {
+		if r.AgentID != "alpha" {
+			t.Errorf("unexpected agent_id %q in filtered result", r.AgentID)
+		}
+	}
+}
+
+// TestCountRunsTotal verifies CountRuns returns total across all agents.
+func TestCountRunsTotal(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	// Insert 4 runs: 3 for agent-x, 1 for agent-y.
+	for i := 0; i < 3; i++ {
+		r := sampleRun("agent-x", store.VerdictKeep)
+		r.RunAt = time.Now().Add(time.Duration(-i) * time.Hour)
+		if err := bs.SaveRun(ctx, r); err != nil {
+			t.Fatalf("SaveRun agent-x: %v", err)
+		}
+	}
+	if err := bs.SaveRun(ctx, sampleRun("agent-y", store.VerdictSwitch)); err != nil {
+		t.Fatalf("SaveRun agent-y: %v", err)
+	}
+
+	total, err := bs.CountRuns(ctx, store.BenchmarkQuery{})
+	if err != nil {
+		t.Fatalf("CountRuns: %v", err)
+	}
+	if total != 4 {
+		t.Errorf("expected total = 4, got %d", total)
+	}
+}
+
+// TestCountRunsWithAgentFilter verifies CountRuns filters by agent_id.
+func TestCountRunsWithAgentFilter(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	for i := 0; i < 3; i++ {
+		r := sampleRun("count-alpha", store.VerdictKeep)
+		r.RunAt = time.Now().Add(time.Duration(-i) * time.Hour)
+		if err := bs.SaveRun(ctx, r); err != nil {
+			t.Fatalf("SaveRun: %v", err)
+		}
+	}
+	if err := bs.SaveRun(ctx, sampleRun("count-beta", store.VerdictSwitch)); err != nil {
+		t.Fatalf("SaveRun count-beta: %v", err)
+	}
+
+	countAlpha, err := bs.CountRuns(ctx, store.BenchmarkQuery{AgentID: "count-alpha"})
+	if err != nil {
+		t.Fatalf("CountRuns count-alpha: %v", err)
+	}
+	if countAlpha != 3 {
+		t.Errorf("expected 3 runs for count-alpha, got %d", countAlpha)
+	}
+
+	countBeta, err := bs.CountRuns(ctx, store.BenchmarkQuery{AgentID: "count-beta"})
+	if err != nil {
+		t.Fatalf("CountRuns count-beta: %v", err)
+	}
+	if countBeta != 1 {
+		t.Errorf("expected 1 run for count-beta, got %d", countBeta)
+	}
+}
+
+// TestCountRunsEmpty verifies CountRuns returns 0 for an empty store.
+func TestCountRunsEmpty(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	count, err := bs.CountRuns(ctx, store.BenchmarkQuery{})
+	if err != nil {
+		t.Fatalf("CountRuns on empty store: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 for empty store, got %d", count)
+	}
+}
+
+// TestQueryRunsOffsetBeyondEnd verifies QueryRuns returns empty when offset exceeds total.
+func TestQueryRunsOffsetBeyondEnd(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	if err := bs.SaveRun(ctx, sampleRun("single-agent", store.VerdictKeep)); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+
+	// Offset past the only row.
+	runs, err := bs.QueryRuns(ctx, store.BenchmarkQuery{Limit: 10, Offset: 100})
+	if err != nil {
+		t.Fatalf("QueryRuns with large offset: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected 0 runs with offset beyond end, got %d", len(runs))
+	}
+}
+
 // TestSaveRunWithAllVerdicts verifies all VerdictType values can be saved and retrieved.
 func TestSaveRunWithAllVerdicts(t *testing.T) {
 	ctx := context.Background()

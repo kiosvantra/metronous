@@ -201,6 +201,74 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 	return scanBenchmarkRuns(rows)
 }
 
+// QueryRuns retrieves benchmark runs matching the supplied filter criteria.
+// Results are ordered by run_at DESC. Supports Offset/Limit for sliding-window pagination.
+func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQuery) ([]store.BenchmarkRun, error) {
+	limit := query.Limit
+	if limit == 0 || limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
+
+	var (
+		conditions []string
+		args       []interface{}
+	)
+
+	if query.AgentID != "" {
+		conditions = append(conditions, "agent_id = ?")
+		args = append(args, query.AgentID)
+	}
+
+	q := `SELECT id, run_at, window_days, agent_id, model,
+		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+		tool_success_rate, roi_score, total_cost_usd, sample_size,
+		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
+		FROM benchmark_runs`
+
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	q += " ORDER BY run_at DESC"
+	q += " LIMIT ?"
+	args = append(args, limit)
+	if query.Offset > 0 {
+		q += " OFFSET ?"
+		args = append(args, query.Offset)
+	}
+
+	rows, err := bs.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query benchmark runs: %w", err)
+	}
+	defer rows.Close()
+
+	return scanBenchmarkRuns(rows)
+}
+
+// CountRuns returns the total number of benchmark runs matching the supplied filter.
+func (bs *BenchmarkStore) CountRuns(ctx context.Context, query store.BenchmarkQuery) (int, error) {
+	var (
+		conditions []string
+		args       []interface{}
+	)
+
+	if query.AgentID != "" {
+		conditions = append(conditions, "agent_id = ?")
+		args = append(args, query.AgentID)
+	}
+
+	q := `SELECT COUNT(*) FROM benchmark_runs`
+	if len(conditions) > 0 {
+		q += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var count int
+	if err := bs.readDB.QueryRowContext(ctx, q, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count benchmark runs: %w", err)
+	}
+	return count, nil
+}
+
 // GetLatestRun returns the most recent benchmark run for the agent, or nil if none exists.
 func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*store.BenchmarkRun, error) {
 	const q = `SELECT id, run_at, window_days, agent_id, model,
