@@ -5,15 +5,18 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/kiosvantra/metronous/internal/store"
+	"github.com/kiosvantra/metronous/internal/version"
 )
 
 // UpdateCheckMsg is sent when the background update check completes.
@@ -113,35 +116,80 @@ func (m AppModel) Init() tea.Cmd {
 	)
 }
 
-// checkForUpdate fetches the latest version from GitHub and returns an UpdateCheckMsg.
+// checkForUpdate fetches the latest release from GitHub API and returns an
+// UpdateCheckMsg. It compares semantically against the running binary version.
 func checkForUpdate() tea.Msg {
-	cmd := exec.Command("git", "ls-remote", "--tags", "https://github.com/kiosvantra/metronous")
-	out, err := cmd.Output()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://api.github.com/repos/kiosvantra/metronous/releases/latest")
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return UpdateCheckMsg{Available: false}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return UpdateCheckMsg{Available: false, LatestVersion: ""}
+		return UpdateCheckMsg{Available: false}
 	}
 
-	tags := strings.Split(string(out), "\n")
-	var latest string
-	for _, tag := range tags {
-		parts := strings.Split(tag, "\t")
-		if len(parts) < 2 {
-			continue
+	s := string(body)
+	idx := strings.Index(s, `"tag_name"`)
+	if idx == -1 {
+		return UpdateCheckMsg{Available: false}
+	}
+	rest := s[idx+len(`"tag_name"`):]
+	colon := strings.Index(rest, `"`)
+	if colon == -1 {
+		return UpdateCheckMsg{Available: false}
+	}
+	rest = rest[colon+1:]
+	end := strings.Index(rest, `"`)
+	if end == -1 {
+		return UpdateCheckMsg{Available: false}
+	}
+	latestTag := rest[:end]
+	if latestTag == "" {
+		return UpdateCheckMsg{Available: false}
+	}
+
+	current := version.Version
+	latestClean := strings.TrimPrefix(latestTag, "v")
+
+	if !semverGreater(latestClean, current) {
+		return UpdateCheckMsg{Available: false, LatestVersion: latestTag}
+	}
+	return UpdateCheckMsg{Available: true, LatestVersion: latestTag}
+}
+
+// semverGreater returns true if a > b using simple semantic version comparison.
+func semverGreater(a, b string) bool {
+	ap := semverParts(a)
+	bp := semverParts(b)
+	for i := 0; i < 3; i++ {
+		if ap[i] > bp[i] {
+			return true
 		}
-		ref := parts[1]
-		if strings.HasPrefix(ref, "refs/tags/v") && !strings.Contains(ref, "^{}") {
-			v := strings.TrimPrefix(ref, "refs/tags/v")
-			if latest == "" || v > latest {
-				latest = v
-			}
+		if ap[i] < bp[i] {
+			return false
 		}
 	}
+	return false
+}
 
-	if latest == "" {
-		return UpdateCheckMsg{Available: false, LatestVersion: ""}
+func semverParts(v string) [3]int {
+	v = strings.TrimPrefix(v, "v")
+	// Strip any pre-release suffix (e.g. "0.9.14-dev" → "0.9.14")
+	if dash := strings.Index(v, "-"); dash != -1 {
+		v = v[:dash]
 	}
-
-	return UpdateCheckMsg{Available: true, LatestVersion: "v" + latest}
+	parts := strings.SplitN(v, ".", 3)
+	var out [3]int
+	for i := 0; i < 3 && i < len(parts); i++ {
+		fmt.Sscanf(parts[i], "%d", &out[i])
+	}
+	return out
 }
 
 // httpGet is a simple HTTP GET wrapper for update checking.
@@ -316,7 +364,7 @@ func (m AppModel) View() string {
 	return fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
 }
 
-// renderTabBar returns the rendered tab bar string.
+// renderTabBar returns the rendered tab bar string with the current version on the right.
 func (m AppModel) renderTabBar() string {
 	var tabs [numTabs]string
 	for i, name := range tabNames {
@@ -330,5 +378,23 @@ func (m AppModel) renderTabBar() string {
 	for _, t := range tabs[1:] {
 		bar += "  " + t
 	}
+
+	// Append version right-aligned inside the tab bar.
+	if m.CurrentVersion != "" && m.Width > 0 {
+		versionLabel := "v" + m.CurrentVersion
+		// lipgloss.Width strips ANSI codes — use it for accurate text widths.
+		barTextWidth := lipgloss.Width(bar)
+		versionTextWidth := lipgloss.Width(versionLabel)
+		// tabBarStyle renders inside m.Width (terminal columns).
+		// Subtract 2 to account for the border frame lipgloss adds.
+		innerWidth := m.Width - 2
+		padding := innerWidth - barTextWidth - versionTextWidth
+		if padding > 0 {
+			bar += strings.Repeat(" ", padding) + inactiveTabStyle.Render(versionLabel)
+		} else {
+			bar += "  " + inactiveTabStyle.Render(versionLabel)
+		}
+	}
+
 	return tabBarStyle.Render(bar)
 }

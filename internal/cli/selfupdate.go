@@ -1,23 +1,24 @@
 package cli
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/kiosvantra/metronous/internal/version"
 	"github.com/spf13/cobra"
 )
 
 // NewSelfUpdateCommand creates the `metronous self-update` cobra command.
 func NewSelfUpdateCommand() *cobra.Command {
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "self-update",
 		Short: "Update Metronous to the latest version",
 		Long: `Downloads and installs the latest version of Metronous from GitHub releases.
@@ -26,131 +27,99 @@ Downloads the pre-built binary for your OS/architecture and replaces
 the current installation.`,
 		RunE: runSelfUpdate,
 	}
-
-	return cmd
 }
 
 func runSelfUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Println("Checking for updates...")
 
-	// Check if go is available
-	if _, err := exec.LookPath("go"); err != nil {
-		return fmt.Errorf("Go is not installed or not in PATH")
-	}
-
-	// Determine download URL based on OS and arch
-	version, err := getLatestVersion()
+	latestTag, err := fetchLatestTag()
 	if err != nil {
 		return fmt.Errorf("failed to get latest version: %w", err)
 	}
 
-	filename := fmt.Sprintf("metronous-%s-%s-%s", version, runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		filename += ".exe"
+	current := version.Version
+	if latestTag == "v"+current || latestTag == current {
+		fmt.Printf("Already up to date (%s).\n", current)
+		return nil
 	}
 
-	downloadURL := fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/%s", version, filename)
-	installPath, err := getInstallPath()
+	fmt.Printf("Updating from %s to %s...\n", current, latestTag)
+
+	// GoReleaser archive format: metronous_<version-no-v>_<os>_<arch>.tar.gz
+	versionNoV := strings.TrimPrefix(latestTag, "v")
+	goos := runtime.GOOS
+	goarch := runtime.GOARCH
+	filename := fmt.Sprintf("metronous_%s_%s_%s.tar.gz", versionNoV, goos, goarch)
+	downloadURL := fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/%s", latestTag, filename)
+
+	installPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("failed to determine install path: %w", err)
+		return fmt.Errorf("could not determine current executable path: %w", err)
 	}
 
-	if err := downloadBinary(downloadURL, installPath); err != nil {
+	if err := downloadAndInstallBinary(downloadURL, installPath); err != nil {
 		return fmt.Errorf("failed to download update: %w", err)
 	}
 
-	fmt.Printf("\nMetronous has been updated to %s.\n", version)
+	fmt.Printf("\nMetronous has been updated to %s. Restart the service to use the new version.\n", latestTag)
+	fmt.Println("  systemctl --user restart metronous")
 	return nil
 }
 
-func getLatestVersion() (string, error) {
-	// Use git ls-remote to get the latest tag
-	cmd := exec.Command("git", "ls-remote", "--tags", "https://github.com/kiosvantra/metronous")
-	out, err := cmd.Output()
+// fetchLatestTag returns the latest stable tag from GitHub API.
+func fetchLatestTag() (string, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/kiosvantra/metronous/releases/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GitHub API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return "", fmt.Errorf("no releases found")
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
 
-	tags := strings.Split(string(out), "\n")
-	var versions []string
-	for _, tag := range tags {
-		parts := strings.Split(tag, "\t")
-		if len(parts) < 2 {
-			continue
-		}
-		ref := parts[1]
-		if strings.HasPrefix(ref, "refs/tags/v") && !strings.Contains(ref, "^{}") {
-			v := strings.TrimPrefix(ref, "refs/tags/v")
-			// Filter out pre-release versions
-			if !strings.Contains(v, "-") {
-				versions = append(versions, v)
-			}
-		}
+	// Simple JSON extraction: "tag_name":"v0.9.13"
+	s := string(body)
+	idx := strings.Index(s, `"tag_name"`)
+	if idx == -1 {
+		return "", fmt.Errorf("tag_name not found in GitHub API response")
 	}
-
-	if len(versions) == 0 {
-		return "", fmt.Errorf("no stable tags found")
+	rest := s[idx+len(`"tag_name"`):]
+	colon := strings.Index(rest, `"`)
+	if colon == -1 {
+		return "", fmt.Errorf("malformed tag_name in GitHub API response")
 	}
-
-	// Sort by semantic version
-	sort.Slice(versions, func(i, j int) bool {
-		return sortVersion(versions[i], versions[j]) < 0
-	})
-
-	return "v" + versions[len(versions)-1], nil
+	rest = rest[colon+1:]
+	end := strings.Index(rest, `"`)
+	if end == -1 {
+		return "", fmt.Errorf("malformed tag_name in GitHub API response")
+	}
+	tag := rest[:end]
+	if tag == "" {
+		return "", fmt.Errorf("empty tag_name in GitHub API response")
+	}
+	return tag, nil
 }
 
-// sortVersion compares two semantic version strings.
-// Returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2
-func sortVersion(v1, v2 string) int {
-	v1Parts := strings.Split(strings.TrimPrefix(v1, "v"), ".")
-	v2Parts := strings.Split(strings.TrimPrefix(v2, "v"), ".")
-
-	for i := 0; i < len(v1Parts) && i < len(v2Parts); i++ {
-		n1 := 0
-		n2 := 0
-		fmt.Sscanf(v1Parts[i], "%d", &n1)
-		fmt.Sscanf(v2Parts[i], "%d", &n2)
-		if n1 < n2 {
-			return -1
-		}
-		if n1 > n2 {
-			return 1
-		}
-	}
-
-	if len(v1Parts) < len(v2Parts) {
-		return -1
-	}
-	if len(v1Parts) > len(v2Parts) {
-		return 1
-	}
-	return 0
-}
-
-func getInstallPath() (string, error) {
-	gobin, err := exec.Command("go", "env", "GOBIN").Output()
-	path := ""
-	if err != nil || strings.TrimSpace(string(gobin)) == "" {
-		gopath, err := exec.Command("go", "env", "GOPATH").Output()
-		if err != nil {
-			return "", err
-		}
-		path = strings.TrimSpace(string(gopath))
-	} else {
-		path = strings.TrimSpace(string(gobin))
-	}
-
-	binName := "metronous"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-
-	return filepath.Join(path, "bin", binName), nil
-}
-
-func downloadBinary(url, destPath string) error {
-	client := &http.Client{Timeout: 60 * time.Second}
+// downloadAndInstallBinary downloads a .tar.gz asset, extracts the metronous
+// binary from it, and atomically replaces destPath.
+func downloadAndInstallBinary(url, destPath string) error {
+	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
 		return fmt.Errorf("HTTP request failed: %w", err)
@@ -161,66 +130,85 @@ func downloadBinary(url, destPath string) error {
 		return fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
 	}
 
-	// Create temp file in same directory as destination for atomic rename
-	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "metronous-*")
+	// Decompress and extract binary from tar.gz
+	gzr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read gzip stream: %w", err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	binaryName := "metronous"
+	if runtime.GOOS == "windows" {
+		binaryName = "metronous.exe"
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "metronous-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
 
-	// Download to temp file
-	_, err = io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to download: %w", err)
+	found := false
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			tmpFile.Close()
+			return fmt.Errorf("error reading archive: %w", err)
+		}
+		// Match the binary at the root of the archive (no directory prefix).
+		if filepath.Base(hdr.Name) == binaryName && hdr.Typeflag == tar.TypeReg {
+			if _, err := io.Copy(tmpFile, tr); err != nil {
+				tmpFile.Close()
+				return fmt.Errorf("failed to extract binary: %w", err)
+			}
+			found = true
+			break
+		}
 	}
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close temp file: %w", err)
+		return fmt.Errorf("failed to flush temp file: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("binary %q not found in archive %s", binaryName, url)
 	}
 
-	// Make executable before rename
 	if err := os.Chmod(tmpPath, 0755); err != nil {
-		os.Remove(tmpPath)
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
-	// Replace existing binary (atomic on same filesystem)
+	// Atomic replace.
 	if err := os.Rename(tmpPath, destPath); err != nil {
-		// Rename failed (cross-volume), copy instead
-		src, err := os.Open(tmpPath)
-		if err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to open temp file: %w", err)
+		// Cross-volume fallback.
+		if copyErr := copyFile(tmpPath, destPath); copyErr != nil {
+			return fmt.Errorf("rename failed (%v) and copy also failed: %w", err, copyErr)
 		}
-		defer src.Close()
-
-		// os.Create truncates existing file, no need to remove first
-		dst, err := os.Create(destPath)
-		if err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to create dest file: %w", err)
-		}
-		defer dst.Close()
-
-		if _, err := io.Copy(dst, src); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to copy binary: %w", err)
-		}
-
-		if err := dst.Close(); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to flush binary: %w", err)
-		}
-
-		if err := os.Chmod(destPath, 0755); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to set permissions: %w", err)
-		}
-
-		os.Remove(tmpPath)
 	}
-
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dst, 0755)
 }
