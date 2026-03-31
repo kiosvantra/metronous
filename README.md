@@ -85,6 +85,8 @@ metronous install
 
 > **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service. Use `metronous service status` or `sc query metronous` to verify.
 
+The service is configured with automatic recovery — if it crashes or the binary is replaced during an update, Windows will restart it automatically within seconds.
+
 For manual control:
 ```powershell
 metronous service start    # Start the service
@@ -92,6 +94,15 @@ metronous service stop     # Stop the service
 metronous service status   # Check service status
 metronous service uninstall # Remove the service
 ```
+
+### Updating on Windows
+
+```powershell
+go install github.com/kiosvantra/metronous/cmd/metronous@latest
+metronous install    # Re-registers the service with the new binary
+```
+
+> **Note:** Always run `metronous install` after updating the binary. The service will auto-recover from the binary replacement, but re-installing ensures a clean state.
 
 ### Configure OpenCode (automatically done by `metronous install`)
 

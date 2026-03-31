@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -59,6 +60,11 @@ func runInstall() error {
 	}
 	fmt.Printf("ok: service installed (platform: %s)\n", daemon.Platform())
 
+	// Step 3b: Configure SCM failure recovery — auto-restart on crash.
+	// This ensures the daemon restarts if the binary is replaced (go install)
+	// or if it crashes for any reason. Three restart attempts with increasing delays.
+	configureServiceRecovery()
+
 	// Step 4: Start the service.
 	fmt.Println("Starting service...")
 	if err := svc.Start(); err != nil {
@@ -82,6 +88,26 @@ func runInstall() error {
 	fmt.Println("Use 'sc query metronous' or 'metronous service status' to check service health.")
 	fmt.Println("All OpenCode instances will now use the shared daemon via 'metronous mcp'.")
 	return nil
+}
+
+// configureServiceRecovery sets Windows SCM failure recovery actions.
+// On failure, the service will restart automatically:
+//   - 1st failure: restart after 5 seconds
+//   - 2nd failure: restart after 10 seconds
+//   - 3rd+ failures: restart after 30 seconds
+//
+// The failure counter resets after 60 seconds of successful running.
+// This is non-fatal — if it fails, the service still works but won't auto-recover.
+func configureServiceRecovery() {
+	cmd := exec.Command("sc", "failure", "metronous",
+		"reset=", "60",
+		"actions=", "restart/5000/restart/10000/restart/30000",
+	)
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("warning: could not set service recovery: %v\n", err)
+	} else {
+		fmt.Println("ok: service recovery configured (auto-restart on failure)")
+	}
 }
 
 // patchOpencodeJSON patches opencode.json to use the MCP shim.
