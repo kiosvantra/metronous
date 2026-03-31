@@ -87,10 +87,6 @@ type AppModel struct {
 	LatestVersion string
 	// CurrentVersion is the currently running version.
 	CurrentVersion string
-
-	// lastViewLines tracks rendered line count to mitigate terminal remnants
-	// when successive renders have different height.
-	lastViewLines int
 }
 
 // NewAppModel creates an AppModel wired to the given stores/config path.
@@ -365,16 +361,7 @@ func (m *AppModel) View() string {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
-	out := fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
-	// Stabilize output height to reduce UI artifacts such as missing headers.
-	lineCount := strings.Count(out, "\n")
-	if lineCount < m.lastViewLines {
-		out += strings.Repeat("\n", m.lastViewLines-lineCount)
-	}
-	if lineCount > m.lastViewLines {
-		m.lastViewLines = lineCount
-	}
-	return out
+	return fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
 }
 
 // renderTabBar returns the rendered tab bar string with the current version on the right.
