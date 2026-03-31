@@ -251,7 +251,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.StatusMsg = "Update failed: " + err.Error()
 				} else {
-					m.StatusMsg = "Update complete! Restart to use new version."
+					m.StatusMsg = "Update complete! Close and reopen the dashboard."
 				}
 				return nil
 			}
