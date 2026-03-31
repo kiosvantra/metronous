@@ -170,6 +170,10 @@ func (m *mockEventStore) InsertEvent(ctx context.Context, event store.Event) (st
 func (m *mockEventStore) QueryEvents(ctx context.Context, _ store.EventQuery) ([]store.Event, error) {
 	return nil, nil
 }
+
+func (m *mockEventStore) CountEvents(ctx context.Context, _ store.EventQuery) (int, error) {
+	return 0, nil
+}
 func (m *mockEventStore) GetAgentEvents(ctx context.Context, _ string, _ time.Time) ([]store.Event, error) {
 	return nil, nil
 }

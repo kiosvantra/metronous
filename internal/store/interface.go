@@ -113,6 +113,10 @@ type EventStore interface {
 	// QueryEvents retrieves events matching the supplied filter criteria.
 	QueryEvents(ctx context.Context, query EventQuery) ([]Event, error)
 
+	// CountEvents returns the total number of events matching the supplied filter criteria.
+	// This is primarily used to implement UI pagination navigation (e.g. Home/End).
+	CountEvents(ctx context.Context, query EventQuery) (int, error)
+
 	// GetAgentEvents returns all events for a specific agent since a given time.
 	GetAgentEvents(ctx context.Context, agentID string, since time.Time) ([]Event, error)
 

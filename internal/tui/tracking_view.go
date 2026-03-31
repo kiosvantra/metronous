@@ -140,6 +140,27 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 			}
 			m.cursor = 0
 			return m, m.fetchEvents()
+		case "end":
+			// Jump to the newest (latest) event.
+			m.pageOffset = 0
+			m.cursor = 0
+			return m, m.fetchEvents()
+		case "home":
+			// Jump to the oldest (first registered) event.
+			if m.es != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				total, err := m.es.CountEvents(ctx, store.EventQuery{})
+				if err == nil && total > 0 {
+					lastPageOffset := ((total - 1) / maxTrackingRows) * maxTrackingRows
+					m.pageOffset = lastPageOffset
+					m.cursor = maxTrackingRows - 1
+					return m, m.fetchEvents()
+				}
+			}
+			m.pageOffset = 0
+			m.cursor = 0
+			return m, m.fetchEvents()
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(m.events) {
 				m.detailOpen = true
