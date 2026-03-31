@@ -7,10 +7,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/kiosvantra/metronous/internal/cli"
+	"github.com/kiosvantra/metronous/internal/version"
 )
-
-// Version is set at build time via -ldflags.
-var Version = "0.9.0"
 
 // rootCmd is the base command for the Metronous CLI.
 var rootCmd = &cobra.Command{
@@ -26,7 +24,7 @@ Usage:
   metronous [command]
 
 Run 'metronous [command] --help' for more information about a command.`,
-	Version: Version,
+	Version: version.Version,
 }
 
 // Execute runs the root command. This is the entry point for the CLI.
@@ -35,7 +33,7 @@ func Execute() error {
 }
 
 func init() {
-	rootCmd.SetVersionTemplate(fmt.Sprintf("metronous version %s\n", Version))
+	rootCmd.SetVersionTemplate(fmt.Sprintf("metronous version %s\n", version.Version))
 
 	// Register subcommands.
 	rootCmd.AddCommand(cli.NewInitCommand())

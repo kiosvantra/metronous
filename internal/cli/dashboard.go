@@ -12,6 +12,7 @@ import (
 
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
 	"github.com/kiosvantra/metronous/internal/tui"
+	"github.com/kiosvantra/metronous/internal/version"
 )
 
 // NewDashboardCommand creates the `metronous dashboard` cobra command.
@@ -98,10 +99,7 @@ func runDashboard(dataDir, configPath string) error {
 	}()
 
 	workDir, _ := os.Getwd()
-	version := os.Getenv("METRONOUS_VERSION")
-	if version == "" {
-		version = "unknown"
-	}
+	version := version.Version
 	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir, version)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
