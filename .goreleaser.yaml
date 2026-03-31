@@ -2,8 +2,9 @@ project_name: metronous
 version: 1
 archives:
   - format: tar.gz
-    files:
-      - metronous-plugin.ts
+    format_overrides:
+      - goos: windows
+        format: zip
 checksum:
   name_template: checksums.txt
 changelog:
@@ -27,7 +28,6 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
       - windows
     goarch:
       - amd64

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	metronous "github.com/kiosvantra/metronous"
 )
 
 func TestGenerateUnitFile(t *testing.T) {
@@ -55,7 +57,8 @@ func TestPatchOpencodeJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := patchOpencodeJSON(tmpHome); err != nil {
+	binaryPath := "/tmp/metronous"
+	if err := patchOpencodeJSON(tmpHome, binaryPath); err != nil {
 		t.Fatalf("patchOpencodeJSON: %v", err)
 	}
 
@@ -79,10 +82,10 @@ func TestPatchOpencodeJSON(t *testing.T) {
 	}
 	command, ok := metronousEntry["command"].([]interface{})
 	if !ok || len(command) != 2 {
-		t.Fatalf("expected command=[metronous mcp], got %v", metronousEntry["command"])
+		t.Fatalf("expected command=[binary mcp], got %v", metronousEntry["command"])
 	}
-	if command[0] != "metronous" || command[1] != "mcp" {
-		t.Errorf("expected [metronous mcp], got %v", command)
+	if command[0] != binaryPath || command[1] != "mcp" {
+		t.Errorf("expected [%s mcp], got %v", binaryPath, command)
 	}
 
 	// Existing keys must be preserved.
@@ -97,11 +100,29 @@ func TestPatchOpencodeJSON(t *testing.T) {
 func TestPatchOpencodeJSONMissing(t *testing.T) {
 	tmpHome := t.TempDir()
 	// opencode.json does not exist.
-	err := patchOpencodeJSON(tmpHome)
+	err := patchOpencodeJSON(tmpHome, "/tmp/metronous")
 	if err == nil {
 		t.Fatal("expected error when opencode.json is missing")
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestInstallOpenCodePluginUsesBundledPlugin(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	if err := installOpenCodePlugin(tmpHome); err != nil {
+		t.Fatalf("installOpenCodePlugin: %v", err)
+	}
+
+	pluginPath := filepath.Join(tmpHome, ".config", "opencode", "plugins", "metronous.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read installed plugin: %v", err)
+	}
+
+	if string(data) != string(metronous.EmbeddedPlugin()) {
+		t.Fatal("installed plugin does not match bundled plugin")
 	}
 }

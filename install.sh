@@ -15,6 +15,18 @@ if ! command -v grep >/dev/null 2>&1; then
     exit 1
 fi
 
+for cmd in tar cut head sed find; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Error: $cmd is required but not installed" >&2
+        exit 1
+    fi
+done
+
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    echo "Error: sha256sum or shasum is required but not installed" >&2
+    exit 1
+fi
+
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # Detect OS and arch
@@ -32,22 +44,18 @@ esac
 
 case "$OS" in
     linux) EXT=".tar.gz" ;;
-    darwin) EXT=".tar.gz" ;;
-    mingw*|msys*|cygwin*|windows) 
-        OS="windows"
-        # Check if we're in a proper Unix-like shell environment with gzip support
-        if ! command -v tar >/dev/null 2>&1; then
-            echo "Error: Windows installer requires Git Bash, WSL, or MSYS2 with tar and gzip support" >&2
-            echo "Alternatively, install via: go install github.com/kiosvantra/metronous/cmd/metronous@latest" >&2
-            exit 1
-        fi
-        # Verify gzip support explicitly without leaving temp files
-        if ! tar -tzf /dev/null 2>/dev/null; then
-            echo "Error: Windows installer requires gzip support in tar" >&2
-            echo "Alternatively, install via: go install github.com/kiosvantra/metronous/cmd/metronous@latest" >&2
-            exit 1
-        fi
-        EXT=".tar.gz"
+    darwin)
+        echo "Error: install.sh is not supported on macOS." >&2
+        echo "Use one of these manual flows instead:" >&2
+        echo "  git clone https://github.com/kiosvantra/metronous && cd metronous" >&2
+        echo "  go build -o metronous ./cmd/metronous" >&2
+        echo "  ./metronous init && ./metronous server --data-dir ~/.metronous/data --daemon-mode" >&2
+        exit 1
+        ;;
+    mingw*|msys*|cygwin*|windows)
+        echo "Error: install.sh is supported on Linux only." >&2
+        echo "For Windows, move the extracted metronous.exe to a permanent directory and run it from PowerShell as Administrator." >&2
+        exit 1
         ;;
     *)
         echo "Unsupported OS: $OS" >&2
@@ -101,6 +109,7 @@ echo "Latest version: v${VERSION}"
 
 FILENAME="metronous_${VERSION}_${OS}_${ARCH}${EXT}"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${FILENAME}"
+CHECKSUM_URL="https://github.com/${REPO}/releases/download/v${VERSION}/checksums.txt"
 
 echo "Downloading metronous v${VERSION} for ${OS}/${ARCH}..."
 
@@ -117,6 +126,33 @@ if [ ! -s "${TMPDIR}/${FILENAME}" ]; then
     exit 1
 fi
 
+echo "Verifying checksum..."
+if ! curl -fsSL "$CHECKSUM_URL" -o "${TMPDIR}/checksums.txt" 2>/dev/null; then
+    echo "Error: Failed to download checksums.txt" >&2
+    exit 1
+fi
+
+CHECKSUM_LINE=$(grep " ${FILENAME}$" "${TMPDIR}/checksums.txt" | head -1)
+if [ -z "$CHECKSUM_LINE" ]; then
+    echo "Error: No checksum found for ${FILENAME}" >&2
+    exit 1
+fi
+
+EXPECTED_HASH=$(printf '%s\n' "$CHECKSUM_LINE" | cut -d' ' -f1)
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_HASH=$(sha256sum "${TMPDIR}/${FILENAME}" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_HASH=$(shasum -a 256 "${TMPDIR}/${FILENAME}" | cut -d' ' -f1)
+else
+    echo "Error: sha256sum or shasum is required to verify the download" >&2
+    exit 1
+fi
+
+if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+    echo "Error: Checksum verification failed for ${FILENAME}" >&2
+    exit 1
+fi
+
 # Extract to temp location
 echo "Extracting..."
 if ! tar -xzf "${TMPDIR}/${FILENAME}" -C "$TMPDIR" 2>&1; then
@@ -124,19 +160,23 @@ if ! tar -xzf "${TMPDIR}/${FILENAME}" -C "$TMPDIR" 2>&1; then
     exit 1
 fi
 
-# Find the binary - be specific about the expected path from goreleaser
-# Goreleaser extracts to: metronous_<version>_<os>_<arch>/metronous
-EXPECTED_DIR="${TMPDIR}/metronous_${VERSION}_${OS}_${ARCH}"
-if [ -x "${EXPECTED_DIR}/${BINARY_NAME}" ]; then
-    BINARY_PATH="${EXPECTED_DIR}/${BINARY_NAME}"
-else
-    # Fallback: search for binary in extracted files
-    BINARY_PATH=$(find "$TMPDIR" -type f -name "$BINARY_NAME" -executable 2>/dev/null | head -1)
+# Find the binary - GoReleaser places it in the archive root (no subdirectory)
+BINARY_PATH="${TMPDIR}/${BINARY_NAME}"
+if [ ! -f "${BINARY_PATH}" ]; then
+    # Fallback: search recursively in case layout changes
+    BINARY_PATH=$(find "$TMPDIR" -type f -name "$BINARY_NAME" 2>/dev/null | head -1)
 fi
 
 if [ -z "$BINARY_PATH" ]; then
     echo "Error: Binary not found in archive" >&2
     exit 1
+fi
+
+if [ ! -x "$BINARY_PATH" ]; then
+    if ! chmod +x "$BINARY_PATH" 2>/dev/null; then
+        echo "Error: Binary is not executable and permissions could not be fixed" >&2
+        exit 1
+    fi
 fi
 
 if [ ! -s "$BINARY_PATH" ]; then
@@ -187,9 +227,7 @@ INSTALLED_PATH=""
 
 # 1. Try /usr/local/bin (standard location)
 if install_binary "/usr/local/bin"; then
-    INSTALLED_PATH="/usr/local/bin/metronous"
-    echo ""
-    echo "SUCCESS: Metronous installed to /usr/local/bin"
+    INSTALLED_PATH="/usr/local/bin/${BINARY_NAME}"
 fi
 
 # 2. If not, try user's local bin
@@ -199,9 +237,7 @@ if [ -z "$INSTALLED_PATH" ]; then
         echo "Error: Cannot create directory $LOCAL_BIN" >&2
     else
         if install_binary "$LOCAL_BIN"; then
-            INSTALLED_PATH="${LOCAL_BIN}/metronous"
-            echo ""
-            echo "SUCCESS: Metronous installed to ${LOCAL_BIN}"
+            INSTALLED_PATH="${LOCAL_BIN}/${BINARY_NAME}"
             echo ""
             echo "IMPORTANT: Add to your PATH:"
             echo "  export PATH=\"\${HOME}/.local/bin:\$PATH\""
@@ -211,24 +247,10 @@ if [ -z "$INSTALLED_PATH" ]; then
     fi
 fi
 
-# 3. If still not installed, try current directory
 if [ -z "$INSTALLED_PATH" ]; then
-    if cp "$BINARY_PATH" "./metronous" 2>&1; then
-        if chmod +x "./metronous" 2>&1; then
-            INSTALLED_PATH="./metronous"
-            echo ""
-            echo "WARNING: Installed to current directory. Move to a location in your PATH:"
-            echo "  mv ./metronous /usr/local/bin/  (requires sudo)"
-            echo "  mv ./metronous ~/.local/bin/"
-        else
-            echo "Error: Failed to set executable permissions on ./metronous" >&2
-            rm -f "./metronous"
-            exit 1
-        fi
-    else
-        echo "Error: Failed to copy binary to current directory. Check permissions." >&2
-        exit 1
-    fi
+    echo "Error: Could not install to /usr/local/bin or ~/.local/bin." >&2
+    echo "Create one of those directories with write access, then retry." >&2
+    exit 1
 fi
 
 # Verify installation
@@ -243,8 +265,9 @@ if [ -n "$INSTALLED_PATH" ] && [ -x "$INSTALLED_PATH" ]; then
         echo "Installation complete!"
         echo "========================================"
         echo ""
+        echo "Installed to: ${INSTALLED_PATH}"
         echo "Next steps:"
-        echo "  1. Run: metronous install"
+        echo "  1. Run: ${INSTALLED_PATH} install"
         echo "  2. Restart your terminal"
         echo ""
         exit 0

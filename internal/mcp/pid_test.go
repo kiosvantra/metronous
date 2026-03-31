@@ -1,3 +1,5 @@
+//go:build !windows
+
 package mcp_test
 
 import (
@@ -9,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/kiosvantra/metronous/internal/mcp"
 )
@@ -99,7 +100,7 @@ func TestAcquirePIDFile_StalePID(t *testing.T) {
 }
 
 // TestAcquirePIDFile_AliveProcess verifies that when the PID file contains the
-// PID of a live process, that process is terminated and the file is reclaimed.
+// PID of a live process, AcquirePIDFile refuses to terminate an unknown process.
 func TestAcquirePIDFile_AliveProcess(t *testing.T) {
 	// Start a long-lived background process.
 	cmd := exec.Command("sleep", "60")
@@ -108,19 +109,10 @@ func TestAcquirePIDFile_AliveProcess(t *testing.T) {
 	}
 	targetPID := cmd.Process.Pid
 
-	// Call cmd.Wait() in a goroutine so the OS can reap the zombie after the
-	// process is killed by AcquirePIDFile.  Without Wait(), the process stays
-	// as a zombie and Signal(0) continues to succeed.
-	waitDone := make(chan struct{})
-	go func() {
-		defer close(waitDone)
-		_ = cmd.Wait()
-	}()
-
-	// Best-effort cleanup if the test fails before the process is killed.
+	// Best-effort cleanup for the spawned process.
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(syscall.SIGKILL)
-		<-waitDone
+		_, _ = cmd.Process.Wait()
 	})
 
 	dir := t.TempDir()
@@ -132,24 +124,19 @@ func TestAcquirePIDFile_AliveProcess(t *testing.T) {
 		t.Fatalf("setup: write live pid file: %v", err)
 	}
 
-	if err := mcp.AcquirePIDFile(path); err != nil {
-		t.Fatalf("AcquirePIDFile: %v", err)
+	err := mcp.AcquirePIDFile(path)
+	if err == nil {
+		t.Fatal("expected error for live foreign PID")
+	}
+	if !strings.Contains(err.Error(), "refusing to terminate unknown process") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Wait for cmd.Wait() to return (zombie reaped) or timeout.
-	select {
-	case <-waitDone:
-		// Process was reaped — good.
-	case <-time.After(5 * time.Second):
-		t.Errorf("process pid %d was not reaped within 5s after AcquirePIDFile", targetPID)
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Errorf("process pid %d should still be alive, got %v", targetPID, err)
 	}
 
-	// After reaping, Signal(0) must fail.
-	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
-		t.Errorf("process pid %d is still alive after AcquirePIDFile", targetPID)
-	}
-
-	// PID file should now contain our PID.
+	// PID file should remain unchanged.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read pid file: %v", err)
@@ -158,8 +145,8 @@ func TestAcquirePIDFile_AliveProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse pid: %v", err)
 	}
-	if got != os.Getpid() {
-		t.Errorf("pid in file after termination: got %d, want %d", got, os.Getpid())
+	if got != targetPID {
+		t.Errorf("pid in file after refusal: got %d, want %d", got, targetPID)
 	}
 }
 

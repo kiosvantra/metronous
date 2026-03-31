@@ -12,9 +12,9 @@ import (
 func NewInstallCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install Metronous as a systemd user service (Linux only)",
+		Short: "Install Metronous as a platform service",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return errors.New("systemd service installation is only supported on Linux")
+			return errors.New("metronous install is only supported on Linux; macOS is manual CLI only")
 		},
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	metronous "github.com/kiosvantra/metronous"
 	"github.com/spf13/cobra"
 
 	"github.com/kiosvantra/metronous/internal/daemon"
@@ -17,20 +18,22 @@ import (
 func NewInstallCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install Metronous as a Windows service",
-		Long: `Install Metronous as a Windows service (requires elevated terminal).
+		Short: "Install Metronous as an experimental Windows service",
+		Long: `Install Metronous as an experimental Windows service (requires elevated terminal).
 
 This command:
   1. Initializes ~/.metronous (idempotent)
   2. Registers the Metronous service via Windows Service Control Manager
   3. Starts the service
-  4. Patches opencode.json to use ["metronous", "mcp"]
+  4. Patches opencode.json to use this executable for MCP
   5. Installs the OpenCode plugin (metronous.ts)
 
-After running this command, every OpenCode instance will automatically
+After running this experimental command, OpenCode on this machine will
 connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.
 
-Note: Run this from an elevated terminal (Run as Administrator).`,
+Linux remains the only officially supported installer path.
+
+Note: Run this from an elevated terminal (Run as Administrator) using the same Windows user account that runs OpenCode.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runInstall()
 		},
@@ -49,7 +52,17 @@ func runInstall() error {
 	// Step 2: Determine data directory.
 	dataDir := defaultDataDir()
 
-	// Step 3: Install the Windows service via kardianos/service.
+	// Step 3: Determine install paths.
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get user home: %w", err)
+	}
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+
+	// Step 4: Install the Windows service via kardianos/service.
 	fmt.Println("Installing Windows service...")
 	svc, err := buildService(dataDir)
 	if err != nil {
@@ -60,59 +73,70 @@ func runInstall() error {
 	}
 	fmt.Printf("ok: service installed (platform: %s)\n", daemon.Platform())
 
-	// Step 4: Start the service.
+	// Step 5: Start the service.
 	fmt.Println("Starting service...")
 	if err := svc.Start(); err != nil {
-		return fmt.Errorf("start service: %w", err)
+		return combineRollback(fmt.Errorf("start service: %w", err), svc.Uninstall())
 	}
 	fmt.Println("ok: service started")
 
-	// Step 5: Patch opencode.json.
-	userHome, err := os.UserHomeDir()
+	configRoot := resolveOpenCodeRoot(userHome)
+	configBackup, err := backupFile(filepath.Join(configRoot, "opencode.json"))
 	if err != nil {
-		return fmt.Errorf("get user home: %w", err)
+		return fmt.Errorf("backup opencode.json: %w", err)
 	}
-	if err := patchOpencodeJSON(userHome); err != nil {
-		// Non-fatal: print warning.
-		fmt.Printf("\nWarning: could not patch opencode.json: %v\n", err)
-		fmt.Println("Manually add to your opencode.json:")
-		fmt.Println(`  "mcp": {"metronous": {"command": ["metronous", "mcp"], "type": "local"}}`)
+	pluginBackup, err := backupFile(filepath.Join(configRoot, "plugins", "metronous.ts"))
+	if err != nil {
+		return fmt.Errorf("backup plugin: %w", err)
 	}
 
-	// Step 6: Install OpenCode plugin.
+	rollback := func(cause error) error {
+		stopErr := svc.Stop()
+		uninstallErr := svc.Uninstall()
+		configErr := configBackup.restore(0600)
+		pluginErr := pluginBackup.restore(0600)
+		return combineRollback(cause, stopErr, uninstallErr, configErr, pluginErr)
+	}
+
+	// Step 6: Patch opencode.json.
+	if err := patchOpencodeJSON(userHome, execPath); err != nil {
+		return rollback(fmt.Errorf("configure opencode mcp: %w", err))
+	}
+
+	// Step 7: Install OpenCode plugin.
 	if err := installOpenCodePlugin(userHome); err != nil {
-		fmt.Printf("\nWarning: could not install plugin: %v\n", err)
-	} else {
-		fmt.Println("installed: OpenCode plugin")
+		return rollback(fmt.Errorf("install opencode plugin: %w", err))
 	}
+	fmt.Println("installed: OpenCode plugin")
 
-	fmt.Println("\nMetronous service installed and started.")
-	fmt.Println("Use 'sc query metronous' or 'metronous service status' to check service health.")
-	fmt.Println("All OpenCode instances will now use the shared daemon via 'metronous mcp'.")
+	fmt.Println("\nExperimental Windows service installed and started.")
+	fmt.Printf("Use 'sc query metronous' or '%s service status' to check service health.\n", execPath)
+	fmt.Println("OpenCode on this machine is now configured to use the shared daemon via 'metronous mcp'.")
 	return nil
 }
 
 // patchOpencodeJSON patches opencode.json to use the MCP shim.
 // On Windows it checks %APPDATA%\opencode\opencode.json first, then falls
 // back to userHome\.config\opencode\opencode.json.
-func patchOpencodeJSON(userHome string) error {
+func resolveOpenCodeRoot(userHome string) string {
 	appData := os.Getenv("APPDATA")
-
-	candidates := []string{}
 	if appData != "" {
-		candidates = append(candidates, filepath.Join(appData, "opencode", "opencode.json"))
-	}
-	candidates = append(candidates, filepath.Join(userHome, ".config", "opencode", "opencode.json"))
-
-	var configPath string
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			configPath = c
-			break
+		appDataRoot := filepath.Join(appData, "opencode")
+		if _, err := os.Stat(filepath.Join(appDataRoot, "opencode.json")); err == nil {
+			return appDataRoot
 		}
 	}
-	if configPath == "" {
-		return fmt.Errorf("opencode.json not found (checked: %v)", candidates)
+	return filepath.Join(userHome, ".config", "opencode")
+}
+
+func patchOpencodeJSON(userHome, binaryPath string) error {
+	rootDir := resolveOpenCodeRoot(userHome)
+	configPath := filepath.Join(rootDir, "opencode.json")
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("opencode.json not found at %s", configPath)
+		}
+		return fmt.Errorf("stat opencode.json: %w", err)
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -133,7 +157,7 @@ func patchOpencodeJSON(userHome string) error {
 
 	// Set or overwrite the metronous entry.
 	mcpServers["metronous"] = map[string]interface{}{
-		"command": []interface{}{"metronous", "mcp"},
+		"command": []interface{}{binaryPath, "mcp"},
 		"type":    "local",
 	}
 	cfg["mcp"] = mcpServers
@@ -149,39 +173,16 @@ func patchOpencodeJSON(userHome string) error {
 	return nil
 }
 
-// installOpenCodePlugin copies the metronous-plugin.ts to the plugins directory.
+// installOpenCodePlugin copies the embedded metronous-plugin.ts to the plugins directory.
 // On Windows it checks %APPDATA%\opencode\plugins first, then falls back to
 // userHome\.config\opencode\plugins.
 func installOpenCodePlugin(userHome string) error {
-	// Find the plugin file - it's in the same directory as the executable
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
-	}
-	execDir := filepath.Dir(execPath)
-	pluginSrc := filepath.Join(execDir, "metronous-plugin.ts")
-
-	// Check if plugin exists in exec directory
-	if _, err := os.Stat(pluginSrc); err != nil && os.IsNotExist(err) {
-		// Try current working directory as fallback
-		cwd, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			return fmt.Errorf("plugin not found in exec dir or CWD")
-		}
-		pluginSrc = filepath.Join(cwd, "metronous-plugin.ts")
-		if _, err := os.Stat(pluginSrc); err != nil && os.IsNotExist(err) {
-			return fmt.Errorf("metronous-plugin.ts not found")
-		}
+	pluginData := metronous.EmbeddedPlugin()
+	if len(pluginData) == 0 {
+		return fmt.Errorf("embedded plugin is empty")
 	}
 
-	// Determine plugins directory - check APPDATA first on Windows
-	appData := os.Getenv("APPDATA")
-	var pluginsDir string
-	if appData != "" {
-		pluginsDir = filepath.Join(appData, "opencode", "plugins")
-	} else {
-		pluginsDir = filepath.Join(userHome, ".config", "opencode", "plugins")
-	}
+	pluginsDir := filepath.Join(resolveOpenCodeRoot(userHome), "plugins")
 
 	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
 		return fmt.Errorf("create plugins dir: %w", err)
@@ -189,11 +190,7 @@ func installOpenCodePlugin(userHome string) error {
 
 	// Copy plugin file
 	pluginDst := filepath.Join(pluginsDir, "metronous.ts")
-	data, err := os.ReadFile(pluginSrc)
-	if err != nil {
-		return fmt.Errorf("read plugin: %w", err)
-	}
-	if err := os.WriteFile(pluginDst, data, 0600); err != nil {
+	if err := os.WriteFile(pluginDst, pluginData, 0600); err != nil {
 		return fmt.Errorf("write plugin: %w", err)
 	}
 	return nil

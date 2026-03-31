@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	metronous "github.com/kiosvantra/metronous"
 )
 
 func TestPatchOpencodeJSON(t *testing.T) {
@@ -33,7 +35,8 @@ func TestPatchOpencodeJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := patchOpencodeJSON(tmpHome); err != nil {
+	binaryPath := `C:\\Tools\\metronous.exe`
+	if err := patchOpencodeJSON(tmpHome, binaryPath); err != nil {
 		t.Fatalf("patchOpencodeJSON: %v", err)
 	}
 
@@ -57,10 +60,10 @@ func TestPatchOpencodeJSON(t *testing.T) {
 	}
 	command, ok := metronousEntry["command"].([]interface{})
 	if !ok || len(command) != 2 {
-		t.Fatalf("expected command=[metronous mcp], got %v", metronousEntry["command"])
+		t.Fatalf("expected command=[binary mcp], got %v", metronousEntry["command"])
 	}
-	if command[0] != "metronous" || command[1] != "mcp" {
-		t.Errorf("expected [metronous mcp], got %v", command)
+	if command[0] != binaryPath || command[1] != "mcp" {
+		t.Errorf("expected [%s mcp], got %v", binaryPath, command)
 	}
 
 	// Existing keys must be preserved.
@@ -104,7 +107,7 @@ func TestPatchOpencodeJSONAppDataFirst(t *testing.T) {
 	// Set APPDATA to our temp directory.
 	t.Setenv("APPDATA", tmpAppData)
 
-	if err := patchOpencodeJSON(tmpHome); err != nil {
+	if err := patchOpencodeJSON(tmpHome, `C:\\Tools\\metronous.exe`); err != nil {
 		t.Fatalf("patchOpencodeJSON: %v", err)
 	}
 
@@ -147,11 +150,43 @@ func TestPatchOpencodeJSONMissing(t *testing.T) {
 	// Ensure APPDATA also points to a temp dir without opencode.json.
 	t.Setenv("APPDATA", t.TempDir())
 
-	err := patchOpencodeJSON(tmpHome)
+	err := patchOpencodeJSON(tmpHome, `C:\\Tools\\metronous.exe`)
 	if err == nil {
 		t.Fatal("expected error when opencode.json is missing")
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestInstallOpenCodePluginUsesBundledPlugin(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpAppData := t.TempDir()
+	t.Setenv("APPDATA", tmpAppData)
+
+	if err := installOpenCodePlugin(tmpHome); err != nil {
+		t.Fatalf("installOpenCodePlugin: %v", err)
+	}
+
+	pluginPath := filepath.Join(tmpAppData, "opencode", "plugins", "metronous.ts")
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read installed plugin: %v", err)
+	}
+
+	if string(data) != string(metronous.EmbeddedPlugin()) {
+		t.Fatal("installed plugin does not match bundled plugin")
+	}
+}
+
+func TestResolveOpenCodeRootFallsBackWhenAppDataConfigMissing(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpAppData := t.TempDir()
+	t.Setenv("APPDATA", tmpAppData)
+
+	got := resolveOpenCodeRoot(tmpHome)
+	want := filepath.Join(tmpHome, ".config", "opencode")
+	if got != want {
+		t.Fatalf("resolveOpenCodeRoot() = %q, want %q", got, want)
 	}
 }

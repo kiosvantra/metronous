@@ -14,9 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/kiosvantra/metronous/internal/version"
 	"go.uber.org/zap"
 )
 
@@ -26,14 +26,10 @@ const (
 
 	// ServerName is the name reported during MCP initialization.
 	ServerName = "metronous"
-
-	// ServerVersion matches the CLI version.
-	ServerVersion = "0.9.0"
-
-	// gracefulShutdownTimeout is how long to wait for an existing instance
-	// to exit cleanly before sending SIGKILL.
-	gracefulShutdownTimeout = 2 * time.Second
 )
+
+// ServerVersion matches the CLI version.
+var ServerVersion = version.Version
 
 // Server is a minimal MCP server that communicates over stdio.
 // It handles JSON-RPC 2.0 messages and dispatches tool calls to registered handlers.
@@ -309,12 +305,9 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		// Non-fatal: log the error and proceed with stdio-only mode.
-		s.logger.Warn("could not start health HTTP server; continuing in stdio-only mode",
-			zap.Error(err))
-		return s.ServeStdio(ctx)
+		return fmt.Errorf("start health HTTP server: %w", err)
 	}
 
 	port := listener.Addr().(*net.TCPAddr).Port
@@ -326,7 +319,8 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	// Persist the port so other processes (e.g. the OpenCode plugin) can find it.
 	// portPath was already set above for the stale-file cleanup.
 	if portErr := writePortFile(portPath, port); portErr != nil {
-		s.logger.Warn("could not write mcp.port file", zap.Error(portErr))
+		_ = listener.Close()
+		return fmt.Errorf("write mcp.port: %w", portErr)
 	}
 
 	// Remove port file on ALL exit paths (normal EOF or context cancellation).
@@ -373,7 +367,9 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 // directly. Shim processes (metronous mcp) connect to the HTTP endpoint instead.
 //
 // The function blocks until ctx is cancelled.
-func (s *Server) ServeDaemon(ctx context.Context) error {
+func (s *Server) ServeDaemon(outerCtx context.Context) error {
+	ctx, cancel := context.WithCancel(outerCtx)
+	defer cancel()
 	// ── Single-instance enforcement via PID file ───────────────────────────────
 	pidPath := s.pidFilePath()
 	if err := AcquirePIDFile(pidPath); err != nil {
@@ -391,7 +387,7 @@ func (s *Server) ServeDaemon(ctx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("start health HTTP server: %w", err)
 	}
@@ -429,43 +425,31 @@ func (s *Server) ServeDaemon(ctx context.Context) error {
 		WriteTimeout: 15 * time.Second,
 	}
 
-	var serveErr error
 	serveDone := make(chan error, 1)
 	go func() {
-		serveErr = httpSrv.Serve(listener)
-		if serveErr != nil && serveErr != http.ErrServerClosed {
-			s.logger.Warn("daemon HTTP server stopped", zap.Error(serveErr))
+		err := httpSrv.Serve(listener)
+		if err != nil && err != http.ErrServerClosed {
+			s.logger.Warn("daemon HTTP server stopped unexpectedly", zap.Error(err))
+			cancel() // unblock ctx.Done() so the shutdown goroutine runs
 		}
-		serveDone <- serveErr
+		serveDone <- err
 	}()
 
 	// Shut down the HTTP server when the context is cancelled.
-	shutdownDone := make(chan struct{}, 1)
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			s.logger.Warn("daemon HTTP server shutdown error", zap.Error(err))
 		}
-		shutdownDone <- struct{}{}
 	}()
 
-	// Wait for either server error or shutdown completion
-	select {
-	case err := <-serveDone:
-		// Server returned an error, wait for shutdown to complete
-		<-shutdownDone
-		// Only return error if it's not a normal shutdown
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("serve HTTP server: %w", err)
-		}
-		return nil
-	case <-shutdownDone:
-		// Shutdown completed, wait for server to finish
-		<-serveDone
-		return nil
+	// Wait for the Serve goroutine to finish (always reached because cancel() unblocks ctx.Done()).
+	if sErr := <-serveDone; sErr != nil && sErr != http.ErrServerClosed {
+		return fmt.Errorf("serve HTTP server: %w", sErr)
 	}
+	return nil
 }
 
 // healthResponse is the JSON body returned by /health.
@@ -487,12 +471,18 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	body, _ := json.Marshal(healthResponse{
+	body, err := json.Marshal(healthResponse{
 		Status:  "ok",
 		Name:    ServerName,
 		Version: ServerVersion,
 	})
-	_, _ = w.Write(body)
+	if err != nil {
+		http.Error(w, "failed to encode health response", http.StatusInternalServerError)
+		return
+	}
+	if _, err := w.Write(body); err != nil {
+		log.Printf("metronous: write health response: %v", err)
+	}
 }
 
 // ingestHandler returns an http.HandlerFunc that accepts POST /ingest requests
@@ -535,15 +525,27 @@ func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			body, _ := json.Marshal(map[string]string{"error": err.Error()})
-			_, _ = w.Write(body)
+			body, marshalErr := json.Marshal(map[string]string{"error": err.Error()})
+			if marshalErr != nil {
+				http.Error(w, "failed to encode error response", http.StatusInternalServerError)
+				return
+			}
+			if _, err := w.Write(body); err != nil {
+				log.Printf("metronous: write ingest error response: %v", err)
+			}
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		body, _ := json.Marshal(result)
-		_, _ = w.Write(body)
+		body, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			http.Error(w, "failed to encode ingest response", http.StatusInternalServerError)
+			return
+		}
+		if _, err := w.Write(body); err != nil {
+			log.Printf("metronous: write ingest response: %v", err)
+		}
 	}
 }
 
@@ -625,18 +627,6 @@ func removePIDFile(path string) error {
 	return nil
 }
 
-// isProcessAlive returns true if the process with the given PID is running.
-// Uses signal 0 (no-op) for cross-platform process existence check.
-func isProcessAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks existence without actually sending a signal.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
-}
-
 // AcquirePIDFile atomically claims ownership of the PID file at path for the
 // current process.  It uses O_CREAT|O_EXCL to eliminate the TOCTOU race
 // between read-check-claim that existed in the previous implementation.
@@ -644,9 +634,8 @@ func isProcessAlive(pid int) bool {
 // Behaviour:
 //   - If the file does not exist, it is created atomically and our PID written.
 //   - If the file already exists and contains our own PID, this is a no-op.
-//   - If the file already exists and contains a live foreign PID, that process
-//     is terminated gracefully (SIGTERM, wait up to gracefulShutdownTimeout,
-//     then SIGKILL) and the function recurses to re-claim atomically.
+//   - If the file already exists and contains a live foreign PID, the function
+//     returns an error instead of terminating an unknown process.
 //   - If the file already exists but the recorded PID is dead (stale), the
 //     file is removed and the function recurses to re-claim atomically.
 //
@@ -706,36 +695,8 @@ func AcquirePIDFile(path string) error {
 		}
 
 		if existingPID > 0 {
-			proc, findErr := os.FindProcess(existingPID)
-			if findErr == nil {
-				if sigErr := proc.Signal(syscall.Signal(0)); sigErr == nil {
-					// Process is alive — terminate it gracefully.
-					log.Printf("metronous: terminating existing instance (pid %d)", existingPID)
-					if err := proc.Signal(syscall.SIGTERM); err != nil {
-						log.Printf("metronous: SIGTERM to pid %d: %v", existingPID, err)
-					}
-
-					// Wait up to gracefulShutdownTimeout for the process to exit.
-					graceful := false
-					for i := 0; i < 20; i++ {
-						time.Sleep(100 * time.Millisecond)
-						if proc.Signal(syscall.Signal(0)) != nil {
-							graceful = true
-							break
-						}
-					}
-
-					if !graceful {
-						// Process did not exit voluntarily — force-kill it.
-						log.Printf("metronous: force-killing existing instance (pid %d)", existingPID)
-						if err := proc.Signal(syscall.SIGKILL); err != nil {
-							log.Printf("metronous: SIGKILL to pid %d: %v", existingPID, err)
-						}
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-				// Process was alive but is now terminated (or was already dead) —
-				// fall through to remove and retry.
+			if isProcessAlive(existingPID) {
+				return fmt.Errorf("pid file %s is owned by live process %d; refusing to terminate unknown process", path, existingPID)
 			}
 		}
 
