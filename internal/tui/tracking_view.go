@@ -65,13 +65,14 @@ type TrackingModel struct {
 // Column header widths.
 var (
 	colWidths = []int{20, 16, 12, 22, 8, 8, 14, 10, 10}
-	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent(total)", "Session", "Dur"}
+	colNames  = []string{"Time", "Agent", "Type", "Model", "In(accum)", "Out(accum)", "Spent(total)", "Session", "Dur"}
 
-	headerStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	spentOkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	// Very light gray so low-cost sessions do not feel "disabled".
+	spentOkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 	spentWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	spentBadStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 
