@@ -119,7 +119,8 @@ type BenchmarkModel struct {
 	workDir     string
 	// aggStats holds the latest cross-agent weekly aggregation results, updated on
 	// each background refresh alongside m.runs.
-	aggStats []benchmark.AggregateStat
+	aggStats      []benchmark.AggregateStat
+	lastViewLines int
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -354,26 +355,30 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 }
 
 // View renders the benchmark history tab.
-func (m BenchmarkModel) View() string {
+func (m *BenchmarkModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Benchmark History") + "\n\n")
 
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
-		return sb.String()
+		out := sb.String()
+		return m.stabilizeLines(out)
 	}
 	if m.err != nil {
 		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
-		return sb.String()
+		out := sb.String()
+		return m.stabilizeLines(out)
 	}
 	if len(m.runs) == 0 && len(m.agents) == 0 {
 		sb.WriteString(dimStyle.Render("  No agents discovered and no benchmark runs yet.") + "\n")
-		return sb.String()
+		out := sb.String()
+		return m.stabilizeLines(out)
 	}
 	if len(m.runs) == 0 {
 		sb.WriteString(dimStyle.Render("  No benchmark runs yet. Run a benchmark to see history here.") + "\n")
-		return sb.String()
+		out := sb.String()
+		return m.stabilizeLines(out)
 	}
 
 	// Header.
@@ -435,7 +440,26 @@ func (m BenchmarkModel) View() string {
 	// Weekly aggregation table — shown after the detail panel when data is available.
 	sb.WriteString(renderAggregationTable(m.aggStats))
 
-	return sb.String()
+	out := sb.String()
+	return m.stabilizeLines(out)
+}
+
+// stabilizeLines ensures the output occupies at least as many terminal lines as
+// the previous render, preventing remnant/overdraw artifacts (e.g. missing headers).
+func (m *BenchmarkModel) stabilizeLines(out string) string {
+	lineCount := strings.Count(out, "\n")
+	if lineCount < m.lastViewLines {
+		out += strings.Repeat("\n", m.lastViewLines-lineCount)
+	}
+	m.lastViewLines = maxInt(m.lastViewLines, lineCount)
+	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // renderDetailPanel renders the decision rationale panel for the selected run.
