@@ -45,6 +45,9 @@ type TrackingModel struct {
 	// detailOpen toggles an event detail overlay.
 	detailOpen  bool
 	detailIndex int
+	// detailEvent freezes the selected event so the overlay content does not change
+	// while the background auto-refresh updates m.events.
+	detailEvent store.Event
 }
 
 // Column header widths.
@@ -141,6 +144,7 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 			if m.cursor >= 0 && m.cursor < len(m.events) {
 				m.detailOpen = true
 				m.detailIndex = m.cursor
+				m.detailEvent = m.events[m.cursor]
 			}
 		}
 	}
@@ -185,13 +189,7 @@ func (m TrackingModel) View() string {
 	}
 
 	if m.detailOpen {
-		idx := m.detailIndex
-		if idx < 0 || idx >= len(m.events) {
-			m.detailOpen = false
-			return sb.String()
-		}
-		ev := m.events[idx]
-		return sb.String() + renderEventDetail(ev)
+		return sb.String() + renderEventDetail(m.detailEvent)
 	}
 
 	// Header row.
