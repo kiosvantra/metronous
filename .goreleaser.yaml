@@ -2,6 +2,8 @@ project_name: metronous
 version: 1
 archives:
   - format: tar.gz
+    files:
+      - metronous-plugin.ts
 checksum:
   name_template: checksums.txt
 changelog:
