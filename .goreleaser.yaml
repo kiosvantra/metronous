@@ -20,6 +20,8 @@ release:
     name: metronous
   draft: false
   prerelease: auto
+  extra_files:
+    - glob: ./install.sh
 builds:
   - id: metronous
     binary: metronous

@@ -48,7 +48,17 @@ Go 1.22+ is only required for source builds and `go install`.
 - **Windows**: experimental/manual
 - **macOS**: manual CLI only
 
-### Linux release install (recommended)
+### Linux (recommended — one command)
+
+```bash
+curl -fsSL https://github.com/kiosvantra/metronous/releases/latest/download/install.sh | bash
+```
+
+This script downloads the latest release, verifies the checksum, installs the binary to `~/.local/bin`, and runs `metronous install` to set up the systemd service and configure OpenCode automatically.
+
+> Do not run with `sudo`. Must run as the same normal user that runs OpenCode.
+
+### Linux (manual)
 
 ```bash
 VERSION=$(curl -sSL https://api.github.com/repos/kiosvantra/metronous/releases/latest | grep '"tag_name"' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
@@ -60,16 +70,9 @@ sha256sum -c --ignore-missing checksums.txt
 tar -xzf "${TARBALL}"
 mkdir -p ~/.local/bin
 install -m 0755 ./metronous ~/.local/bin/metronous
-rm -f "${TARBALL}" checksums.txt metronous-plugin.ts
-```
-
-Then run the installed binary:
-
-```bash
+rm -f "${TARBALL}" checksums.txt
 ~/.local/bin/metronous install
 ```
-
-Do not run `metronous install` with `sudo` or as root. It must run as the same normal user that runs OpenCode.
 
 ### Via Go (Linux, with systemd user services)
 

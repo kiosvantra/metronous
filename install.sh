@@ -253,29 +253,41 @@ if [ -z "$INSTALLED_PATH" ]; then
     exit 1
 fi
 
-# Verify installation
-if [ -n "$INSTALLED_PATH" ] && [ -x "$INSTALLED_PATH" ]; then
-    echo ""
-    echo "Verifying installation..."
-    # Capture both stdout and stderr, then check exit code
-    if VERSION_OUTPUT=$("$INSTALLED_PATH" --version 2>&1); then
-        echo "$VERSION_OUTPUT"
-        echo ""
-        echo "========================================"
-        echo "Installation complete!"
-        echo "========================================"
-        echo ""
-        echo "Installed to: ${INSTALLED_PATH}"
-        echo "Next steps:"
-        echo "  1. Run: ${INSTALLED_PATH} install"
-        echo "  2. Restart your terminal"
-        echo ""
-        exit 0
-    else
-        echo "Warning: Binary exists but --version failed. Installation may be incomplete." >&2
-        exit 1
-    fi
+# Verify binary works
+if [ -z "$INSTALLED_PATH" ] || [ ! -x "$INSTALLED_PATH" ]; then
+    echo "Error: Installation failed. Please check permissions and try again." >&2
+    exit 1
 fi
 
-echo "Error: Installation failed. Please check permissions and try again." >&2
-exit 1
+echo ""
+echo "Verifying installation..."
+if ! VERSION_OUTPUT=$("$INSTALLED_PATH" --version 2>&1); then
+    echo "Warning: Binary exists but --version failed." >&2
+    exit 1
+fi
+echo "$VERSION_OUTPUT"
+
+# Add to PATH for this session if needed
+if ! command -v metronous >/dev/null 2>&1; then
+    export PATH="${INSTALLED_PATH%/*}:$PATH"
+fi
+
+# Run metronous install to set up the service and configure OpenCode
+echo ""
+echo "Setting up Metronous service..."
+if "$INSTALLED_PATH" install; then
+    echo ""
+    echo "========================================"
+    echo "Metronous installed successfully!"
+    echo "========================================"
+    echo ""
+    echo "Restart your terminal or run:"
+    echo "  export PATH=\"\${HOME}/.local/bin:\$PATH\""
+    echo ""
+    exit 0
+else
+    echo "" >&2
+    echo "Binary installed to: ${INSTALLED_PATH}" >&2
+    echo "Service setup failed. Run manually: ${INSTALLED_PATH} install" >&2
+    exit 1
+fi
