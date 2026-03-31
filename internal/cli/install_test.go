@@ -99,13 +99,32 @@ func TestPatchOpencodeJSON(t *testing.T) {
 
 func TestPatchOpencodeJSONMissing(t *testing.T) {
 	tmpHome := t.TempDir()
-	// opencode.json does not exist.
-	err := patchOpencodeJSON(tmpHome, "/tmp/metronous")
-	if err == nil {
-		t.Fatal("expected error when opencode.json is missing")
+	binaryPath := "/tmp/metronous"
+	// opencode.json does not exist — should be created automatically.
+	if err := patchOpencodeJSON(tmpHome, binaryPath); err != nil {
+		t.Fatalf("patchOpencodeJSON should create opencode.json if missing, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("unexpected error: %v", err)
+
+	configPath := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("opencode.json not created: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("created opencode.json is invalid JSON: %v", err)
+	}
+	mcp, ok := cfg["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatal("mcp key missing from created opencode.json")
+	}
+	entry, ok := mcp["metronous"].(map[string]interface{})
+	if !ok {
+		t.Fatal("mcp.metronous missing")
+	}
+	cmd, _ := entry["command"].([]interface{})
+	if len(cmd) != 2 || cmd[0] != binaryPath || cmd[1] != "mcp" {
+		t.Errorf("unexpected command: %v", cmd)
 	}
 }
 

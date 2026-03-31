@@ -131,22 +131,24 @@ func resolveOpenCodeRoot(userHome string) string {
 
 func patchOpencodeJSON(userHome, binaryPath string) error {
 	rootDir := resolveOpenCodeRoot(userHome)
-	configPath := filepath.Join(rootDir, "opencode.json")
-	if _, err := os.Stat(configPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("opencode.json not found at %s", configPath)
-		}
-		return fmt.Errorf("stat opencode.json: %w", err)
+	if err := os.MkdirAll(rootDir, 0700); err != nil {
+		return fmt.Errorf("create opencode config dir: %w", err)
 	}
 
+	configPath := filepath.Join(rootDir, "opencode.json")
 	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read opencode.json: %w", err)
 	}
 
 	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse opencode.json: %w", err)
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("parse opencode.json: %w", err)
+		}
+	}
+	if cfg == nil {
+		cfg = make(map[string]interface{})
 	}
 
 	// Ensure mcp map exists (OpenCode uses "mcp", not "mcpServers").

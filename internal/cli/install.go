@@ -188,19 +188,28 @@ func runSystemctl(args ...string) error {
 }
 
 // patchOpencodeJSON patches ~/.config/opencode/opencode.json to use the MCP shim.
+// If the file does not exist it is created with a minimal valid configuration.
 func patchOpencodeJSON(userHome, binaryPath string) error {
-	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
+	configDir := filepath.Join(userHome, ".config", "opencode")
+	configPath := filepath.Join(configDir, "opencode.json")
+
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("create opencode config dir: %w", err)
+	}
+
 	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("opencode.json not found at %s", configPath)
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read opencode.json: %w", err)
 	}
 
 	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse opencode.json: %w", err)
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("parse opencode.json: %w", err)
+		}
+	}
+	if cfg == nil {
+		cfg = make(map[string]interface{})
 	}
 
 	// Ensure mcp map exists (OpenCode uses "mcp", not "mcpServers").
