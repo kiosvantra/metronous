@@ -184,7 +184,8 @@ func AggregateMetrics(logger *zap.Logger, agentID string, events []store.Event) 
 func GroupEventsByModel(events []store.Event) map[string][]store.Event {
 	groups := make(map[string][]store.Event)
 	for _, e := range events {
-		groups[e.Model] = append(groups[e.Model], e)
+		normalized := NormalizeModelName(e.Model)
+		groups[normalized] = append(groups[normalized], e)
 	}
 	return groups
 }
