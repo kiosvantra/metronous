@@ -127,6 +127,10 @@ type SessionSummary struct {
 
 	// CostUSD is the total cost for the session (nullable).
 	CostUSD *float64
+
+	// DurationMs is the duration of the session in milliseconds (nullable).
+	// It is populated from the session's `complete` event when present.
+	DurationMs *int
 }
 
 // SessionQuery defines filter criteria for querying sessions.

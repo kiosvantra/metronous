@@ -606,7 +606,9 @@ func makeSessionSummaries(n int) []store.SessionSummary {
 	base := time.Now()
 	tokens := 100
 	cost := 0.001
+	dur := 5000 // 5s
 	for i := 0; i < n; i++ {
+		d := dur + i*20000 // vary 5s.. etc for coloring
 		sessions[i] = store.SessionSummary{
 			SessionID:        fmt.Sprintf("sess-%02d", i),
 			AgentID:          fmt.Sprintf("agent-%02d", i),
@@ -615,6 +617,7 @@ func makeSessionSummaries(n int) []store.SessionSummary {
 			PromptTokens:     &tokens,
 			CompletionTokens: &tokens,
 			CostUSD:          &cost,
+			DurationMs:       &d,
 		}
 	}
 	return sessions
