@@ -37,6 +37,9 @@ type TrackingModel struct {
 	err     error
 	cursor  int
 	loading bool
+	// detailOpen toggles an event detail overlay.
+	detailOpen  bool
+	detailIndex int
 }
 
 // Column header widths.
@@ -95,6 +98,14 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if m.detailOpen {
+			switch msg.String() {
+			case "esc", "escape":
+				m.detailOpen = false
+				return m, nil
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {
@@ -103,6 +114,11 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 		case "down", "j":
 			if m.cursor < len(m.events)-1 {
 				m.cursor++
+			}
+		case "enter":
+			if m.cursor >= 0 && m.cursor < len(m.events) {
+				m.detailOpen = true
+				m.detailIndex = m.cursor
 			}
 		}
 	}
@@ -143,6 +159,16 @@ func (m TrackingModel) View() string {
 		return sb.String()
 	}
 
+	if m.detailOpen {
+		idx := m.detailIndex
+		if idx < 0 || idx >= len(m.events) {
+			m.detailOpen = false
+			return sb.String()
+		}
+		ev := m.events[idx]
+		return sb.String() + renderEventDetail(ev)
+	}
+
 	// Header row.
 	sb.WriteString(renderRow(colNames, colWidths, headerStyle))
 	sb.WriteString("\n")
@@ -165,6 +191,77 @@ func (m TrackingModel) View() string {
 	sb.WriteString("\n")
 
 	return sb.String()
+}
+
+func renderEventDetail(ev store.Event) string {
+	// Basic overlay with a border; no metadata by design.
+	box := lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).Padding(0, 1)
+
+	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
+
+	getNonNegInt := func(p *int) string {
+		if p == nil || *p <= 0 {
+			return "-"
+		}
+		return fmt.Sprintf("%d", *p)
+	}
+	getInt := func(p *int) string {
+		if p == nil {
+			return "-"
+		}
+		return fmt.Sprintf("%d", *p)
+	}
+	getFloat := func(p *float64) string {
+		if p == nil {
+			return "-"
+		}
+		return fmt.Sprintf("%.4f", *p)
+	}
+	getBool := func(p *bool) string {
+		if p == nil {
+			return "-"
+		}
+		return fmt.Sprintf("%v", *p)
+	}
+	getStr := func(p *string) string {
+		if p == nil {
+			return "-"
+		}
+		return *p
+	}
+
+	// Duration/cost are often nil; match the table behavior.
+	duration := getInt(ev.DurationMs)
+	quality := getFloat(ev.QualityScore)
+	rework := getInt(ev.ReworkCount)
+	cost := "-"
+	if ev.CostUSD != nil && *ev.CostUSD > 0 {
+		cost = fmt.Sprintf("$%.4f", *ev.CostUSD)
+	}
+
+	spent := cost
+
+	lines := []string{
+		"Event Detail",
+		fmt.Sprintf("Time:   %s", ts),
+		fmt.Sprintf("Agent:  %s", ev.AgentID),
+		fmt.Sprintf("Type:   %s", ev.EventType),
+		fmt.Sprintf("Model:  %s", ev.Model),
+		fmt.Sprintf("In:     %s", getNonNegInt(ev.PromptTokens)),
+		fmt.Sprintf("Out:    %s", getNonNegInt(ev.CompletionTokens)),
+		fmt.Sprintf("Spent:  %s", spent),
+		fmt.Sprintf("DurationMs: %s", duration),
+		fmt.Sprintf("QualityScore: %s", quality),
+		fmt.Sprintf("ReworkCount: %s", rework),
+		fmt.Sprintf("ToolName: %s", getStr(ev.ToolName)),
+		fmt.Sprintf("ToolSuccess: %s", getBool(ev.ToolSuccess)),
+		fmt.Sprintf("ID: %s", ev.ID),
+		fmt.Sprintf("SessionID: %s", ev.SessionID),
+		"",
+		"Press Esc to return.",
+	}
+
+	return "\n" + box.Render(strings.Join(lines, "\n")) + "\n"
 }
 
 // formatEventRow converts a store.Event into display columns.
