@@ -61,6 +61,7 @@ This command:
   2. Writes ~/.config/systemd/user/metronous.service
   3. Enables and starts the service via systemctl --user
   4. Patches ~/.config/opencode/opencode.json to use ["metronous", "mcp"]
+  5. Installs the OpenCode plugin (metronous.ts)
 
 After running this command, every OpenCode instance will automatically
 connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`,
@@ -130,6 +131,13 @@ func runInstall() error {
 		fmt.Println(`  "mcp": {"metronous": {"command": ["metronous", "mcp"], "type": "local"}}`)
 	}
 
+	// Step 9: Install OpenCode plugin.
+	if err := installOpenCodePlugin(userHome); err != nil {
+		fmt.Printf("\nWarning: could not install plugin: %v\n", err)
+	} else {
+		fmt.Println("installed: OpenCode plugin")
+	}
+
 	fmt.Println("\nMetronous service installed and started.")
 	fmt.Println("Use 'systemctl --user status metronous' to check service health.")
 	fmt.Println("All OpenCode instances will now use the shared daemon via 'metronous mcp'.")
@@ -186,5 +194,46 @@ func patchOpencodeJSON(userHome string) error {
 		return fmt.Errorf("write opencode.json: %w", err)
 	}
 	fmt.Printf("patched: %s\n", configPath)
+	return nil
+}
+
+// installOpenCodePlugin copies the metronous-plugin.ts to ~/.config/opencode/plugins/
+func installOpenCodePlugin(userHome string) error {
+	// Find the plugin file - it's in the same directory as the executable
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+	execDir := filepath.Dir(execPath)
+	pluginSrc := filepath.Join(execDir, "metronous-plugin.ts")
+
+	// Check if plugin exists in exec directory
+	if _, err := os.Stat(pluginSrc); os.IsNotExist(err) {
+		// Try current working directory as fallback
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			return fmt.Errorf("plugin not found in exec dir or CWD")
+		}
+		pluginSrc = filepath.Join(cwd, "metronous-plugin.ts")
+		if _, err := os.Stat(pluginSrc); os.IsNotExist(err) {
+			return fmt.Errorf("metronous-plugin.ts not found")
+		}
+	}
+
+	// Create plugins directory
+	pluginsDir := filepath.Join(userHome, ".config", "opencode", "plugins")
+	if err := os.MkdirAll(pluginsDir, 0755); err != nil {
+		return fmt.Errorf("create plugins dir: %w", err)
+	}
+
+	// Copy plugin file
+	pluginDst := filepath.Join(pluginsDir, "metronous.ts")
+	data, err := os.ReadFile(pluginSrc)
+	if err != nil {
+		return fmt.Errorf("read plugin: %w", err)
+	}
+	if err := os.WriteFile(pluginDst, data, 0644); err != nil {
+		return fmt.Errorf("write plugin: %w", err)
+	}
 	return nil
 }
