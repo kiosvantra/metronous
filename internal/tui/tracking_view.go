@@ -41,7 +41,7 @@ type TrackingModel struct {
 
 // Column header widths.
 var (
-	colWidths = []int{10, 16, 12, 22, 8, 8, 8}
+	colWidths = []int{20, 16, 12, 22, 8, 8, 8}
 	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent"}
 
 	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
@@ -169,7 +169,8 @@ func (m TrackingModel) View() string {
 
 // formatEventRow converts a store.Event into display columns.
 func formatEventRow(ev store.Event) []string {
-	ts := ev.Timestamp.Local().Format("15:04:05")
+	// Example: 2006-01-02 15:04:05
+	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
 
 	in := "-"
 	out := "-"
