@@ -447,20 +447,25 @@ func TestQueryEventsSessionFilter(t *testing.T) {
 	}
 }
 
-// TestQueryEventsOffsetPagination verifies that Limit works as a cap.
+// TestQueryEventsOffsetPagination verifies that Limit and Offset work for sliding-window pagination.
 func TestQueryEventsOffsetPagination(t *testing.T) {
 	es := newTestStore(t)
 	ctx := context.Background()
 
-	// Insert 10 events.
+	// Insert 10 events with distinct, ordered timestamps.
+	base := time.Now().UTC().Truncate(time.Second)
+	insertedIDs := make([]string, 10)
 	for i := 0; i < 10; i++ {
 		e := sampleEvent("agent-page", fmt.Sprintf("session-%d", i), "complete")
-		if _, err := es.InsertEvent(ctx, e); err != nil {
-			t.Fatalf("InsertEvent: %v", err)
+		e.Timestamp = base.Add(time.Duration(i) * time.Second) // oldest=0, newest=9
+		id, err := es.InsertEvent(ctx, e)
+		if err != nil {
+			t.Fatalf("InsertEvent[%d]: %v", i, err)
 		}
+		insertedIDs[i] = id
 	}
 
-	// Limit to 3.
+	// Limit to 3 — should return the 3 newest events.
 	results, err := es.QueryEvents(ctx, store.EventQuery{Limit: 3})
 	if err != nil {
 		t.Fatalf("QueryEvents limit 3: %v", err)
@@ -469,13 +474,57 @@ func TestQueryEventsOffsetPagination(t *testing.T) {
 		t.Errorf("expected 3 events with limit=3, got %d", len(results))
 	}
 
-	// Limit to 7.
+	// Limit to 7 — should return the 7 newest events.
 	results7, err := es.QueryEvents(ctx, store.EventQuery{Limit: 7})
 	if err != nil {
 		t.Fatalf("QueryEvents limit 7: %v", err)
 	}
 	if len(results7) != 7 {
 		t.Errorf("expected 7 events with limit=7, got %d", len(results7))
+	}
+
+	// Offset pagination: page 1 = limit 3 offset 0 (events 9,8,7).
+	page1, err := es.QueryEvents(ctx, store.EventQuery{Limit: 3, Offset: 0})
+	if err != nil {
+		t.Fatalf("QueryEvents page1: %v", err)
+	}
+	if len(page1) != 3 {
+		t.Errorf("page1: expected 3 events, got %d", len(page1))
+	}
+
+	// Offset pagination: page 2 = limit 3 offset 3 (events 6,5,4).
+	page2, err := es.QueryEvents(ctx, store.EventQuery{Limit: 3, Offset: 3})
+	if err != nil {
+		t.Fatalf("QueryEvents page2: %v", err)
+	}
+	if len(page2) != 3 {
+		t.Errorf("page2: expected 3 events, got %d", len(page2))
+	}
+
+	// Pages must not overlap: last event of page1 must be newer than first of page2.
+	if !page1[len(page1)-1].Timestamp.After(page2[0].Timestamp) {
+		t.Errorf("pages overlap: page1 tail %v, page2 head %v",
+			page1[len(page1)-1].Timestamp, page2[0].Timestamp)
+	}
+
+	// Offset beyond total returns empty slice.
+	beyond, err := es.QueryEvents(ctx, store.EventQuery{Limit: 3, Offset: 100})
+	if err != nil {
+		t.Fatalf("QueryEvents beyond: %v", err)
+	}
+	if len(beyond) != 0 {
+		t.Errorf("expected 0 events with offset beyond total, got %d", len(beyond))
+	}
+
+	// Offset without limit — offset alone should have no effect (limit=0 means no limit,
+	// and SQLite requires LIMIT before OFFSET, so offset is ignored in that path).
+	// This tests the guard in QueryEvents that only appends OFFSET when Limit>0.
+	allNoLimit, err := es.QueryEvents(ctx, store.EventQuery{Offset: 5})
+	if err != nil {
+		t.Fatalf("QueryEvents offset without limit: %v", err)
+	}
+	if len(allNoLimit) != 10 {
+		t.Errorf("expected all 10 events when no limit (offset ignored), got %d", len(allNoLimit))
 	}
 }
 

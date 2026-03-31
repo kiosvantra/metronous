@@ -227,6 +227,10 @@ func (es *EventStore) QueryEvents(ctx context.Context, query store.EventQuery) (
 	if query.Limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, query.Limit)
+		if query.Offset > 0 {
+			q += " OFFSET ?"
+			args = append(args, query.Offset)
+		}
 	}
 
 	rows, err := es.readDB.QueryContext(ctx, q, args...)

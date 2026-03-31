@@ -77,6 +77,12 @@ type EventQuery struct {
 
 	// Limit caps the number of events returned (0 = no limit).
 	Limit int
+
+	// Offset skips the first N events in the result set (0 = no skip).
+	// Combined with Limit, this enables sliding-window pagination.
+	// The query orders by timestamp DESC, so offset=0 returns the newest events
+	// and increasing offset moves toward older events.
+	Offset int
 }
 
 // AgentSummary provides aggregated metrics for a single agent.

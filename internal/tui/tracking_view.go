@@ -32,11 +32,16 @@ type trackingDataMsg = TrackingDataMsg
 
 // TrackingModel is the Bubble Tea sub-model for the real-time tracking tab.
 type TrackingModel struct {
-	es      store.EventStore
-	events  []store.Event
-	err     error
-	cursor  int
-	loading bool
+	es     store.EventStore
+	events []store.Event
+	err    error
+	// cursor is the local row index within the current page (0..maxTrackingRows-1).
+	cursor int
+	// pageOffset is the number of events skipped from the newest (timestamp DESC).
+	// PgDn increases pageOffset (moves toward older events).
+	// PgUp decreases pageOffset (moves toward newer events).
+	pageOffset int
+	loading    bool
 	// detailOpen toggles an event detail overlay.
 	detailOpen  bool
 	detailIndex int
@@ -88,6 +93,7 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.events = msg.Events
+			// Clamp cursor to actual result size.
 			if m.cursor >= len(m.events) {
 				if len(m.events) > 0 {
 					m.cursor = len(m.events) - 1
@@ -108,13 +114,29 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "up", "k":
+			// Move selection one row up within the current page.
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
+			// Move selection one row down within the current page.
 			if m.cursor < len(m.events)-1 {
 				m.cursor++
 			}
+		case "pgdown":
+			// Slide window toward older events (increase offset).
+			m.pageOffset += maxTrackingRows
+			m.cursor = 0
+			return m, m.fetchEvents()
+		case "pgup":
+			// Slide window toward newer events (decrease offset).
+			if m.pageOffset >= maxTrackingRows {
+				m.pageOffset -= maxTrackingRows
+			} else {
+				m.pageOffset = 0
+			}
+			m.cursor = 0
+			return m, m.fetchEvents()
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(m.events) {
 				m.detailOpen = true
@@ -125,16 +147,19 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 	return m, nil
 }
 
-// fetchEvents returns a command that queries the EventStore for recent events.
+// fetchEvents returns a command that queries the EventStore for the current page of events.
+// Events are ordered timestamp DESC; pageOffset slides the window toward older events.
 func (m TrackingModel) fetchEvents() tea.Cmd {
 	if m.es == nil {
 		return nil
 	}
+	offset := m.pageOffset
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		events, err := m.es.QueryEvents(ctx, store.EventQuery{
-			Limit: maxTrackingRows,
+			Limit:  maxTrackingRows,
+			Offset: offset,
 		})
 		return TrackingDataMsg{Events: events, Err: err}
 	}
@@ -185,9 +210,12 @@ func (m TrackingModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	// Summary counters.
+	// Pagination footer.
 	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render(fmt.Sprintf("  %d events shown (last %s)", len(m.events), trackingRefreshInterval)))
+	pageNum := m.pageOffset/maxTrackingRows + 1
+	footer := fmt.Sprintf("  %d events shown  |  page %d  (PgUp/PgDn to navigate, ↑↓ to select)",
+		len(m.events), pageNum)
+	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
 	return sb.String()
