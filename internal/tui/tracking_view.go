@@ -558,8 +558,9 @@ func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
 }
 
 func severityStylesForDuration(durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
-	// Default (unknown/slow).
+	// Spent is always treated as cost.
 	spentStyle = sevRedStyle
+	// Default (unknown/slow).
 	durationStyle = sevRedStyle
 	if durationMs == nil || *durationMs <= 0 {
 		return spentStyle, durationStyle
@@ -567,12 +568,12 @@ func severityStylesForDuration(durationMs *int) (spentStyle lipgloss.Style, dura
 
 	secs := float64(*durationMs) / 1000.0
 	if secs <= 10.0 {
-		return sevGreenStyle, sevGreenStyle
+		return spentStyle, sevGreenStyle
 	}
 	if secs <= 30.0 {
-		return sevAmberStyle, sevAmberStyle
+		return spentStyle, sevAmberStyle
 	}
-	return sevRedStyle, sevRedStyle
+	return spentStyle, sevRedStyle
 }
 
 func renderSessionRowMain(cols []string, widths []int, baseStyle lipgloss.Style, isCursor bool, spentStyle, durationStyle lipgloss.Style) string {
