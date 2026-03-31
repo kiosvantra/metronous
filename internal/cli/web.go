@@ -8,6 +8,9 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/runner"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
 	"github.com/kiosvantra/metronous/internal/web"
 )
@@ -64,6 +67,17 @@ func runWeb(dataDir string, port int) error {
 		}
 	}()
 
+	// Build benchmark runner for on-demand runs from the dashboard.
+	metronousHome := filepath.Dir(dataDir) // ~/.metronous
+	thresholdsPath := filepath.Join(metronousHome, "thresholds.json")
+	thresholds, err := decision.LoadThresholds(thresholdsPath)
+	if err != nil {
+		defaults := config.DefaultThresholdValues()
+		thresholds = &defaults
+	}
+	engine := decision.NewDecisionEngine(thresholds)
+	bmRunner := runner.NewRunner(es, bs, engine, dataDir, logger)
+
 	workDir, _ := os.Getwd()
-	return web.StartServer(bs, es, workDir, port)
+	return web.StartServer(bs, es, bmRunner, workDir, port)
 }

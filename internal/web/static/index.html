@@ -461,6 +461,9 @@ const i18n = {
     // Header
     'refreshing_in': 'Refreshing in {n}s',
     'refresh': 'Refresh',
+    'running_benchmark': 'Running benchmark...',
+    'benchmark_done': 'Benchmark done!',
+    'benchmark_failed': 'Benchmark failed',
 
     // Tabs
     'tab_benchmark': 'Benchmark',
@@ -537,6 +540,9 @@ const i18n = {
   es: {
     'refreshing_in': 'Actualizando en {n}s',
     'refresh': 'Actualizar',
+    'running_benchmark': 'Ejecutando benchmark...',
+    'benchmark_done': 'Benchmark completado!',
+    'benchmark_failed': 'Benchmark falló',
 
     'tab_benchmark': 'Benchmark',
     'tab_tracking': 'Seguimiento',
@@ -1325,9 +1331,36 @@ async function doLoad() {
 }
 
 window.loadAll = async function() {
-  startCountdown();
+  const btn = document.getElementById('refresh-btn');
+  const label = btn?.querySelector('[data-i18n]');
+
+  // 1. Run benchmark first to generate fresh data.
+  try {
+    if (label) label.textContent = t('running_benchmark');
+    if (btn) btn.disabled = true;
+    const res = await fetch('/api/benchmark/run', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'completed') {
+      if (label) { label.textContent = t('benchmark_done'); }
+    } else if (data.status === 'already_running') {
+      // Another run in progress — just refresh data below.
+    } else {
+      if (label) label.textContent = t('benchmark_failed');
+    }
+  } catch (e) {
+    if (label) label.textContent = t('benchmark_failed');
+  }
+
+  // 2. Refresh dashboard data from DB.
   await doLoad();
+  startCountdown();
   startAutoRefresh();
+
+  // 3. Reset button label after a moment.
+  setTimeout(() => {
+    if (label) label.textContent = t('refresh');
+    if (btn) btn.disabled = false;
+  }, 1500);
 };
 
 // ═══════════════════════════════════════════════════

@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/kiosvantra/metronous/internal/benchmark"
 	"github.com/kiosvantra/metronous/internal/discovery"
+	"github.com/kiosvantra/metronous/internal/runner"
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
@@ -413,6 +415,36 @@ type sessionsResponse struct {
 	Total    int           `json:"total"`
 	Offset   int           `json:"offset"`
 	Limit    int           `json:"limit"`
+}
+
+// benchmarkMu protects against concurrent benchmark runs from the web UI.
+var benchmarkMu sync.Mutex
+
+// handleBenchmarkRun triggers an on-demand benchmark run (7-day window).
+// Returns immediately with status or blocks until the run completes.
+func handleBenchmarkRun(r *runner.Runner) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if r == nil {
+			writeError(w, http.StatusServiceUnavailable, "benchmark runner not available")
+			return
+		}
+
+		if !benchmarkMu.TryLock() {
+			writeJSON(w, map[string]string{"status": "already_running"})
+			return
+		}
+		defer benchmarkMu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		if err := r.RunWeekly(ctx, 7); err != nil {
+			writeError(w, http.StatusInternalServerError, "benchmark run failed: "+err.Error())
+			return
+		}
+
+		writeJSON(w, map[string]string{"status": "completed"})
+	}
 }
 
 // handleSessions returns a paginated list of session summaries.
