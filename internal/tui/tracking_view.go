@@ -617,15 +617,9 @@ func renderSessionRowMain(cols []string, widths []int, baseStyle lipgloss.Style,
 		cellStyle := baseStyle
 		if i == spentCol {
 			cellStyle = spentStyle
-			if isCursor {
-				cellStyle = cellStyle.Background(lipgloss.Color("236"))
-			}
 		}
 		if i == durationCol {
 			cellStyle = durationStyle
-			if isCursor {
-				cellStyle = cellStyle.Background(lipgloss.Color("236"))
-			}
 		}
 
 		sb.WriteString(cellStyle.Render(fmt.Sprintf("%-*s", w, cell)))
