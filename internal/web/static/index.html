@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Metronous Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --card: #141414;
+      --border: #222222;
+      --text-primary: #e5e5e5;
+      --text-secondary: #888888;
+      --emerald: #34d399;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --sky: #38bdf8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text-primary);
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+    }
+
+    .font-mono {
+      font-family: 'Geist Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    /* Pulse animation for refresh dot */
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
+      70% { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #34d399;
+      animation: pulse-ring 2s infinite;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* Comparison panel slide-in */
+    .comparison-panel {
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+
+    .comparison-panel.hidden-panel {
+      opacity: 0;
+      transform: translateY(-8px);
+      pointer-events: none;
+    }
+
+    /* Table row hover */
+    .agent-row {
+      cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+
+    .agent-row:hover {
+      background-color: #1a1a1a;
+    }
+
+    .agent-row.selected {
+      background-color: #1c2a1c;
+    }
+
+    /* Score progress bar */
+    .score-bar-track {
+      background: #262626;
+      border-radius: 4px;
+      height: 4px;
+      overflow: hidden;
+    }
+
+    .score-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.4s ease;
+    }
+
+    /* Verdict dot sequence */
+    .verdict-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+    /* Section group header */
+    .group-header {
+      background: #111;
+      color: #666;
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 600;
+      padding: 6px 16px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    /* Empty / error states */
+    .empty-state {
+      text-align: center;
+      padding: 48px 24px;
+      color: var(--text-secondary);
+    }
+
+    .empty-state svg {
+      margin: 0 auto 16px;
+      opacity: 0.3;
+    }
+
+    /* Loading skeleton */
+    @keyframes shimmer {
+      0% { background-position: -400px 0; }
+      100% { background-position: 400px 0; }
+    }
+
+    .skeleton {
+      background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- =========================================================
+     HEADER
+     ========================================================= -->
+<header style="background:#111;border-bottom:1px solid #1e1e1e;position:sticky;top:0;z-index:50;">
+  <div style="max-width:1400px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;">
+    <div style="display:flex;align-items:center;gap:12px;">
+      <span style="font-size:1.1rem;font-weight:600;letter-spacing:-0.02em;">Metronous Dashboard</span>
+      <span style="font-size:0.65rem;padding:2px 7px;border-radius:4px;background:#1e1e1e;border:1px solid #333;color:#666;font-family:'Geist Mono',monospace;">v2</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div id="refresh-indicator" style="display:flex;align-items:center;gap:7px;font-size:0.78rem;color:#666;">
+        <span class="pulse-dot"></span>
+        <span>Auto-refresh 30s</span>
+      </div>
+      <div id="last-updated" style="font-size:0.75rem;color:#555;font-family:'Geist Mono',monospace;">—</div>
+      <button id="refresh-btn" onclick="loadAll()" title="Refresh now"
+        style="padding:5px 12px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#aaa;font-size:0.75rem;cursor:pointer;transition:all 0.15s;">
+        Refresh
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- =========================================================
+     MAIN CONTENT
+     ========================================================= -->
+<main style="max-width:1400px;margin:0 auto;padding:24px;">
+
+  <!-- ── Section 1: Agent Overview ─────────────────────────── -->
+  <section style="margin-bottom:24px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h2 style="font-size:0.85rem;font-weight:600;color:#aaa;letter-spacing:0.06em;text-transform:uppercase;margin:0;">Agent Overview</h2>
+      <div id="overview-meta" style="font-size:0.75rem;color:#555;font-family:'Geist Mono',monospace;"></div>
+    </div>
+
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;">
+      <!-- Table header -->
+      <div style="display:grid;grid-template-columns:200px 160px 90px 90px 120px 130px 80px 80px;gap:0;border-bottom:1px solid #1e1e1e;padding:0 16px;">
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Agent</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;">Model</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:right;">Score</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:right;">Accuracy</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:right;">P95 Latency</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:center;">Verdict</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:right;">Cost</div>
+        <div style="padding:10px 8px;font-size:0.72rem;color:#555;letter-spacing:0.06em;text-transform:uppercase;font-weight:600;text-align:right;">Samples</div>
+      </div>
+      <!-- Table body -->
+      <div id="overview-table-body">
+        <div class="empty-state">
+          <div class="skeleton" style="height:16px;width:200px;margin:0 auto 8px;"></div>
+          <div class="skeleton" style="height:12px;width:140px;margin:0 auto;"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Section 2 + 3: Comparison Panel ───────────────────── -->
+  <section id="comparison-section" class="comparison-panel hidden-panel" style="margin-bottom:24px;">
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden;">
+      <!-- Panel header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #1e1e1e;">
+        <div>
+          <h2 id="comparison-title" style="margin:0;font-size:0.95rem;font-weight:600;"></h2>
+          <p id="comparison-subtitle" style="margin:4px 0 0;font-size:0.78rem;color:#666;"></p>
+        </div>
+        <button onclick="closeComparison()"
+          style="width:28px;height:28px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#aaa;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;transition:all 0.15s;">
+          ×
+        </button>
+      </div>
+
+      <div style="padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+        <!-- Chart column -->
+        <div>
+          <p style="margin:0 0 14px;font-size:0.75rem;color:#666;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Composite Score Comparison</p>
+          <div style="position:relative;height:200px;">
+            <canvas id="comparison-chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Ranking table column -->
+        <div>
+          <p style="margin:0 0 14px;font-size:0.75rem;color:#666;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">Model Ranking</p>
+          <div id="ranking-table"></div>
+        </div>
+      </div>
+
+      <!-- Recommendation strip -->
+      <div id="recommendation-strip" style="padding:12px 20px;border-top:1px solid #1e1e1e;background:#0f0f0f;display:none;">
+        <span style="font-size:0.72rem;color:#555;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-right:10px;">Recommendation</span>
+        <span id="recommendation-text" style="font-size:0.8rem;color:#aaa;"></span>
+      </div>
+
+      <!-- Verdict trend strip -->
+      <div id="trend-section" style="padding:16px 20px;border-top:1px solid #1e1e1e;display:none;">
+        <p style="margin:0 0 10px;font-size:0.75rem;color:#666;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">
+          Verdict Trend — <span id="trend-label" style="color:#888;text-transform:none;"></span>
+        </p>
+        <div style="position:relative;height:80px;">
+          <canvas id="trend-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- =========================================================
+     JAVASCRIPT
+     ========================================================= -->
+<script>
+// ─── State ────────────────────────────────────────────────────
+let state = {
+  overviewData: [],
+  selectedAgent: null,
+  selectedModel: null,
+  comparisonChart: null,
+  trendChart: null,
+  refreshTimer: null,
+  loading: false,
+  error: null,
+};
+
+// ─── Helpers ──────────────────────────────────────────────────
+function shortenModel(model) {
+  if (!model) return '—';
+  const parts = model.split('/');
+  let name = parts[parts.length - 1];
+  name = name.replace(/^claude-/, '');
+  return name;
+}
+
+function verdictColor(verdict) {
+  switch (verdict) {
+    case 'KEEP':
+      return { bg: '#065f46', text: '#34d399', border: '#059669' };
+    case 'SWITCH':
+    case 'URGENT_SWITCH':
+      return { bg: '#7f1d1d', text: '#f87171', border: '#dc2626' };
+    case 'INSUFFICIENT_DATA':
+      return { bg: '#78350f', text: '#fbbf24', border: '#d97706' };
+    default:
+      return { bg: '#262626', text: '#a3a3a3', border: '#404040' };
+  }
+}
+
+function verdictLabel(verdict) {
+  switch (verdict) {
+    case 'KEEP': return 'KEEP';
+    case 'SWITCH': return 'SWITCH';
+    case 'URGENT_SWITCH': return 'URGENT';
+    case 'INSUFFICIENT_DATA': return 'INSUFF.';
+    default: return verdict || 'NO DATA';
+  }
+}
+
+function scoreColor(score) {
+  if (score == null || isNaN(score)) return '#555';
+  if (score >= 0.80) return '#34d399';
+  if (score >= 0.50) return '#fbbf24';
+  return '#f87171';
+}
+
+function fmtScore(score) {
+  if (score == null || isNaN(score)) return '—';
+  return score.toFixed(3);
+}
+
+function fmtPct(val) {
+  if (val == null || isNaN(val)) return '—';
+  return (val * 100).toFixed(1) + '%';
+}
+
+function fmtLatency(ms) {
+  if (ms == null || isNaN(ms)) return '—';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+
+function fmtCost(usd) {
+  if (usd == null || isNaN(usd)) return '—';
+  return '$' + usd.toFixed(3);
+}
+
+function groupByType(data) {
+  const groups = { primary: [], subagent: [], builtin: [], other: [] };
+  for (const row of data) {
+    const t = (row.type || 'other').toLowerCase();
+    if (groups[t]) groups[t].push(row);
+    else groups.other.push(row);
+  }
+  return groups;
+}
+
+function formatTimestamp(d) {
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ─── API ──────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
+}
+
+// ─── Load overview ────────────────────────────────────────────
+async function loadOverview() {
+  const data = await fetchJSON('/api/overview');
+  state.overviewData = Array.isArray(data) ? data : [];
+  renderOverview();
+}
+
+function renderOverview() {
+  const body = document.getElementById('overview-table-body');
+  const meta = document.getElementById('overview-meta');
+
+  // Filter: hide NO DATA rows
+  const visible = state.overviewData.filter(r => r.verdict && r.verdict !== 'NO DATA' && r.verdict !== '');
+  meta.textContent = `${visible.length} agent${visible.length !== 1 ? 's' : ''}`;
+
+  if (visible.length === 0) {
+    body.innerHTML = `
+      <div class="empty-state">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/>
+        </svg>
+        <p style="margin:0;font-size:0.875rem;">No benchmark data yet</p>
+        <p style="margin:6px 0 0;font-size:0.78rem;color:#555;">Run benchmarks to populate this dashboard</p>
+      </div>`;
+    return;
+  }
+
+  const groups = groupByType(visible);
+  const groupOrder = [
+    { key: 'primary', label: 'Primary Agents' },
+    { key: 'subagent', label: 'Subagents' },
+    { key: 'builtin', label: 'Built-in' },
+    { key: 'other', label: 'Other' },
+  ];
+
+  let html = '';
+  for (const { key, label } of groupOrder) {
+    const rows = groups[key];
+    if (!rows || rows.length === 0) continue;
+
+    html += `<div class="group-header">${label}</div>`;
+    for (const row of rows) {
+      const vc = verdictColor(row.verdict);
+      const sc = scoreColor(row.composite_score);
+      const isSelected = state.selectedAgent === row.agent_id;
+      const scoreWidth = row.composite_score != null ? Math.max(0, Math.min(100, row.composite_score * 100)) : 0;
+
+      html += `
+        <div class="agent-row${isSelected ? ' selected' : ''}"
+          onclick="selectAgent('${row.agent_id}')"
+          style="display:grid;grid-template-columns:200px 160px 90px 90px 120px 130px 80px 80px;gap:0;padding:0 16px;border-bottom:1px solid #181818;">
+          <!-- Agent -->
+          <div style="padding:11px 8px;font-size:0.82rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${row.agent_id}">
+            ${row.agent_id}
+          </div>
+          <!-- Model -->
+          <div style="padding:11px 8px;font-size:0.78rem;font-family:'Geist Mono',monospace;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${row.model || ''}">
+            ${shortenModel(row.model)}
+          </div>
+          <!-- Score -->
+          <div style="padding:11px 8px;text-align:right;">
+            <div style="font-size:0.82rem;font-family:'Geist Mono',monospace;font-weight:600;color:${sc};">${fmtScore(row.composite_score)}</div>
+            <div class="score-bar-track" style="margin-top:4px;">
+              <div class="score-bar-fill" style="width:${scoreWidth}%;background:${sc};"></div>
+            </div>
+          </div>
+          <!-- Accuracy -->
+          <div style="padding:11px 8px;text-align:right;font-size:0.82rem;font-family:'Geist Mono',monospace;color:#aaa;">
+            ${fmtPct(row.accuracy)}
+          </div>
+          <!-- P95 Latency -->
+          <div style="padding:11px 8px;text-align:right;font-size:0.82rem;font-family:'Geist Mono',monospace;color:#aaa;">
+            ${fmtLatency(row.p95_latency_ms)}
+          </div>
+          <!-- Verdict -->
+          <div style="padding:11px 8px;display:flex;justify-content:center;align-items:center;">
+            <span style="font-size:0.68rem;font-weight:700;letter-spacing:0.05em;padding:3px 9px;border-radius:5px;background:${vc.bg};color:${vc.text};border:1px solid ${vc.border};">
+              ${verdictLabel(row.verdict)}
+            </span>
+          </div>
+          <!-- Cost -->
+          <div style="padding:11px 8px;text-align:right;font-size:0.82rem;font-family:'Geist Mono',monospace;color:#aaa;">
+            ${fmtCost(row.total_cost_usd)}
+          </div>
+          <!-- Samples -->
+          <div style="padding:11px 8px;text-align:right;font-size:0.82rem;font-family:'Geist Mono',monospace;color:#aaa;">
+            ${row.sample_size ?? '—'}
+          </div>
+        </div>`;
+    }
+  }
+
+  body.innerHTML = html;
+}
+
+// ─── Agent selection & comparison ────────────────────────────
+async function selectAgent(agentId) {
+  if (state.selectedAgent === agentId) {
+    closeComparison();
+    return;
+  }
+
+  state.selectedAgent = agentId;
+  state.selectedModel = null;
+  renderOverview(); // update selected highlight
+
+  try {
+    const data = await fetchJSON(`/api/compare?agent=${encodeURIComponent(agentId)}`);
+    renderComparison(data);
+  } catch (err) {
+    renderComparisonError(agentId, err);
+  }
+}
+
+function renderComparison(data) {
+  const section = document.getElementById('comparison-section');
+  document.getElementById('comparison-title').textContent = `Model Ranking: ${data.agent_id}`;
+  document.getElementById('comparison-subtitle').textContent =
+    `${data.models_count ?? (data.ranking || []).length} model${(data.models_count ?? 1) !== 1 ? 's' : ''} evaluated`;
+
+  renderComparisonChart(data.ranking || []);
+  renderRankingTable(data.ranking || []);
+
+  // Recommendation
+  const strip = document.getElementById('recommendation-strip');
+  if (data.comparison && data.comparison.recommendation) {
+    document.getElementById('recommendation-text').textContent = data.comparison.recommendation;
+    strip.style.display = 'block';
+  } else {
+    strip.style.display = 'none';
+  }
+
+  // Hide trend until model selected
+  document.getElementById('trend-section').style.display = 'none';
+
+  // Show panel
+  section.classList.remove('hidden-panel');
+  section.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function renderComparisonError(agentId, err) {
+  const section = document.getElementById('comparison-section');
+  document.getElementById('comparison-title').textContent = `Model Ranking: ${agentId}`;
+  document.getElementById('comparison-subtitle').textContent = '';
+  document.getElementById('ranking-table').innerHTML = `
+    <div style="padding:24px;text-align:center;color:#f87171;font-size:0.82rem;">
+      Failed to load comparison data<br>
+      <span style="color:#555;font-size:0.75rem;">${err.message}</span>
+    </div>`;
+
+  // Clear chart
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+  document.getElementById('comparison-chart').getContext('2d').clearRect(0, 0, 9999, 9999);
+  document.getElementById('recommendation-strip').style.display = 'none';
+  document.getElementById('trend-section').style.display = 'none';
+  section.classList.remove('hidden-panel');
+}
+
+function renderComparisonChart(ranking) {
+  const canvas = document.getElementById('comparison-chart');
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+
+  if (!ranking || ranking.length === 0) return;
+
+  const labels = ranking.map(r => shortenModel(r.model));
+  const scores = ranking.map(r => r.score ?? 0);
+  const colors = ranking.map(r => {
+    if (r.label === 'BEST') return '#34d399';        // emerald
+    if (r.verdict === 'KEEP') return '#38bdf8';       // sky
+    if (r.verdict === 'SWITCH' || r.verdict === 'URGENT_SWITCH') return '#f87171'; // red
+    return '#fbbf24';                                  // amber (INSUFFICIENT / default)
+  });
+
+  state.comparisonChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: scores,
+        backgroundColor: colors,
+        borderColor: colors.map(c => c + '99'),
+        borderWidth: 1,
+        borderRadius: 4,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` Score: ${ctx.parsed.x.toFixed(3)}`,
+          },
+          backgroundColor: '#1a1a1a',
+          borderColor: '#333',
+          borderWidth: 1,
+          titleColor: '#e5e5e5',
+          bodyColor: '#aaa',
+        },
+      },
+      scales: {
+        x: {
+          min: 0,
+          max: 1,
+          grid: { color: '#1e1e1e' },
+          ticks: {
+            color: '#555',
+            font: { family: "'Geist Mono', monospace", size: 10 },
+            callback: v => v.toFixed(1),
+          },
+        },
+        y: {
+          grid: { display: false },
+          ticks: {
+            color: '#aaa',
+            font: { family: "'Geist Mono', monospace", size: 11 },
+          },
+        },
+      },
+    },
+  });
+}
+
+function renderRankingTable(ranking) {
+  const container = document.getElementById('ranking-table');
+  if (!ranking || ranking.length === 0) {
+    container.innerHTML = `<p style="color:#555;font-size:0.82rem;">No models ranked yet.</p>`;
+    return;
+  }
+
+  const maxScore = Math.max(...ranking.map(r => r.score ?? 0), 0.001);
+  const bestCost = ranking[0]?.cost ?? null;
+
+  let html = '';
+  for (const r of ranking) {
+    const vc = verdictColor(r.verdict);
+    const barWidth = ((r.score ?? 0) / maxScore * 100).toFixed(1);
+    const sc = scoreColor(r.score);
+
+    // Cost delta vs best
+    let costDelta = '';
+    if (bestCost != null && r.cost != null && r.rank !== 1) {
+      const delta = ((r.cost - bestCost) / bestCost * 100);
+      const sign = delta > 0 ? '+' : '';
+      costDelta = `<span style="font-size:0.7rem;color:${delta < 0 ? '#34d399' : '#f87171'};">${sign}${delta.toFixed(0)}% cost</span>`;
+    } else if (r.rank === 1) {
+      costDelta = `<span style="font-size:0.7rem;color:#555;">baseline</span>`;
+    }
+
+    // Label pill
+    let labelColor = '#555';
+    if (r.label === 'BEST') labelColor = '#34d399';
+    else if (r.label === 'KEEP') labelColor = '#38bdf8';
+    else if (r.label === 'SWITCH') labelColor = '#f87171';
+    else if (r.label === 'INSUFFICIENT') labelColor = '#fbbf24';
+
+    // Click to load trend
+    const modelEscaped = (r.model || '').replace(/'/g, "\\'");
+
+    html += `
+      <div onclick="loadTrend('${state.selectedAgent}','${modelEscaped}')"
+        style="display:grid;grid-template-columns:28px 1fr auto;gap:8px;align-items:center;padding:8px 4px;border-bottom:1px solid #1a1a1a;cursor:pointer;"
+        class="agent-row" title="Click to view verdict trend">
+        <!-- Rank -->
+        <span style="font-size:0.75rem;color:#555;font-family:'Geist Mono',monospace;font-weight:600;">#${r.rank}</span>
+        <!-- Name + bar + cost -->
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+            <span style="font-size:0.8rem;font-family:'Geist Mono',monospace;color:#e5e5e5;">${shortenModel(r.model)}</span>
+            <span style="font-size:0.8rem;font-family:'Geist Mono',monospace;color:${sc};font-weight:600;">${fmtScore(r.score)}</span>
+          </div>
+          <div class="score-bar-track">
+            <div class="score-bar-fill" style="width:${barWidth}%;background:${sc};"></div>
+          </div>
+          <div style="margin-top:4px;display:flex;align-items:center;justify-content:space-between;">
+            ${costDelta}
+            <span style="font-size:0.7rem;color:${labelColor};font-weight:700;letter-spacing:0.04em;">${r.label || ''}</span>
+          </div>
+        </div>
+        <!-- Verdict badge -->
+        <span style="font-size:0.65rem;font-weight:700;padding:2px 7px;border-radius:4px;background:${vc.bg};color:${vc.text};border:1px solid ${vc.border};white-space:nowrap;">
+          ${verdictLabel(r.verdict)}
+        </span>
+      </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+// ─── Trend ────────────────────────────────────────────────────
+async function loadTrend(agentId, model) {
+  state.selectedModel = model;
+  document.getElementById('trend-label').textContent = shortenModel(model);
+  document.getElementById('trend-section').style.display = 'block';
+
+  try {
+    const data = await fetchJSON(`/api/trend?agent=${encodeURIComponent(agentId)}&model=${encodeURIComponent(model)}`);
+    renderTrend(data.verdicts || []);
+  } catch (err) {
+    document.getElementById('trend-section').innerHTML = `
+      <p style="color:#f87171;font-size:0.78rem;padding:8px 0;">Failed to load trend: ${err.message}</p>`;
+  }
+}
+
+function verdictToValue(v) {
+  switch (v) {
+    case 'KEEP': return 1;
+    case 'SWITCH': case 'URGENT_SWITCH': return 0;
+    case 'INSUFFICIENT_DATA': return 0.5;
+    default: return 0.5;
+  }
+}
+
+function verdictDotColor(v) {
+  const c = verdictColor(v);
+  return c.text;
+}
+
+function renderTrend(verdicts) {
+  const canvas = document.getElementById('trend-chart');
+  if (state.trendChart) { state.trendChart.destroy(); state.trendChart = null; }
+
+  if (!verdicts || verdicts.length === 0) {
+    canvas.parentElement.innerHTML = `<p style="color:#555;font-size:0.78rem;">No trend data available.</p>`;
+    return;
+  }
+
+  const labels = verdicts.map((_, i) => `Run ${i + 1}`);
+  const values = verdicts.map(verdictToValue);
+  const colors = verdicts.map(verdictDotColor);
+
+  state.trendChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        borderColor: '#34d399',
+        borderWidth: 1.5,
+        pointBackgroundColor: colors,
+        pointBorderColor: colors,
+        pointRadius: 6,
+        pointHoverRadius: 8,
+        tension: 0.2,
+        fill: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` ${verdicts[ctx.dataIndex]}`,
+          },
+          backgroundColor: '#1a1a1a',
+          borderColor: '#333',
+          borderWidth: 1,
+          titleColor: '#e5e5e5',
+          bodyColor: '#aaa',
+        },
+      },
+      scales: {
+        x: {
+          grid: { color: '#1a1a1a' },
+          ticks: { color: '#555', font: { size: 10 } },
+        },
+        y: {
+          min: -0.1,
+          max: 1.1,
+          display: false,
+        },
+      },
+    },
+  });
+}
+
+// ─── Close panel ─────────────────────────────────────────────
+function closeComparison() {
+  state.selectedAgent = null;
+  state.selectedModel = null;
+  document.getElementById('comparison-section').classList.add('hidden-panel');
+  renderOverview(); // clear selected highlight
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+  if (state.trendChart) { state.trendChart.destroy(); state.trendChart = null; }
+}
+
+// ─── Main load ────────────────────────────────────────────────
+async function loadAll() {
+  if (state.loading) return;
+  state.loading = true;
+
+  const btn = document.getElementById('refresh-btn');
+  btn.textContent = 'Loading…';
+  btn.disabled = true;
+
+  try {
+    await loadOverview();
+    document.getElementById('last-updated').textContent = formatTimestamp(new Date());
+    state.error = null;
+  } catch (err) {
+    state.error = err.message;
+    showError(err.message);
+  } finally {
+    state.loading = false;
+    btn.textContent = 'Refresh';
+    btn.disabled = false;
+  }
+}
+
+function showError(msg) {
+  const body = document.getElementById('overview-table-body');
+  body.innerHTML = `
+    <div class="empty-state">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="1.5">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+      </svg>
+      <p style="margin:0;font-size:0.875rem;color:#f87171;">Failed to load data</p>
+      <p style="margin:6px 0 0;font-size:0.78rem;color:#555;">${msg}</p>
+      <p style="margin:6px 0 0;font-size:0.75rem;color:#444;">Will retry in 30s</p>
+    </div>`;
+}
+
+// ─── Auto-refresh ─────────────────────────────────────────────
+function startAutoRefresh() {
+  if (state.refreshTimer) clearInterval(state.refreshTimer);
+  state.refreshTimer = setInterval(() => loadAll(), 30_000);
+}
+
+// ─── Countdown display ────────────────────────────────────────
+let countdown = 30;
+setInterval(() => {
+  countdown = (countdown <= 1) ? 30 : countdown - 1;
+  const indicator = document.getElementById('refresh-indicator');
+  if (indicator) {
+    indicator.querySelector('span:last-child').textContent = `Refreshing in ${countdown}s`;
+  }
+}, 1_000);
+
+// Sync countdown reset on manual refresh
+const origLoadAll = loadAll;
+window.loadAll = async function() {
+  countdown = 30;
+  await origLoadAll();
+  startAutoRefresh(); // reset the 30s timer
+};
+
+// ─── Bootstrap ───────────────────────────────────────────────
+loadAll();
+startAutoRefresh();
+</script>
+</body>
+</html>
