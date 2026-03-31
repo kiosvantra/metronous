@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
@@ -66,18 +67,21 @@ var (
 	colWidths = []int{20, 16, 12, 22, 8, 8, 14, 10, 10}
 	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent(total)", "Session", "Dur"}
 
-	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	errStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	spentTotalRedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	sevGreenStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	sevAmberStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	sevRedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	popupBgStyle       = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("33")).
-				Padding(0, 1)
+	headerStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	errStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	spentOkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	spentWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	spentBadStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+
+	sevGreenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	sevAmberStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	sevRedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	popupBgStyle  = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("33")).
+			Padding(0, 1)
 	popupHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 	popupDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	popupRowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
@@ -340,7 +344,7 @@ func (m *TrackingModel) renderBackground() string {
 		if isCursor {
 			baseStyle = cursorStyle
 		}
-		spentStyle, durationStyle := severityStylesForDuration(s.DurationMs)
+		spentStyle, durationStyle := severityStylesForCostAndDuration(s.CostUSD, s.DurationMs)
 		sb.WriteString(renderSessionRowMain(cells, colWidths, baseStyle, isCursor, spentStyle, durationStyle))
 		sb.WriteString("\n")
 	}
@@ -557,10 +561,29 @@ func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
 	return sb.String()
 }
 
-func severityStylesForDuration(durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
-	// Spent is always treated as cost.
-	spentStyle = sevRedStyle
-	// Default (unknown/slow).
+func severityStylesForCostAndDuration(costUSD *float64, durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
+	// Spent semaforo is based on configured cost thresholds.
+	// We use defaults here because Tracking has no direct access to live config changes.
+	t := config.DefaultThresholdValues()
+	maxCost := t.Defaults.MaxCostUSDPerSession
+	spikeMult := t.UrgentTriggers.MaxCostSpikeMultiplier
+	maxSpike := maxCost * spikeMult
+
+	spentStyle = spentOkStyle
+	if costUSD == nil || *costUSD <= 0 {
+		// Keep low cost style for empty/unknown.
+		spentStyle = spentOkStyle
+	} else {
+		if *costUSD > maxSpike {
+			spentStyle = spentBadStyle
+		} else if *costUSD > maxCost {
+			spentStyle = spentWarnStyle
+		} else {
+			spentStyle = spentOkStyle
+		}
+	}
+
+	// Duration semaforo (for latency-ish proxy).
 	durationStyle = sevRedStyle
 	if durationMs == nil || *durationMs <= 0 {
 		return spentStyle, durationStyle
