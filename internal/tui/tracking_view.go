@@ -56,6 +56,9 @@ type TrackingModel struct {
 	popupSessionID string
 	popupEvents    []store.Event
 	popupLoading   bool
+	// Popup viewport: cursor within the 20-row viewport, offset for PgUp/PgDn.
+	popupCursor int
+	popupOffset int
 }
 
 // Column header widths.
@@ -138,11 +141,52 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 			m.popupEvents = nil
 			m.popupSessionID = ""
 			m.popupLoading = false
+			m.popupCursor = 0
+			m.popupOffset = 0
 			return m, nil
 		}
 
-		// If popup is open, swallow all other keys (popup is read-only).
+		// If popup is open, route navigation keys into popup viewport.
 		if m.popupOpen {
+			switch msg.String() {
+			case "up", "k":
+				if m.popupCursor > 0 {
+					m.popupCursor--
+				} else if m.popupOffset > 0 {
+					m.popupOffset -= maxTrackingRows
+					if m.popupOffset < 0 {
+						m.popupOffset = 0
+					}
+					m.popupCursor = maxTrackingRows - 1
+				}
+			case "down", "j":
+				visibleCount := len(m.popupEvents) - m.popupOffset
+				if visibleCount > maxTrackingRows {
+					visibleCount = maxTrackingRows
+				}
+				if visibleCount < 0 {
+					visibleCount = 0
+				}
+				if m.popupCursor < visibleCount-1 {
+					m.popupCursor++
+				} else if m.popupOffset+maxTrackingRows < len(m.popupEvents) {
+					m.popupOffset += maxTrackingRows
+					m.popupCursor = 0
+				}
+			case "pgdown":
+				newOffset := m.popupOffset + maxTrackingRows
+				if newOffset < len(m.popupEvents) {
+					m.popupOffset = newOffset
+					m.popupCursor = 0
+				}
+			case "pgup":
+				if m.popupOffset >= maxTrackingRows {
+					m.popupOffset -= maxTrackingRows
+				} else {
+					m.popupOffset = 0
+				}
+				m.popupCursor = 0
+			}
 			return m, nil
 		}
 
@@ -163,6 +207,8 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				m.popupSessionID = sid
 				m.popupEvents = nil
 				m.popupLoading = true
+				m.popupCursor = 0
+				m.popupOffset = 0
 				return m, m.fetchSessionEvents(sid)
 			}
 		case "pgdown":
@@ -311,6 +357,8 @@ func (m *TrackingModel) renderBackground() string {
 }
 
 // renderPopup renders the modal popup with the frozen session timeline.
+// Only maxTrackingRows event rows are shown at a time; popupOffset and popupCursor
+// control which slice is visible. popupEvents is never refetched here.
 func (m *TrackingModel) renderPopup() string {
 	var sb strings.Builder
 
@@ -320,22 +368,57 @@ func (m *TrackingModel) renderPopup() string {
 	sb.WriteString(strings.Repeat("─", min(len(title)+4, 80)) + "\n")
 
 	if m.popupLoading {
+		// Show fixed-height placeholder while events are loading.
 		sb.WriteString(popupDimStyle.Render("  Loading events…") + "\n")
+		for i := 0; i < maxTrackingRows+2; i++ {
+			sb.WriteString("\n")
+		}
 	} else if len(m.popupEvents) == 0 {
 		sb.WriteString(popupDimStyle.Render("  No events found for this session.") + "\n")
+		for i := 0; i < maxTrackingRows+2; i++ {
+			sb.WriteString("\n")
+		}
 	} else {
-		// Timeline: start → tool_call* → complete
+		// Timeline columns (no metadata).
 		colW := []int{20, 14, 24, 8, 8, 8}
 		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent"}
 		sb.WriteString(popupHeaderStyle.Render(renderRow(colH, colW, lipgloss.NewStyle())) + "\n")
 		sb.WriteString(strings.Repeat("─", totalWidth(colW)) + "\n")
-		for _, ev := range m.popupEvents {
-			cells := formatEventRowCompact(ev)
-			sb.WriteString(popupRowStyle.Render(renderRow(cells, colW, lipgloss.NewStyle())) + "\n")
+
+		// Compute the visible window [popupOffset, popupOffset+maxTrackingRows).
+		start := m.popupOffset
+		end := start + maxTrackingRows
+		if end > len(m.popupEvents) {
+			end = len(m.popupEvents)
 		}
+		visible := m.popupEvents[start:end]
+
+		for ri, ev := range visible {
+			cells := formatEventRowCompact(ev)
+			row := renderRow(cells, colW, lipgloss.NewStyle())
+			if ri == m.popupCursor {
+				sb.WriteString(cursorStyle.Render(row) + "\n")
+			} else {
+				sb.WriteString(popupRowStyle.Render(row) + "\n")
+			}
+		}
+
+		// Pad viewport to fixed height so popup box stays stable.
+		for i := len(visible); i < maxTrackingRows; i++ {
+			sb.WriteString("\n")
+		}
+
+		// Scroll indicator.
+		totalEvents := len(m.popupEvents)
+		pageNum := m.popupOffset/maxTrackingRows + 1
+		totalPages := (totalEvents + maxTrackingRows - 1) / maxTrackingRows
+		scrollInfo := fmt.Sprintf("  %d/%d events  |  page %d/%d  (↑↓ / PgUp/PgDn)", totalEvents, totalEvents, pageNum, totalPages)
+		if totalPages == 1 {
+			scrollInfo = fmt.Sprintf("  %d events", totalEvents)
+		}
+		sb.WriteString(popupDimStyle.Render(scrollInfo) + "\n")
 	}
 
-	sb.WriteString("\n")
 	sb.WriteString(popupDimStyle.Render("  Esc to close"))
 
 	return popupBgStyle.Render(sb.String())

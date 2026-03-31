@@ -890,6 +890,168 @@ func TestTrackingRefreshDoesNotClosePopup(t *testing.T) {
 	}
 }
 
+// TestTrackingPopupScrolling verifies ↑/↓ move selection within the popup viewport
+// and PgUp/PgDn scroll by blocks of 20.
+func TestTrackingPopupScrolling(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(1)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// Build 25 events so we have more than one page.
+	evts := make([]store.Event, 25)
+	base := time.Now()
+	for i := range evts {
+		evts[i] = store.Event{
+			AgentID:   sessions[0].AgentID,
+			SessionID: sid,
+			EventType: "tool_call",
+			Model:     "gpt-4",
+			Timestamp: base.Add(time.Duration(-i) * time.Minute),
+		}
+	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
+
+	// Initial state: cursor=0, offset=0, main cursor unchanged.
+	mainCursorBefore := tui.GetTrackingCursor(m)
+	if tui.GetTrackingPopupCursor(m) != 0 {
+		t.Fatalf("expected popup cursor = 0, got %d", tui.GetTrackingPopupCursor(m))
+	}
+	if tui.GetTrackingPopupOffset(m) != 0 {
+		t.Fatalf("expected popup offset = 0, got %d", tui.GetTrackingPopupOffset(m))
+	}
+
+	// Down moves popup cursor (not main cursor).
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetTrackingPopupCursor(m) != 1 {
+		t.Errorf("after down: expected popup cursor = 1, got %d", tui.GetTrackingPopupCursor(m))
+	}
+	if tui.GetTrackingCursor(m) != mainCursorBefore {
+		t.Errorf("main cursor should not change while popup is open: got %d, want %d",
+			tui.GetTrackingCursor(m), mainCursorBefore)
+	}
+
+	// Up moves popup cursor back.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetTrackingPopupCursor(m) != 0 {
+		t.Errorf("after up: expected popup cursor = 0, got %d", tui.GetTrackingPopupCursor(m))
+	}
+
+	// Up at popup cursor=0 with offset=0 → no change.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetTrackingPopupCursor(m) != 0 {
+		t.Errorf("up at boundary: expected popup cursor = 0, got %d", tui.GetTrackingPopupCursor(m))
+	}
+	if tui.GetTrackingPopupOffset(m) != 0 {
+		t.Errorf("up at boundary: expected popup offset = 0, got %d", tui.GetTrackingPopupOffset(m))
+	}
+
+	// PgDn scrolls to next block of 20.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetTrackingPopupOffset(m) != 20 {
+		t.Errorf("after PgDn: expected popup offset = 20, got %d", tui.GetTrackingPopupOffset(m))
+	}
+	if tui.GetTrackingPopupCursor(m) != 0 {
+		t.Errorf("after PgDn: expected popup cursor = 0, got %d", tui.GetTrackingPopupCursor(m))
+	}
+
+	// PgDn beyond last page → stays at last valid offset.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetTrackingPopupOffset(m) != 20 {
+		t.Errorf("PgDn beyond last page: expected popup offset = 20 (no change), got %d",
+			tui.GetTrackingPopupOffset(m))
+	}
+
+	// PgUp scrolls back.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if tui.GetTrackingPopupOffset(m) != 0 {
+		t.Errorf("after PgUp: expected popup offset = 0, got %d", tui.GetTrackingPopupOffset(m))
+	}
+
+	// Popup events must NOT be refetched — still 25.
+	if len(tui.GetTrackingPopupEvents(m)) != 25 {
+		t.Errorf("popup events changed during scroll: expected 25, got %d",
+			len(tui.GetTrackingPopupEvents(m)))
+	}
+}
+
+// TestTrackingPopupViewport20Rows verifies that the popup renders at most 20 event rows
+// even when popupEvents contains more than 20 entries.
+func TestTrackingPopupViewport20Rows(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(1)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// 25 events.
+	evts := make([]store.Event, 25)
+	base := time.Now()
+	for i := range evts {
+		evts[i] = store.Event{
+			AgentID:   sessions[0].AgentID,
+			SessionID: sid,
+			EventType: fmt.Sprintf("evt-%02d", i),
+			Model:     "gpt-4",
+			Timestamp: base.Add(time.Duration(-i) * time.Minute),
+		}
+	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
+
+	view := m.View()
+	// Only the first 20 events (evt-00..evt-19) should be visible at offset 0.
+	if strings.Contains(view, "evt-20") {
+		t.Errorf("event from second page (evt-20) should not be visible in first viewport")
+	}
+	if !strings.Contains(view, "evt-00") {
+		t.Errorf("expected first event (evt-00) to be visible")
+	}
+	if !strings.Contains(view, "evt-19") {
+		t.Errorf("expected last visible event (evt-19) to be visible")
+	}
+}
+
+// TestTrackingPopupResetOnReopen verifies that reopening the popup resets cursor and offset.
+func TestTrackingPopupResetOnReopen(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(1)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	sid := sessions[0].SessionID
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	evts := make([]store.Event, 25)
+	base := time.Now()
+	for i := range evts {
+		evts[i] = store.Event{
+			AgentID:   sessions[0].AgentID,
+			SessionID: sid,
+			EventType: "tool_call",
+			Model:     "gpt-4",
+			Timestamp: base.Add(time.Duration(-i) * time.Minute),
+		}
+	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
+
+	// Scroll down then close.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	// Reopen.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if tui.GetTrackingPopupCursor(m) != 0 {
+		t.Errorf("reopen: expected popup cursor = 0, got %d", tui.GetTrackingPopupCursor(m))
+	}
+	if tui.GetTrackingPopupOffset(m) != 0 {
+		t.Errorf("reopen: expected popup offset = 0, got %d", tui.GetTrackingPopupOffset(m))
+	}
+}
+
 // TestTrackingRefreshWithNewSessionsDoesNotClosePopup verifies that a refresh
 // with different session data still keeps the popup open and frozen.
 func TestTrackingRefreshWithNewSessionsDoesNotClosePopup(t *testing.T) {

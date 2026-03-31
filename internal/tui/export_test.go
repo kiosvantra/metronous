@@ -78,3 +78,13 @@ func GetTrackingPopupSessionID(m TrackingModel) string {
 func GetTrackingPopupEvents(m TrackingModel) []store.Event {
 	return m.popupEvents
 }
+
+// GetTrackingPopupCursor returns the current cursor row within the popup viewport.
+func GetTrackingPopupCursor(m TrackingModel) int {
+	return m.popupCursor
+}
+
+// GetTrackingPopupOffset returns the current scroll offset within popupEvents.
+func GetTrackingPopupOffset(m TrackingModel) int {
+	return m.popupOffset
+}
