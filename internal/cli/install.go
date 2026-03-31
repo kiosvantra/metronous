@@ -72,41 +72,19 @@ connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`
 	}
 }
 
-// checkOpencodeConfig verifies that OpenCode is installed and has a valid config file.
-// Returns a descriptive error with remediation steps if not.
-func checkOpencodeConfig(userHome string) error {
+// warnOpencodeConfig prints an informational message if OpenCode does not appear
+// to be installed. It never blocks installation — Metronous works with OpenCode
+// built-in agents even without an opencode.json.
+func warnOpencodeConfig(userHome string) {
 	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf(`OpenCode is not configured yet.
-
-Metronous requires OpenCode to be installed and configured before running.
-
-Steps:
-  1. Install OpenCode:
-       curl -fsSL https://opencode.ai/install | bash
-
-  2. Run OpenCode once and connect a provider:
-       opencode
-       # Then use /connect to add your API key
-
-     Or create a minimal config manually:
-       mkdir -p ~/.config/opencode
-       echo '{"$schema":"https://opencode.ai/config.json","model":"anthropic/claude-sonnet-4-5"}' \
-         > ~/.config/opencode/opencode.json
-
-  3. Run 'metronous install' again`)
-		}
-		return fmt.Errorf("read opencode.json: %w", err)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Println("")
+		fmt.Println("Note: OpenCode config not found at ~/.config/opencode/opencode.json")
+		fmt.Println("Metronous will work with OpenCode built-in agents automatically.")
+		fmt.Println("To add custom agents or providers, configure OpenCode first:")
+		fmt.Println("  curl -fsSL https://opencode.ai/install | bash && opencode")
+		fmt.Println("")
 	}
-
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("opencode.json exists but is not valid JSON — fix it and run 'metronous install' again: %w", err)
-	}
-
-	return nil
 }
 
 // runInstall performs all installation steps.
@@ -120,9 +98,7 @@ func runInstall() error {
 	if err != nil {
 		return fmt.Errorf("get user home: %w", err)
 	}
-	if err := checkOpencodeConfig(userHome); err != nil {
-		return err
-	}
+	warnOpencodeConfig(userHome)
 
 	// Step 1: Initialize ~/.metronous (idempotent).
 	home := defaultMetronousHome()

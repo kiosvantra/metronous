@@ -35,24 +35,9 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service)
 
 ## Prerequisites
 
-1. **[OpenCode](https://opencode.ai) installed and configured** — Metronous requires a valid `~/.config/opencode/opencode.json`. This file is created when you run OpenCode and connect a provider.
+1. **[OpenCode](https://opencode.ai) installed** — `curl -fsSL https://opencode.ai/install | bash`
 
-```bash
-# Install OpenCode
-curl -fsSL https://opencode.ai/install | bash
-
-# Run it once and connect a provider with /connect
-opencode
-```
-
-   Or create a minimal config manually:
-```bash
-mkdir -p ~/.config/opencode
-echo '{"$schema":"https://opencode.ai/config.json","model":"anthropic/claude-sonnet-4-5"}' \
-  > ~/.config/opencode/opencode.json
-```
-
-If you run `metronous install` without OpenCode configured, the installer will detect this and show you exactly what to do.
+Metronous works with OpenCode's built-in agents out of the box — no custom `opencode.json` required. If you have one, Metronous will patch it automatically. If not, it will create one with the MCP shim configured and you can add providers and agents to it later.
 
 Go 1.22+ is only required for source builds and `go install`.
 
