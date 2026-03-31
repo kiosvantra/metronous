@@ -105,7 +105,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    ### d. Decision Thresholds  
    The system does not declare a SWITCH simply because one model has a higher score. It requires a **minimum improvement** to avoid flapping on negligible differences.
 
-   - Let `S_base` be the score of the currently active model (the “baseline” – usually the model whose `command` appears in `opencode.json` under `mcpServers.metronous.command`).
+   - Let `S_base` be the score of the currently active baseline model for the agent being evaluated.
    - Let `S_cand` be the score of the candidate model being evaluated.
    - Compute `delta = S_cand − S_base`.
 
@@ -120,11 +120,11 @@ This document explains the **methodology** behind Metronous: what data it collec
 4. **Verdict Propagation**  
    The benchmark engine writes the winning model (or the directive to keep the current one) into `~/.metronous/thresholds.json` under the `active_model` key.  
    The TUI and CLI read this file to display the active recommendation.  
-   OpenCode itself does **not** automatically switch models; it continues to use whatever `command` is listed in its `opencode.json`.  
+   OpenCode itself does **not** automatically switch models. Metronous reports a recommendation; the user or team decides whether to update the relevant OpenCode model configuration.  
    The intended workflow is:
    1. Wait for the weekly benchmark to run (or trigger it manually with `metronous benchmark --model <name>`).
    2. Observe the verdict in the TUI (Benchmark tab) or via `metronous report`.
-   3. If the verdict is `SWITCH`, manually update `opencode.json` (or run `metronous install` again, which will preserve the active model choice) to point to the new model.
+   3. If the verdict is `SWITCH`, manually update the relevant OpenCode model or agent configuration.
    4. Restart OpenCode (or reload its MCP server) to start using the new model.
 
    This manual step ensures that teams retain control and can verify the change in a staging environment before rolling it out to production.
@@ -133,7 +133,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    - **Robustness to Noise**: By aggregating over a window and normalizing relative to peers, Metronous filters out day‑to‑day jitter (e.g., temporary network latency, varying prompt complexity).  
    - **Actionable Trade‑offs**: The weighted sum forces an explicit consideration of accuracy vs. speed vs. cost vs. tool usage—trade‑offs that teams already make intuitively but now see quantified.  
    - **Cost‑Awareness**: Free models are not punished; they receive the maximum possible score on the cost dimension, making it easy to spot zero‑cost alternatives when they are comparable in other regards.  
-   - **Low Operational Overhead**: Once installed as a systemd service, Metronous runs in the background with virtually no maintenance. The only periodic action is checking the benchmark verdict and updating `opencode.json` if a SWITCH is advised.  
+   - **Low Operational Overhead**: Once installed as a systemd service, Metronous runs in the background with virtually no maintenance. The main periodic action is reviewing the benchmark verdict and deciding whether to update OpenCode model settings.  
    - **Extensibility**: New metrics (e.g., carbon footprint, safety scores) can be added by extending the event schema, adding a normalization rule, and assigning a weight—without changing the core pipeline logic.
 
 6. **Limitations & Design Trade‑offs**  
@@ -143,7 +143,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    - **Reliance on Accurate Token Counting**: Cost calculations depend on the token counts reported by the LLM provider. If a provider under‑ or over‑reports tokens, the cost dimension will be skewed. Most major providers are accurate, but it’s worth auditing if cost estimates seem off.  
    - **Quality Score Sparsity**: Many events (especially `tool_call` or `start`) do not have a `quality_score`. The system only averages quality over events where it is present; if quality is rarely reported, this dimension has little influence. Teams should ensure their agents emit a quality signal (e.g., self‑assessment, unit test pass/fail) for the metric to be meaningful.
 
-   - **Web/Mobile CSP Limitation**: The OpenCode web and mobile interfaces are subject to browser Content Security Policy (CSP) restrictions that block connections to non-same-origin endpoints (e.g., `http://localhost:<port>` or `http://<IP>:<port>`). By default, OpenCode’s CSP only allows connections to '`self`' and '`data:`', preventing the MCP shim (`metronous mcp`) from reaching the Metronous daemon even when the daemon is listening on `0.0.0.0`. To use web/mobile interfaces, you must adjust OpenCode’s CSP (via environment variables or source modification) to include your daemon’s IP/port, or deploy a reverse proxy to make the daemon appear same-origin. This is a client-side limitation, not a Metronous daemon issue.
+   - **Web/Mobile CSP Limitation**: The OpenCode web and mobile interfaces are subject to browser Content Security Policy (CSP) restrictions that block connections to non-same-origin endpoints (for example `http://127.0.0.1:<port>`). By default, OpenCode’s CSP only allows connections to '`self`' and '`data:`', preventing the MCP shim (`metronous mcp`) from reaching the local Metronous daemon from those clients. To use web/mobile interfaces, you must adjust OpenCode’s CSP or deploy a reverse proxy to make the daemon appear same-origin. This is a client-side limitation, not a Metronous daemon issue.
 7. **How to Verify or Tweak the Methodology**  
    - **Inspect Raw Data**: `sqlite3 ~/.metronous/data/tracking.db "SELECT * FROM events ORDER BY timestamp DESC LIMIT 20;"`  
    - **Check Aggregates**: `sqlite3 ~/.metronous/data/benchmark.dump` or use the CLI: `metronous benchmark --debug` (prints intermediate normalizations, weights, and delta).  

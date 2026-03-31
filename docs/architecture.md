@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This document describes the runtime architecture of Metronous, focusing on components, communication protocols, data flow, and deployment details. It complements [`how-it-works.md`](docs/how-it-works.md) which covers the methodological approach to benchmarking and model recommendation.
+This document describes the runtime architecture of Metronous, focusing on components, communication protocols, data flow, and deployment details. It complements [`how-it-works.md`](how-it-works.md) which covers the methodological approach to benchmarking and model recommendation.
 
 ## Table of Contents
 - [Core Components](#core-components)
@@ -24,7 +24,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 | **SQLite Stores** | Persistent storage for raw events (`tracking.db`) and pre-aggregated benchmark data (`benchmark.db`) | SQLite via `internal/store/sqlite/` | File-based; located in `~/.metronous/data/` |
 | **CLI (`metronous` command)** | User-facing commands: `install`, `init`, `benchmark`, `report`, `dashboard`, etc. | Go/Cobra | Interacts with daemon via direct function calls (when run locally) or HTTP (if daemon remote—not currently supported) |
 | **TUI Dashboard** (`metronous dashboard`) | Terminal UI showing Tracking, Benchmark, and Config tabs | Go/Bubbletea | Reads directly from SQLite files; presents telemetry and benchmark results |
-| **OpenCode MCP Configuration** | Tells OpenCode how to reach the shim | JSON in `~/.config/opencode/opencode.json` | After `metronous install`: `{ "mcp": { "metronous": { "command": ["metronous", "mcp"], "type": "local" } } }` |
+| **OpenCode MCP Configuration** | Tells OpenCode how to reach the shim | JSON in `~/.config/opencode/opencode.json` | After `metronous install`: `{ "mcp": { "metronous": { "command": ["/absolute/path/to/metronous", "mcp"], "type": "local" } } }` |
 
 ---
 
@@ -40,16 +40,16 @@ This document describes the runtime architecture of Metronous, focusing on compo
 
 ### 2. Shim → Daemon (HTTP)
 - **Direction**: shim → daemon (outgoing HTTP POST/GET from shim to daemon)
-- **Protocol**: HTTP/1.1 over TCP (localhost)
+- **Protocol**: HTTP/1.1 over TCP (loopback only, `127.0.0.1`)
 - **Endpoints**:
   - `POST /ingest` – receives telemetry event (JSON body matches MCP `ingest` arguments)
   - `GET /health` – liveness probe (returns `{status:"ok"}`)
   - `GET /status` – alias for `/health`
   - `GET /tools` – returns list of supported tools (currently only `ingest`)
 - **Details**:
-  - shim reads the port from `~/.metronous/mcp.port` (symlink to `~/.metronous/data/mcp.port`)
+  - shim reads the port from `~/.metronous/data/mcp.port`
   - shim performs a health check (`GET /health`) before using a cached port to avoid dead daemon connections
-  - shim uses a 2‑second timeout for HTTP requests; on failure it deletes the stale port file and attempts to (re)start the daemon via the same `ensureDaemonRunning` logic
+  - shim uses a short HTTP timeout; on failure it treats the daemon as unhealthy and retries via the normal daemon startup path
 
 ### 3. Daemon → OpenCode (Indirect)
 - The daemon does **not** push data to OpenCode. OpenCode pulls insights via:
@@ -73,7 +73,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 
 3. **Shim Processing**  
    - Shim parses the MCP message, extracts the JSON payload.
-   - Shim reads the current daemon port from `~/.metronous/mcp.port` (creating the port file if needed via `ensureDaemonRunning`).
+   - Shim reads the current daemon port from `~/.metronous/data/mcp.port`.
    - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
 
 4. **Daemon Ingestion**  
@@ -92,7 +92,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 7. **Presentation**  
    - TUI Dashboard reads `tracking.db` (for real‑time event stream) and `benchmark.db`/`thresholds.json` (for benchmark tab and active model display).
    - `metronous report` CLI prints formatted tables from the same sources.
-   - User manually updates `opencode.json` (if `SWITCH`) to point to the new model, then restarts OpenCode.
+   - User reviews the recommendation in the dashboard or CLI report and manually decides whether to change the active model in OpenCode.
 
 ---
 
@@ -132,7 +132,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 | **Port file exists but daemon dead** | Shim’s health check (`GET /health`) fails (connection refused, timeout, non‑200) | Shim deletes stale port file, proceeds to start a new daemon via `ensureDaemonRunning`. |
 | **Daemon fails to start** (e.g., bad binary, missing data dir) | `systemctl --user status metronous` shows `failed`; journal shows error | User must fix underlying issue (e.g., reinstall binary, ensure `~/.metronous/data` exists and is writable). Systemd will retry per `Restart=on-failure`. |
 | **SQLite disk full or corruption** | Daemon logs error on insert/aggregation; may return HTTP 500 on `/ingest` | Manual intervention required: free space, restore from backup, or delete and let databases recreate (losing historical data). |
-| **Systemd user instance not running** | `systemctl --user` commands fail | Ensure linger is enabled for the user (`loginctl enable-linger $USER`) if the service must survive user logouts. |
+| **Systemd user instance not running** | `systemctl --user` commands fail | Ensure systemd user services are available on the host. On WSL this means enabling `systemd=true` in `/etc/wsl.conf` and restarting WSL. |
 | **Network issues between shim and daemon** (unlikely on localhost) | Shim HTTP requests timeout or fail | Shim treats as daemon-unhealthy, deletes port file, attempts restart. |
 | **Too many OpenCode sessions** (many shims) | Each shim opens a HTTP connection to daemon; daemon’s HTTP server has limited concurrent capacity | Daemon’s `http.Server` uses default `MaxHeaderBytes` etc.; under extreme load may see latency or dropped requests. Consider raising daemon’s HTTP timeouts or using a reverse proxy if needed (not currently required for typical usage). |
 
@@ -145,7 +145,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 ├── data/
 │   ├── tracking.db          # Raw event stream (WAL mode)
 │   ├── benchmark.db         # Pre‑aggregated summaries for benchmarking
-│   ├── mcp.port             # Symlink to data/mcp.port; holds current daemon port
+│   ├── mcp.port             # Current daemon port
 │   └── metronous.pid        # PID of the daemon (if running)
 └── thresholds.json          # User‑editable config: active model, weights, thresholds, model prices
 ```
@@ -213,8 +213,8 @@ Daemon (internal timer)          Benchmark Engine          SQLite DBs           
 ## Closing Notes
 
 This architecture delivers:
-- **Zero‑friction installation** (`curl ... install.sh | sh` + `metronous install` → running daemon + configured OpenCode).
-- **True multi‑instance sharing**: all OpenCode instances (TUI, web, mobile) talk to the same daemon via the shim.
+- **Zero‑friction Linux installation** (`curl -fsSL https://github.com/kiosvantra/metronous/releases/latest/download/install.sh | bash` → running daemon + configured OpenCode).
+- **Shared local daemon**: OpenCode sessions on the same machine talk to the same daemon via the shim.
 - **Observability**: logs, SQLite files, and systemd status give full visibility into operation.
 - **Simplicity**: few moving parts, no external dependencies beyond Go and SQLite (already vendored).
 
