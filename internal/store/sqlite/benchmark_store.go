@@ -428,6 +428,41 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	return &run, nil
 }
 
+// GetRecentRunsAllAgents returns at most topNPerAgent most recent benchmark runs per distinct
+// agent_id, using a ROW_NUMBER() window function CTE for a single-query implementation.
+// If topNPerAgent <= 0, it defaults to 4.
+// Results are ordered by agent_id ASC, run_at DESC within each agent.
+func (bs *BenchmarkStore) GetRecentRunsAllAgents(ctx context.Context, topNPerAgent int) ([]store.BenchmarkRun, error) {
+	if topNPerAgent <= 0 {
+		topNPerAgent = 4
+	}
+
+	const q = `
+		WITH ranked AS (
+			SELECT id, run_at, window_days, agent_id, model,
+				accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+				tool_success_rate, roi_score, total_cost_usd, sample_size,
+				verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
+				ROW_NUMBER() OVER (PARTITION BY agent_id ORDER BY run_at DESC) AS rn
+			FROM benchmark_runs
+		)
+		SELECT id, run_at, window_days, agent_id, model,
+			accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+			tool_success_rate, roi_score, total_cost_usd, sample_size,
+			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
+		FROM ranked
+		WHERE rn <= ?
+		ORDER BY agent_id ASC, run_at DESC`
+
+	rows, err := bs.readDB.QueryContext(ctx, q, topNPerAgent)
+	if err != nil {
+		return nil, fmt.Errorf("get recent runs all agents: %w", err)
+	}
+	defer rows.Close()
+
+	return scanBenchmarkRuns(rows)
+}
+
 // GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
 // Returns an empty slice if the agent has no runs or fewer than requested.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
