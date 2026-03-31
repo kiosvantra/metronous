@@ -164,7 +164,21 @@ func (r *Runner) processAgent(ctx context.Context, agentID string, start, end ti
 		//    the model is the VARIABLE being evaluated, not the threshold key.
 		verdict := r.engine.Evaluate(ctx, metrics)
 
-		// 5. Build the BenchmarkRun.
+		// 5. Compute composite score using effective weights and thresholds.
+		weights := r.engine.ScoreWeights()
+		maxLat := r.engine.EffectiveMaxLatencyP95(agentID)
+		score := benchmark.ComputeCompositeScore(
+			benchmark.ScoreInput{
+				Accuracy:        metrics.Accuracy,
+				P95LatencyMs:    metrics.P95LatencyMs,
+				ToolSuccessRate: metrics.ToolSuccessRate,
+				ROIScore:        metrics.ROIScore,
+			},
+			weights,
+			benchmark.ScoreThresholds{MaxLatencyP95Ms: float64(maxLat)},
+		)
+
+		// 6. Build the BenchmarkRun.
 		run := store.BenchmarkRun{
 			RunAt:            time.Now().UTC(),
 			WindowDays:       windowDays,
@@ -183,6 +197,7 @@ func (r *Runner) processAgent(ctx context.Context, agentID string, start, end ti
 			RecommendedModel: verdict.RecommendedModel,
 			DecisionReason:   verdict.Reason,
 			AvgQualityScore:  metrics.AvgQuality,
+			CompositeScore:   score,
 			// ArtifactPath is set by RunWeekly after GenerateArtifact completes.
 		}
 

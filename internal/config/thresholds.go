@@ -94,6 +94,9 @@ type Thresholds struct {
 	// ModelPricing holds pricing data used to determine whether a model is free.
 	// Models with price == 0 have ROI/cost checks skipped in the decision engine.
 	ModelPricing ModelPricing `json:"model_pricing,omitempty"`
+	// ScoreWeights defines the weights for composite score calculation.
+	// If the section is absent from JSON, use DefaultScoreWeights().
+	ScoreWeights ScoreWeights `json:"score_weights,omitempty"`
 }
 
 // IsModelFree returns true if the model is explicitly listed in ModelPricing with
@@ -128,7 +131,8 @@ func DefaultThresholdValues() Thresholds {
 			PerformanceModel: "claude-haiku-4-5",
 			DefaultModel:     "claude-sonnet-4-5",
 		},
-		PerAgent: make(map[string]AgentThresholds),
+		PerAgent:     make(map[string]AgentThresholds),
+		ScoreWeights: DefaultScoreWeights(),
 	}
 }
 
