@@ -301,6 +301,12 @@ type BenchmarkStore interface {
 	// ordered oldest first. Returns an empty slice if no runs exist.
 	GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error)
 
+	// GetRecentRunsAllAgents returns at most topNPerAgent most recent benchmark
+	// runs per distinct agent_id, ordered by run_at DESC within each agent.
+	// This is the data source for cross-agent weekly aggregation.
+	// Pass topNPerAgent=0 to default to 4 runs per agent.
+	GetRecentRunsAllAgents(ctx context.Context, topNPerAgent int) ([]BenchmarkRun, error)
+
 	// Close releases all resources held by the store.
 	Close() error
 }
