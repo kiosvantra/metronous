@@ -164,6 +164,15 @@ func TestInstallOpenCodePluginUsesBundledPlugin(t *testing.T) {
 	tmpAppData := t.TempDir()
 	t.Setenv("APPDATA", tmpAppData)
 
+	// Create opencode.json in %APPDATA%\opencode so resolveOpenCodeRoot picks it up.
+	appDataDir := filepath.Join(tmpAppData, "opencode")
+	if err := os.MkdirAll(appDataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDataDir, "opencode.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := installOpenCodePlugin(tmpHome); err != nil {
 		t.Fatalf("installOpenCodePlugin: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/kiosvantra/metronous/internal/cli"
@@ -40,10 +41,12 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 		if !info.IsDir() {
 			t.Errorf("%q is not a directory", d.path)
 		}
-		// Check permissions (mask with 0777 to get the mode bits only).
-		gotPerm := info.Mode().Perm()
-		if gotPerm != d.perm {
-			t.Errorf("directory %q: permissions got %o, want %o", d.path, gotPerm, d.perm)
+		// Windows does not honour Unix permission bits — skip perm check.
+		if runtime.GOOS != "windows" {
+			gotPerm := info.Mode().Perm()
+			if gotPerm != d.perm {
+				t.Errorf("directory %q: permissions got %o, want %o", d.path, gotPerm, d.perm)
+			}
 		}
 	}
 
@@ -65,9 +68,12 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 		if info.IsDir() {
 			t.Errorf("%q is a directory, expected file", f.path)
 		}
-		gotPerm := info.Mode().Perm()
-		if gotPerm != f.perm {
-			t.Errorf("file %q: permissions got %o, want %o", f.path, gotPerm, f.perm)
+		// Windows does not honour Unix permission bits — skip perm check.
+		if runtime.GOOS != "windows" {
+			gotPerm := info.Mode().Perm()
+			if gotPerm != f.perm {
+				t.Errorf("file %q: permissions got %o, want %o", f.path, gotPerm, f.perm)
+			}
 		}
 	}
 
