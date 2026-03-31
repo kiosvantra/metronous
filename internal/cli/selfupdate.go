@@ -146,7 +146,19 @@ func downloadAndInstallBinary(url, destPath string) error {
 
 	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "metronous-update-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		// If we cannot write next to the destination (common on Linux for non-root installs),
+		// fall back to a user-writable cache/temp directory.
+		cacheDir, cacheErr := os.UserCacheDir()
+		if cacheErr == nil {
+			tmpFile, err = os.CreateTemp(cacheDir, "metronous-update-*")
+		}
+		if err != nil {
+			tmpFile, err = os.CreateTemp(os.TempDir(), "metronous-update-*")
+		}
+		if err != nil {
+			// Keep original error context.
+			return fmt.Errorf("failed to create temp file: %w", err)
+		}
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
