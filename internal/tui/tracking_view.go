@@ -30,28 +30,19 @@ type TrackingDataMsg struct {
 // trackingDataMsg is the internal alias retained for fetchSessions command.
 type trackingDataMsg = TrackingDataMsg
 
-// trackingSessionEventsMsg carries the events for an expanded session.
+// trackingSessionEventsMsg carries the events for a session popup.
 type trackingSessionEventsMsg struct {
 	SessionID string
 	Events    []store.Event
 	Err       error
 }
 
-// sessionState holds the expand/collapse state and cached events for a session row.
-type sessionState struct {
-	expanded bool
-	events   []store.Event
-	loading  bool
-}
-
 // TrackingModel is the Bubble Tea sub-model for the real-time tracking tab.
 type TrackingModel struct {
 	es       store.EventStore
 	sessions []store.SessionSummary
-	// sessionStates maps session_id → expand state and cached events.
-	sessionStates map[string]*sessionState
-	err           error
-	// cursor is the index into the flat rendered list (collapsed or expanded rows).
+	err      error
+	// cursor is the index into the sessions slice (one row per session, always collapsed).
 	cursor int
 	// pageOffset is the number of sessions skipped (newest first).
 	// PgDn increases pageOffset (moves toward older sessions).
@@ -59,26 +50,37 @@ type TrackingModel struct {
 	pageOffset    int
 	loading       bool
 	lastViewLines int
+
+	// Popup state — frozen at moment of opening, not updated by background refresh.
+	popupOpen      bool
+	popupSessionID string
+	popupEvents    []store.Event
+	popupLoading   bool
 }
 
-// Column header widths (same columns as before; no extra columns in step 1).
+// Column header widths.
 var (
 	colWidths = []int{20, 16, 12, 22, 8, 8, 8}
 	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent"}
 
-	headerStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
-	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	cursorStyle   = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	expandedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	errStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	cursorStyle  = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	popupBgStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("33")).
+			Padding(0, 1)
+	popupHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
+	popupDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	popupRowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 )
 
 // NewTrackingModel creates a TrackingModel wired to the given EventStore.
 func NewTrackingModel(es store.EventStore) TrackingModel {
 	return TrackingModel{
-		es:            es,
-		loading:       true,
-		sessionStates: make(map[string]*sessionState),
+		es:      es,
+		loading: true,
 	}
 }
 
@@ -92,37 +94,11 @@ func (m TrackingModel) Init() tea.Cmd {
 	)
 }
 
-// flatRow represents one rendered row in the tracking view.
-// It is either a collapsed session row or one event inside an expanded session.
-type flatRow struct {
-	// isSession is true when this row represents the collapsed/header session line.
-	isSession bool
-	// sessionIdx is the index into m.sessions for this row's session.
-	sessionIdx int
-	// eventIdx is the index into the session's events slice (only valid when !isSession).
-	eventIdx int
-}
-
-// buildFlatRows builds the ordered list of visible rows based on expand state.
-func (m TrackingModel) buildFlatRows() []flatRow {
-	var rows []flatRow
-	for i, s := range m.sessions {
-		rows = append(rows, flatRow{isSession: true, sessionIdx: i})
-		st := m.sessionStates[s.SessionID]
-		if st != nil && st.expanded {
-			for j := range st.events {
-				rows = append(rows, flatRow{isSession: false, sessionIdx: i, eventIdx: j})
-			}
-		}
-	}
-	return rows
-}
-
 // Update handles tick, data, and key messages.
 func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case trackingTickMsg:
-		// Schedule next tick and fetch sessions.
+		// Schedule next tick and fetch sessions (popup data is NOT updated).
 		return m, tea.Batch(
 			tea.Tick(trackingRefreshInterval, func(t time.Time) tea.Msg {
 				return trackingTickMsg{t: t}
@@ -134,38 +110,41 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
-			// Preserve expand state for sessions still in the new list.
-			if m.sessionStates == nil {
-				m.sessionStates = make(map[string]*sessionState)
-			}
 			m.sessions = msg.Sessions
-			// Clamp cursor to flat row count.
-			rows := m.buildFlatRows()
-			if m.cursor >= len(rows) {
-				if len(rows) > 0 {
-					m.cursor = len(rows) - 1
+			// Clamp cursor to session count.
+			if m.cursor >= len(m.sessions) {
+				if len(m.sessions) > 0 {
+					m.cursor = len(m.sessions) - 1
 				} else {
 					m.cursor = 0
 				}
 			}
 		}
+		// Popup data is intentionally NOT updated here — it stays frozen.
 
 	case trackingSessionEventsMsg:
-		if m.sessionStates == nil {
-			m.sessionStates = make(map[string]*sessionState)
-		}
-		st := m.sessionStates[msg.SessionID]
-		if st == nil {
-			st = &sessionState{}
-			m.sessionStates[msg.SessionID] = st
-		}
-		st.loading = false
-		if msg.Err == nil {
-			st.events = msg.Events
+		// Only update popup if this response matches the current popup session.
+		if m.popupOpen && msg.SessionID == m.popupSessionID {
+			m.popupLoading = false
+			if msg.Err == nil {
+				m.popupEvents = msg.Events
+			}
 		}
 
 	case tea.KeyMsg:
-		rows := m.buildFlatRows()
+		// Esc always closes the popup first.
+		if msg.Type == tea.KeyEsc && m.popupOpen {
+			m.popupOpen = false
+			m.popupEvents = nil
+			m.popupSessionID = ""
+			m.popupLoading = false
+			return m, nil
+		}
+
+		// If popup is open, swallow all other keys (popup is read-only).
+		if m.popupOpen {
+			return m, nil
+		}
 
 		switch msg.String() {
 		case "up", "k":
@@ -173,40 +152,18 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(rows)-1 {
+			if m.cursor < len(m.sessions)-1 {
 				m.cursor++
 			}
-		case " ", "enter":
-			// Toggle expand/collapse for the session at the current cursor row.
-			if m.cursor >= 0 && m.cursor < len(rows) {
-				row := rows[m.cursor]
-				sid := m.sessions[row.sessionIdx].SessionID
-				if m.sessionStates == nil {
-					m.sessionStates = make(map[string]*sessionState)
-				}
-				st := m.sessionStates[sid]
-				if st == nil {
-					st = &sessionState{}
-					m.sessionStates[sid] = st
-				}
-				if st.expanded {
-					// Collapse: move cursor to the session header row.
-					// Find the header index for this session.
-					for ri, r := range rows {
-						if r.isSession && r.sessionIdx == row.sessionIdx {
-							m.cursor = ri
-							break
-						}
-					}
-					st.expanded = false
-				} else {
-					// Expand: if events not yet loaded, fetch them.
-					st.expanded = true
-					if len(st.events) == 0 && !st.loading {
-						st.loading = true
-						return m, m.fetchSessionEvents(sid)
-					}
-				}
+		case "enter":
+			// Open popup for the selected session, freeze events at this moment.
+			if m.cursor >= 0 && m.cursor < len(m.sessions) {
+				sid := m.sessions[m.cursor].SessionID
+				m.popupOpen = true
+				m.popupSessionID = sid
+				m.popupEvents = nil
+				m.popupLoading = true
+				return m, m.fetchSessionEvents(sid)
 			}
 		case "pgdown":
 			m.pageOffset += maxTrackingRows
@@ -231,8 +188,6 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				defer cancel()
 				total, err := m.es.CountEvents(ctx, store.EventQuery{})
 				if err == nil && total > 0 {
-					// Rough estimate: total events / avg events per session ≈ total/3, capped.
-					// For simplicity, jump to a large offset and let the query return empty.
 					lastPageOffset := ((total - 1) / maxTrackingRows) * maxTrackingRows
 					m.pageOffset = lastPageOffset
 					m.cursor = 0
@@ -279,20 +234,46 @@ func (m TrackingModel) fetchSessionEvents(sessionID string) tea.Cmd {
 
 // View renders the tracking tab.
 func (m *TrackingModel) View() string {
+	// Always render the full background list at a fixed height, then overlay the popup.
+	bg := m.renderBackground()
+
+	if m.popupOpen {
+		overlay := m.renderPopup()
+		out := overlayPopup(bg, overlay)
+		// Stabilize line count to prevent terminal remnants.
+		out = m.stabilizeLines(out)
+		return out
+	}
+
+	return m.stabilizeLines(bg)
+}
+
+// renderBackground renders the fixed-height session list (background layer).
+func (m *TrackingModel) renderBackground() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Real-time Event Stream") + "\n\n")
 
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
+		// Pad to fixed height so overlay math is consistent.
+		for i := 0; i < maxTrackingRows+3; i++ {
+			sb.WriteString("\n")
+		}
 		return sb.String()
 	}
 	if m.err != nil {
 		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
+		for i := 0; i < maxTrackingRows+3; i++ {
+			sb.WriteString("\n")
+		}
 		return sb.String()
 	}
 	if len(m.sessions) == 0 {
 		sb.WriteString(dimStyle.Render("  No events yet. Start tracking to see data here.") + "\n")
+		for i := 0; i < maxTrackingRows+3; i++ {
+			sb.WriteString("\n")
+		}
 		return sb.String()
 	}
 
@@ -301,58 +282,118 @@ func (m *TrackingModel) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(colWidths)) + "\n")
 
-	rows := m.buildFlatRows()
-
-	for ri, row := range rows {
-		s := m.sessions[row.sessionIdx]
-		st := m.sessionStates[s.SessionID]
-
+	// Session rows — always collapsed, one per session.
+	for ri, s := range m.sessions {
 		isCursor := ri == m.cursor
-
-		if row.isSession {
-			// Collapsed session header: use complete event data from summary.
-			prefix := "+ "
-			if st != nil && st.expanded {
-				prefix = "- "
-			}
-			cells := formatSessionRow(s, prefix)
-			style := lipgloss.NewStyle()
-			if isCursor {
-				style = cursorStyle
-			}
-			sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
-			sb.WriteString("\n")
-		} else {
-			// Expanded event row: indented, dimmed.
-			if st == nil || row.eventIdx >= len(st.events) {
-				continue
-			}
-			ev := st.events[row.eventIdx]
-			cells := formatEventRow(ev)
-			// Indent the first cell (Time) to show nesting.
-			if len(cells) > 0 {
-				cells[0] = "  " + cells[0]
-			}
-			style := expandedStyle
-			if isCursor {
-				style = cursorStyle
-			}
-			sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
-			sb.WriteString("\n")
+		cells := formatSessionRow(s)
+		style := lipgloss.NewStyle()
+		if isCursor {
+			style = cursorStyle
 		}
+		sb.WriteString(style.Render(renderRow(cells, colWidths, lipgloss.NewStyle())))
+		sb.WriteString("\n")
+	}
+
+	// Pad to maxTrackingRows so the background always occupies a fixed height.
+	for i := len(m.sessions); i < maxTrackingRows; i++ {
+		sb.WriteString("\n")
 	}
 
 	// Pagination footer.
 	sb.WriteString("\n")
 	pageNum := m.pageOffset/maxTrackingRows + 1
-	footer := fmt.Sprintf("  %d sessions shown  |  page %d  (PgUp/PgDn, ↑↓, Space/Enter to expand)",
+	footer := fmt.Sprintf("  %d sessions shown  |  page %d  (PgUp/PgDn, ↑↓, Enter to open timeline)",
 		len(m.sessions), pageNum)
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
-	out := sb.String()
-	// Prevent terminal “remanent lines” when the expanded/collapsed content
-	// becomes shorter than the previous render.
+	return sb.String()
+}
+
+// renderPopup renders the modal popup with the frozen session timeline.
+func (m *TrackingModel) renderPopup() string {
+	var sb strings.Builder
+
+	// Title.
+	title := fmt.Sprintf("Session Timeline: %s", m.popupSessionID)
+	sb.WriteString(popupHeaderStyle.Render(title) + "\n")
+	sb.WriteString(strings.Repeat("─", min(len(title)+4, 80)) + "\n")
+
+	if m.popupLoading {
+		sb.WriteString(popupDimStyle.Render("  Loading events…") + "\n")
+	} else if len(m.popupEvents) == 0 {
+		sb.WriteString(popupDimStyle.Render("  No events found for this session.") + "\n")
+	} else {
+		// Timeline: start → tool_call* → complete
+		colW := []int{20, 14, 24, 8, 8, 8}
+		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent"}
+		sb.WriteString(popupHeaderStyle.Render(renderRow(colH, colW, lipgloss.NewStyle())) + "\n")
+		sb.WriteString(strings.Repeat("─", totalWidth(colW)) + "\n")
+		for _, ev := range m.popupEvents {
+			cells := formatEventRowCompact(ev)
+			sb.WriteString(popupRowStyle.Render(renderRow(cells, colW, lipgloss.NewStyle())) + "\n")
+		}
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(popupDimStyle.Render("  Esc to close"))
+
+	return popupBgStyle.Render(sb.String())
+}
+
+// overlayPopup places the popup box in the center of the background string.
+func overlayPopup(bg, popup string) string {
+	bgLines := strings.Split(bg, "\n")
+	popupLines := strings.Split(popup, "\n")
+
+	// Find popup width.
+	popupW := 0
+	for _, l := range popupLines {
+		if len(l) > popupW {
+			popupW = len(l)
+		}
+	}
+
+	// Find background width.
+	bgW := 0
+	for _, l := range bgLines {
+		if len(l) > bgW {
+			bgW = len(l)
+		}
+	}
+
+	// Position: horizontally centered, vertically at row 4 (after header).
+	startRow := 4
+	startCol := (bgW - popupW) / 2
+	if startCol < 2 {
+		startCol = 2
+	}
+
+	// Merge popup into background lines.
+	for pi, pline := range popupLines {
+		bi := startRow + pi
+		if bi >= len(bgLines) {
+			bgLines = append(bgLines, "")
+		}
+		bgLine := bgLines[bi]
+		// Pad bgLine to startCol if needed.
+		if len(bgLine) < startCol {
+			bgLine += strings.Repeat(" ", startCol-len(bgLine))
+		}
+		// Replace characters in the bg line with the popup line.
+		if startCol+len(pline) <= len(bgLine) {
+			bgLines[bi] = bgLine[:startCol] + pline + bgLine[startCol+len(pline):]
+		} else {
+			bgLines[bi] = bgLine[:startCol] + pline
+		}
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+
+// stabilizeLines ensures the output always occupies at least as many lines as
+// the previous render, preventing terminal remnant artifacts.
+func (m *TrackingModel) stabilizeLines(out string) string {
 	lineCount := strings.Count(out, "\n")
 	if lineCount < m.lastViewLines {
 		out += strings.Repeat("\n", m.lastViewLines-lineCount)
@@ -368,8 +409,15 @@ func max(a, b int) int {
 	return b
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // formatSessionRow converts a SessionSummary into display columns for the collapsed row.
-func formatSessionRow(s store.SessionSummary, prefix string) []string {
+func formatSessionRow(s store.SessionSummary) []string {
 	ts := s.Timestamp.Local().Format("2006-01-02 15:04:05")
 
 	in := "-"
@@ -386,14 +434,11 @@ func formatSessionRow(s store.SessionSummary, prefix string) []string {
 		spent = fmt.Sprintf("$%.4f", *s.CostUSD)
 	}
 
-	// Prefix the agent column with +/- expand indicator.
-	agentCell := prefix + s.AgentID
-
-	return []string{ts, agentCell, "complete", s.Model, in, out, spent}
+	return []string{ts, s.AgentID, "complete", s.Model, in, out, spent}
 }
 
-// formatEventRow converts a store.Event into display columns.
-func formatEventRow(ev store.Event) []string {
+// formatEventRowCompact converts a store.Event into compact display columns (for popup).
+func formatEventRowCompact(ev store.Event) []string {
 	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
 
 	in := "-"
@@ -410,7 +455,7 @@ func formatEventRow(ev store.Event) []string {
 		spent = fmt.Sprintf("$%.4f", *ev.CostUSD)
 	}
 
-	return []string{ts, ev.AgentID, ev.EventType, ev.Model, in, out, spent}
+	return []string{ts, ev.EventType, ev.Model, in, out, spent}
 }
 
 // renderRow renders a table row given columns, widths, and a base style.

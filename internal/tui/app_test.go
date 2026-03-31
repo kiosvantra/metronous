@@ -646,72 +646,104 @@ func TestTrackingViewRendersCollapsedSessions(t *testing.T) {
 	}
 }
 
-// TestTrackingCollapsedRowShowsPlusPrefix verifies the "+" prefix on collapsed rows.
-func TestTrackingCollapsedRowShowsPlusPrefix(t *testing.T) {
-	m := tui.NewTrackingModel(nil)
-	m, _ = m.Update(tui.TrackingDataMsg{Sessions: makeSessionSummaries(3)})
-
-	view := m.View()
-	if !strings.Contains(view, "+") {
-		t.Errorf("expected '+' prefix on collapsed session rows, got: %q", view)
-	}
-}
-
-// TestTrackingSessionExpandToggle verifies Space expands a collapsed session and
-// a second Space collapses it again.
-func TestTrackingSessionExpandToggle(t *testing.T) {
+// TestTrackingEnterOpensPopup verifies Enter opens the popup for the selected session.
+func TestTrackingEnterOpensPopup(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
 	sessions := makeSessionSummaries(3)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
-	sid := sessions[0].SessionID
-
-	// Initially collapsed.
-	if tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session to be collapsed initially")
+	// Initially no popup.
+	if tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to be closed initially")
 	}
 
-	// Press Space → should expand.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session to be expanded after Space")
+	// Press Enter → popup opens for sessions[0].
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to open after Enter")
 	}
-
-	// Press Space again → should collapse.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
-	if tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session to be collapsed after second Space")
+	if tui.GetTrackingPopupSessionID(m) != sessions[0].SessionID {
+		t.Errorf("expected popup session ID = %q, got %q", sessions[0].SessionID, tui.GetTrackingPopupSessionID(m))
 	}
 }
 
-// TestTrackingEnterAlsoTogglesExpand verifies Enter also expands/collapses.
-func TestTrackingEnterAlsoTogglesExpand(t *testing.T) {
+// TestTrackingEscClosesPopup verifies Esc closes the popup and cursor stays in place.
+func TestTrackingEscClosesPopup(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(3)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	// Move to session 1 and open popup.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to be open")
+	}
+	cursorBeforeClose := tui.GetTrackingCursor(m)
+
+	// Esc closes popup.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to be closed after Esc")
+	}
+	// Cursor must remain at the same position.
+	if tui.GetTrackingCursor(m) != cursorBeforeClose {
+		t.Errorf("cursor changed after Esc: got %d, want %d", tui.GetTrackingCursor(m), cursorBeforeClose)
+	}
+}
+
+// TestTrackingPopupDataFrozenOnRefresh verifies the popup events do NOT change
+// when a background TrackingDataMsg arrives after the popup is open.
+func TestTrackingPopupDataFrozenOnRefresh(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
 	sessions := makeSessionSummaries(2)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
 	sid := sessions[0].SessionID
 
-	// Press Enter → should expand.
+	// Open popup and inject frozen events.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session to be expanded after Enter")
+	evts := []store.Event{
+		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "start", Model: "gpt-4", Timestamp: time.Now().Add(-2 * time.Minute)},
+		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "complete", Model: "gpt-4", Timestamp: time.Now()},
+	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
+
+	// Verify events are frozen.
+	frozen := tui.GetTrackingPopupEvents(m)
+	if len(frozen) != 2 {
+		t.Fatalf("expected 2 frozen events, got %d", len(frozen))
+	}
+
+	// Simulate background refresh — sessions list changes.
+	newSessions := makeSessionSummaries(2)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: newSessions})
+
+	// Popup must still be open with the same frozen events.
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to remain open after background refresh")
+	}
+	stillFrozen := tui.GetTrackingPopupEvents(m)
+	if len(stillFrozen) != 2 {
+		t.Fatalf("expected frozen events to remain 2 after refresh, got %d", len(stillFrozen))
+	}
+	if stillFrozen[0].EventType != evts[0].EventType {
+		t.Errorf("frozen event type changed: got %q, want %q", stillFrozen[0].EventType, evts[0].EventType)
 	}
 }
 
-// TestTrackingExpandedRowsAppearInView verifies that after expanding, the session's
-// events appear in the view.
-func TestTrackingExpandedRowsAppearInView(t *testing.T) {
+// TestTrackingPopupShowsTimelineEvents verifies the popup view contains the session events.
+func TestTrackingPopupShowsTimelineEvents(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
 	sessions := makeSessionSummaries(1)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
 	sid := sessions[0].SessionID
 
-	// Expand (no es store → events arrive via msg injection).
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	// Open popup.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
-	// Inject events for the session (simulating fetchSessionEvents result).
+	// Inject events.
 	evts := []store.Event{
 		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "start", Model: "gpt-4", Timestamp: time.Now().Add(-2 * time.Minute)},
 		{AgentID: sessions[0].AgentID, SessionID: sid, EventType: "tool_call", Model: "gpt-4", Timestamp: time.Now().Add(-1 * time.Minute)},
@@ -721,29 +753,44 @@ func TestTrackingExpandedRowsAppearInView(t *testing.T) {
 
 	view := m.View()
 	if !strings.Contains(view, "start") {
-		t.Errorf("expected 'start' event in expanded view, got: %q", view)
+		t.Errorf("expected 'start' in popup view, got: %q", view)
 	}
 	if !strings.Contains(view, "tool_call") {
-		t.Errorf("expected 'tool_call' event in expanded view, got: %q", view)
+		t.Errorf("expected 'tool_call' in popup view, got: %q", view)
+	}
+	if !strings.Contains(view, "complete") {
+		t.Errorf("expected 'complete' in popup view, got: %q", view)
 	}
 }
 
-// TestTrackingExpandedShowsMinusPrefixOnHeader verifies the "-" prefix when expanded.
-func TestTrackingExpandedShowsMinusPrefixOnHeader(t *testing.T) {
+// TestTrackingSpaceDoesNotExpandOrOpenPopup verifies Space is a no-op (expand removed).
+func TestTrackingSpaceDoesNotExpandOrOpenPopup(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
-	sessions := makeSessionSummaries(1)
+	sessions := makeSessionSummaries(3)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
-	sid := sessions[0].SessionID
-
-	// Expand.
+	// Press Space → popup must NOT open.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
-	// Inject empty events so it won't be in loading state.
-	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: []store.Event{}})
+	if tui.IsTrackingPopupOpen(m) {
+		t.Fatal("Space should not open popup (expand removed)")
+	}
+}
 
-	view := m.View()
-	if !strings.Contains(view, "-") {
-		t.Errorf("expected '-' prefix on expanded session header, got: %q", view)
+// TestTrackingPopupBlocksNavigation verifies that while popup is open,
+// arrow keys do not move the cursor in the background list.
+func TestTrackingPopupBlocksNavigation(t *testing.T) {
+	m := tui.NewTrackingModel(nil)
+	sessions := makeSessionSummaries(5)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+
+	// Open popup on session 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cursorWhileOpen := tui.GetTrackingCursor(m)
+
+	// Try to navigate — should be swallowed by popup.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetTrackingCursor(m) != cursorWhileOpen {
+		t.Errorf("cursor moved while popup open: got %d, want %d", tui.GetTrackingCursor(m), cursorWhileOpen)
 	}
 }
 
@@ -821,52 +868,59 @@ func TestTrackingCursorMovesWithinSessions(t *testing.T) {
 	}
 }
 
-// TestTrackingRefreshPreservesExpandState verifies that a background refresh
-// does not collapse an expanded session.
-func TestTrackingRefreshPreservesExpandState(t *testing.T) {
+// TestTrackingRefreshDoesNotClosePopup verifies that a background refresh
+// does not close an open popup.
+func TestTrackingRefreshDoesNotClosePopup(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
 	sessions := makeSessionSummaries(3)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
-	sid := sessions[0].SessionID
-
-	// Expand session 0.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session to be expanded")
+	// Open popup on session 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("expected popup to be open")
 	}
 
 	// Simulate background refresh with same sessions.
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
-	// Session should remain expanded.
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("refresh collapsed the session unexpectedly")
+	// Popup should remain open.
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("refresh unexpectedly closed the popup")
 	}
 }
 
-// TestTrackingAutoRefreshDoesNotRollbackExpandOnNewSessions verifies
-// that a refresh with different sessions still retains expand state for
-// sessions that remain in the new list.
-func TestTrackingAutoRefreshDoesNotRollbackExpandOnNewSessions(t *testing.T) {
+// TestTrackingRefreshWithNewSessionsDoesNotClosePopup verifies that a refresh
+// with different session data still keeps the popup open and frozen.
+func TestTrackingRefreshWithNewSessionsDoesNotClosePopup(t *testing.T) {
 	m := tui.NewTrackingModel(nil)
 	sessions := makeSessionSummaries(3)
 	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
 
-	sid := sessions[1].SessionID
-
-	// Move to session 1 and expand.
+	// Move to session 1, open popup and inject events.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("expected session 1 to be expanded")
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	sid := sessions[1].SessionID
+	evts := []store.Event{
+		{AgentID: sessions[1].AgentID, SessionID: sid, EventType: "start", Model: "gpt-4", Timestamp: time.Now().Add(-1 * time.Minute)},
+		{AgentID: sessions[1].AgentID, SessionID: sid, EventType: "complete", Model: "gpt-4", Timestamp: time.Now()},
 	}
+	m, _ = m.Update(tui.TrackingSessionEventsMsg{SessionID: sid, Events: evts})
 
-	// Inject a refresh with 3 refreshed sessions (same IDs).
-	m, _ = m.Update(tui.TrackingDataMsg{Sessions: sessions})
+	// Simulate a refresh with new sessions.
+	newSessions := makeSessionSummaries(5)
+	m, _ = m.Update(tui.TrackingDataMsg{Sessions: newSessions})
 
-	// Session 1 should still be expanded.
-	if !tui.IsTrackingSessionExpanded(m, sid) {
-		t.Fatal("refresh unexpectedly collapsed session 1")
+	// Popup must still be open with the original session and frozen events.
+	if !tui.IsTrackingPopupOpen(m) {
+		t.Fatal("refresh unexpectedly closed the popup")
+	}
+	if tui.GetTrackingPopupSessionID(m) != sid {
+		t.Errorf("popup session ID changed after refresh: got %q, want %q", tui.GetTrackingPopupSessionID(m), sid)
+	}
+	frozen := tui.GetTrackingPopupEvents(m)
+	if len(frozen) != 2 {
+		t.Fatalf("frozen events count changed after refresh: got %d, want 2", len(frozen))
 	}
 }

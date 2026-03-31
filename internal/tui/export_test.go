@@ -2,7 +2,10 @@
 // It is only compiled during testing.
 package tui
 
-import "github.com/kiosvantra/metronous/internal/config"
+import (
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/store"
+)
 
 // TrackingSessionEventsMsg exports the internal trackingSessionEventsMsg for tests.
 type TrackingSessionEventsMsg = trackingSessionEventsMsg
@@ -51,7 +54,7 @@ func GetTrackingPageOffset(m TrackingModel) int {
 	return m.pageOffset
 }
 
-// GetTrackingCursor returns the current flat-row cursor for tests.
+// GetTrackingCursor returns the current session cursor for tests.
 func GetTrackingCursor(m TrackingModel) int {
 	return m.cursor
 }
@@ -61,17 +64,17 @@ func GetTrackingSessionCount(m TrackingModel) int {
 	return len(m.sessions)
 }
 
-// IsTrackingSessionExpanded returns whether the session at the given sessions index is expanded.
-func IsTrackingSessionExpanded(m TrackingModel, sessionID string) bool {
-	st := m.sessionStates[sessionID]
-	return st != nil && st.expanded
+// IsTrackingPopupOpen returns whether the popup is currently open.
+func IsTrackingPopupOpen(m TrackingModel) bool {
+	return m.popupOpen
 }
 
-// GetTrackingSessionEvents returns the cached events for a given session (may be nil).
-func GetTrackingSessionEvents(m TrackingModel, sessionID string) interface{} {
-	st := m.sessionStates[sessionID]
-	if st == nil {
-		return nil
-	}
-	return st.events
+// GetTrackingPopupSessionID returns the session ID of the currently open popup.
+func GetTrackingPopupSessionID(m TrackingModel) string {
+	return m.popupSessionID
+}
+
+// GetTrackingPopupEvents returns the frozen events in the popup (may be nil).
+func GetTrackingPopupEvents(m TrackingModel) []store.Event {
+	return m.popupEvents
 }
