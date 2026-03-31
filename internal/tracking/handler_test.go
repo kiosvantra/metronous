@@ -453,6 +453,12 @@ func (f *failingStore) GetAgentSummary(_ context.Context, _ string) (store.Agent
 func (f *failingStore) CountEvents(_ context.Context, _ store.EventQuery) (int, error) {
 	return 0, nil
 }
+func (f *failingStore) QuerySessions(_ context.Context, _ store.SessionQuery) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (f *failingStore) GetSessionEvents(_ context.Context, _ string) ([]store.Event, error) {
+	return nil, nil
+}
 func (f *failingStore) Close() error { return nil }
 
 // TestHandleIngestDirectStoreError verifies store errors are surfaced as MCP errors.

@@ -58,6 +58,14 @@ func (m *mockStore) CountEvents(_ context.Context, _ store.EventQuery) (int, err
 	return len(m.events), nil
 }
 
+func (m *mockStore) QuerySessions(_ context.Context, _ store.SessionQuery) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+
+func (m *mockStore) GetSessionEvents(_ context.Context, _ string) ([]store.Event, error) {
+	return nil, nil
+}
+
 func (m *mockStore) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

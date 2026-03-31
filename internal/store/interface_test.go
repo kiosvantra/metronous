@@ -174,6 +174,12 @@ func (m *mockEventStore) QueryEvents(ctx context.Context, _ store.EventQuery) ([
 func (m *mockEventStore) CountEvents(ctx context.Context, _ store.EventQuery) (int, error) {
 	return 0, nil
 }
+func (m *mockEventStore) QuerySessions(ctx context.Context, _ store.SessionQuery) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (m *mockEventStore) GetSessionEvents(ctx context.Context, _ string) ([]store.Event, error) {
+	return nil, nil
+}
 func (m *mockEventStore) GetAgentEvents(ctx context.Context, _ string, _ time.Time) ([]store.Event, error) {
 	return nil, nil
 }

@@ -284,6 +284,115 @@ func (es *EventStore) CountEvents(ctx context.Context, query store.EventQuery) (
 	return count, nil
 }
 
+// QuerySessions returns a page of SessionSummary rows, one per distinct session_id.
+// Sessions are ordered by their most recent event timestamp DESC.
+// Each summary is populated from the session's "complete" event when present,
+// falling back to the latest event otherwise.
+func (es *EventStore) QuerySessions(ctx context.Context, query store.SessionQuery) ([]store.SessionSummary, error) {
+	// Build optional agent filter.
+	var (
+		conditions []string
+		args       []interface{}
+	)
+	if query.AgentID != "" {
+		conditions = append(conditions, "agent_id = ?")
+		args = append(args, query.AgentID)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	// Strategy: for each session, pick the "complete" event if it exists,
+	// otherwise the event with the latest timestamp.
+	// We use a subquery that ranks events within each session:
+	//   rank=1 for the complete event (priority=0), else latest by timestamp (priority=1).
+	//
+	// COALESCE approach: join the latest event per session with the complete event per session.
+	// Simpler CTE-based approach that works on SQLite 3.25+.
+	q := `
+		WITH session_events AS (
+			SELECT
+				session_id,
+				agent_id,
+				model,
+				timestamp,
+				prompt_tokens,
+				completion_tokens,
+				cost_usd,
+				event_type,
+				ROW_NUMBER() OVER (
+					PARTITION BY session_id
+					ORDER BY
+						CASE WHEN event_type = 'complete' THEN 0 ELSE 1 END,
+						timestamp DESC
+				) AS rn,
+				MAX(timestamp) OVER (PARTITION BY session_id) AS max_ts
+			FROM events` + whereClause + `
+		)
+		SELECT session_id, agent_id, model, timestamp, prompt_tokens, completion_tokens, cost_usd
+		FROM session_events
+		WHERE rn = 1
+		ORDER BY max_ts DESC`
+
+	if query.Limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, query.Limit)
+		if query.Offset > 0 {
+			q += " OFFSET ?"
+			args = append(args, query.Offset)
+		}
+	}
+
+	rows, err := es.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var summaries []store.SessionSummary
+	for rows.Next() {
+		var (
+			s           store.SessionSummary
+			timestampMs int64
+		)
+		if err := rows.Scan(
+			&s.SessionID,
+			&s.AgentID,
+			&s.Model,
+			&timestampMs,
+			&s.PromptTokens,
+			&s.CompletionTokens,
+			&s.CostUSD,
+		); err != nil {
+			return nil, fmt.Errorf("scan session row: %w", err)
+		}
+		s.Timestamp = time.UnixMilli(timestampMs).UTC()
+		summaries = append(summaries, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session rows: %w", err)
+	}
+	return summaries, nil
+}
+
+// GetSessionEvents returns all events for the given session_id, ordered
+// by timestamp ASC (chronological order for the expand view).
+func (es *EventStore) GetSessionEvents(ctx context.Context, sessionID string) ([]store.Event, error) {
+	const q = `SELECT id, agent_id, session_id, event_type, model, timestamp,
+		duration_ms, prompt_tokens, completion_tokens, cost_usd, quality_score,
+		rework_count, tool_name, tool_success, metadata
+		FROM events WHERE session_id = ? ORDER BY timestamp ASC`
+
+	rows, err := es.readDB.QueryContext(ctx, q, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get session events: %w", err)
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 // GetAgentEvents returns all events for a specific agent since the given time.
 func (es *EventStore) GetAgentEvents(ctx context.Context, agentID string, since time.Time) ([]store.Event, error) {
 	return es.QueryEvents(ctx, store.EventQuery{
