@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 CREATE INDEX IF NOT EXISTS idx_benchmark_agent_ts ON benchmark_runs(agent_id, run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_run_at ON benchmark_runs(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_verdict ON benchmark_runs(verdict, run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_benchmark_agent_model ON benchmark_runs(agent_id, model, run_at DESC);
 `
 
 // addAvgQualityScoreColumn migrates existing databases that predate avg_quality_score.

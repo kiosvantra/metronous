@@ -53,57 +53,16 @@ type agentResult struct {
 	run     store.BenchmarkRun
 }
 
-// RunWeekly executes the scheduled weekly benchmark pipeline.
-// The event window is [now-windowDays, now). All runs are tagged run_kind=weekly.
+// RunWeekly executes the benchmark pipeline for the given window in days.
+// It discovers all agents by listing distinct agent IDs from recent events,
+// then processes each agent in sequence.
 func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 	end := time.Now().UTC()
 	start := end.Add(-time.Duration(windowDays) * 24 * time.Hour)
-	return r.run(ctx, store.RunKindWeekly, start, end, windowDays)
-}
 
-// RunIntraweek executes a manual on-demand benchmark pipeline.
-// The event window starts at lastRunAt+1ms (the first moment after the most recent
-// stored run) and ends at now. If no prior run exists for any agent, the window
-// falls back to [now-windowDays, now) — the same as a weekly run.
-//
-// Per-agent window derivation: we use the global max(run_at) across all agents
-// so the interval is consistent across the whole batch.
-func (r *Runner) RunIntraweek(ctx context.Context, windowDays int) error {
-	end := time.Now().UTC()
-
-	// Determine the global last run_at across all agents.
-	// We query the benchmark store for the most recent run regardless of agent.
-	runs, err := r.benchmarkStore.GetRuns(ctx, "", 1)
-	if err != nil {
-		return fmt.Errorf("get last run for intraweek interval: %w", err)
-	}
-
-	var start time.Time
-	if len(runs) > 0 && !runs[0].RunAt.IsZero() {
-		// Start 1ms after the last recorded benchmark run.
-		start = runs[0].RunAt.Add(time.Millisecond)
-		r.logger.Info("intraweek: derived start from last run",
-			zap.Time("last_run_at", runs[0].RunAt),
-			zap.Time("window_start", start),
-		)
-	} else {
-		// No prior run — fall back to windowDays.
-		start = end.Add(-time.Duration(windowDays) * 24 * time.Hour)
-		r.logger.Info("intraweek: no prior run found, using windowDays fallback",
-			zap.Int("window_days", windowDays),
-			zap.Time("window_start", start),
-		)
-	}
-
-	return r.run(ctx, store.RunKindIntraweek, start, end, windowDays)
-}
-
-// run is the shared implementation for RunWeekly and RunIntraweek.
-func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end time.Time, windowDays int) error {
-	r.logger.Info("starting benchmark run",
-		zap.String("run_kind", string(kind)),
-		zap.Time("window_start", start),
-		zap.Time("window_end", end),
+	r.logger.Info("starting weekly benchmark run",
+		zap.Time("start", start),
+		zap.Time("end", end),
 		zap.Int("window_days", windowDays),
 	)
 
@@ -120,11 +79,11 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 
 	r.logger.Info("discovered agents", zap.Strings("agents", agents))
 
-	// Compute metrics and evaluate for each agent; collect results before saving.
+	// Compute metrics and evaluate for each agent+model combination; collect results before saving.
 	var results []agentResult
 	var failedAgents []string
 	for _, agentID := range agents {
-		res, err := r.processAgent(ctx, agentID, start, end, windowDays)
+		agentResults, err := r.processAgent(ctx, agentID, start, end, windowDays)
 		if err != nil {
 			r.logger.Error("failed to process agent",
 				zap.String("agent_id", agentID),
@@ -133,11 +92,7 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 			failedAgents = append(failedAgents, agentID)
 			continue
 		}
-		// Tag with run kind and window bounds.
-		res.run.RunKind = kind
-		res.run.WindowStart = start
-		res.run.WindowEnd = end
-		results = append(results, res)
+		results = append(results, agentResults...)
 	}
 
 	// Generate consolidated artifact for all verdicts so the path is available
@@ -170,8 +125,7 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 		}
 	}
 
-	r.logger.Info("benchmark run complete",
-		zap.String("run_kind", string(kind)),
+	r.logger.Info("weekly benchmark run complete",
 		zap.Int("agents_processed", len(results)),
 		zap.Int("agents_failed", len(failedAgents)),
 	)
@@ -181,52 +135,82 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 	return nil
 }
 
-// processAgent computes metrics and evaluates the verdict for a single agent.
-// It returns an agentResult with a partially-populated BenchmarkRun.
-// ArtifactPath, RunKind, WindowStart, and WindowEnd are filled in by the caller (run).
-func (r *Runner) processAgent(ctx context.Context, agentID string, start, end time.Time, windowDays int) (agentResult, error) {
-	// 1. Fetch events for the window.
+// processAgent computes metrics and evaluates the verdict for each model used
+// by a single agent. Events are grouped by model so each (agent_id, model)
+// combination gets its own independent benchmark run with separate metrics.
+// Returns one agentResult per model (ArtifactPath is left empty — RunWeekly
+// sets it after the artifact file is written).
+func (r *Runner) processAgent(ctx context.Context, agentID string, start, end time.Time, windowDays int) ([]agentResult, error) {
+	// 1. Fetch all events for the agent in the window.
 	events, err := benchmark.FetchEventsForWindow(ctx, r.eventStore, agentID, start, end)
 	if err != nil {
-		return agentResult{}, fmt.Errorf("fetch events for %q: %w", agentID, err)
+		return nil, fmt.Errorf("fetch events for %q: %w", agentID, err)
 	}
 
-	// 2. Aggregate metrics.
-	metrics := benchmark.AggregateMetrics(r.logger, agentID, events)
+	// 2. Group events by model — each group gets independent metrics.
+	modelGroups := benchmark.GroupEventsByModel(events)
 
-	// 3. Evaluate thresholds → verdict.
-	verdict := r.engine.Evaluate(ctx, metrics)
+	var results []agentResult
+	for model, modelEvents := range modelGroups {
+		// 3. Aggregate metrics for this (agent, model) pair.
+		metrics := benchmark.AggregateMetrics(r.logger, agentID, modelEvents)
+		// Override Model to the exact model for this group (AggregateMetrics
+		// uses dominantModel which is redundant here since all events share
+		// the same model, but we set it explicitly for clarity).
+		metrics.Model = model
 
-	// 4. Build the BenchmarkRun (not yet saved — ArtifactPath filled by caller).
-	run := store.BenchmarkRun{
-		RunAt:            time.Now().UTC(),
-		WindowDays:       windowDays,
-		AgentID:          agentID,
-		Model:            metrics.Model,
-		Accuracy:         metrics.Accuracy,
-		AvgLatencyMs:     metrics.AvgLatencyMs,
-		P50LatencyMs:     metrics.P50LatencyMs,
-		P95LatencyMs:     metrics.P95LatencyMs,
-		P99LatencyMs:     metrics.P99LatencyMs,
-		ToolSuccessRate:  metrics.ToolSuccessRate,
-		ROIScore:         metrics.ROIScore,
-		TotalCostUSD:     metrics.TotalCostUSD,
-		SampleSize:       metrics.SampleSize,
-		Verdict:          verdict.Type,
-		RecommendedModel: verdict.RecommendedModel,
-		DecisionReason:   verdict.Reason,
-		AvgQualityScore:  metrics.AvgQuality,
-		// ArtifactPath is set by RunWeekly after GenerateArtifact completes.
+		// 4. Evaluate thresholds → verdict.
+		//    The engine resolves per-agent thresholds using agentID —
+		//    the model is the VARIABLE being evaluated, not the threshold key.
+		verdict := r.engine.Evaluate(ctx, metrics)
+
+		// 5. Build the BenchmarkRun.
+		run := store.BenchmarkRun{
+			RunAt:            time.Now().UTC(),
+			WindowDays:       windowDays,
+			AgentID:          agentID,
+			Model:            model,
+			Accuracy:         metrics.Accuracy,
+			AvgLatencyMs:     metrics.AvgLatencyMs,
+			P50LatencyMs:     metrics.P50LatencyMs,
+			P95LatencyMs:     metrics.P95LatencyMs,
+			P99LatencyMs:     metrics.P99LatencyMs,
+			ToolSuccessRate:  metrics.ToolSuccessRate,
+			ROIScore:         metrics.ROIScore,
+			TotalCostUSD:     metrics.TotalCostUSD,
+			SampleSize:       metrics.SampleSize,
+			Verdict:          verdict.Type,
+			RecommendedModel: verdict.RecommendedModel,
+			DecisionReason:   verdict.Reason,
+			AvgQualityScore:  metrics.AvgQuality,
+			// ArtifactPath is set by RunWeekly after GenerateArtifact completes.
+		}
+
+		r.logger.Info("agent+model benchmark complete",
+			zap.String("agent_id", agentID),
+			zap.String("model", model),
+			zap.String("verdict", string(verdict.Type)),
+			zap.Int("sample_size", metrics.SampleSize),
+		)
+
+		results = append(results, agentResult{verdict: verdict, run: run})
 	}
 
-	r.logger.Info("agent benchmark complete",
-		zap.String("agent_id", agentID),
-		zap.String("model", metrics.Model),
-		zap.String("verdict", string(verdict.Type)),
-		zap.Int("sample_size", metrics.SampleSize),
-	)
+	// If the agent had zero events, return a single empty result so the
+	// caller can still log it (backward compat with single-model agents).
+	if len(results) == 0 {
+		metrics := benchmark.AggregateMetrics(r.logger, agentID, nil)
+		verdict := r.engine.Evaluate(ctx, metrics)
+		run := store.BenchmarkRun{
+			RunAt:      time.Now().UTC(),
+			WindowDays: windowDays,
+			AgentID:    agentID,
+			Verdict:    verdict.Type,
+		}
+		results = append(results, agentResult{verdict: verdict, run: run})
+	}
 
-	return agentResult{verdict: verdict, run: run}, nil
+	return results, nil
 }
 
 // discoverAgents returns distinct agent IDs from events within the given window.
@@ -242,12 +226,6 @@ func (r *Runner) discoverAgents(ctx context.Context, start, end time.Time) ([]st
 	seen := make(map[string]struct{})
 	var agents []string
 	for _, e := range events {
-		// Only consider agents that emitted at least one non-error event.
-		// Error-only agents usually come from telemetry ingestion issues and
-		// produce INSUFFICIENT_DATA benchmark entries (e.g. model == "unknown").
-		if e.EventType == "error" {
-			continue
-		}
 		if _, ok := seen[e.AgentID]; !ok {
 			seen[e.AgentID] = struct{}{}
 			agents = append(agents, e.AgentID)
