@@ -162,14 +162,14 @@ func installOpenCodePlugin(userHome string) error {
 	pluginSrc := filepath.Join(execDir, "metronous-plugin.ts")
 
 	// Check if plugin exists in exec directory
-	if _, err := os.Stat(pluginSrc); os.IsNotExist(err) {
+	if _, err := os.Stat(pluginSrc); err != nil && os.IsNotExist(err) {
 		// Try current working directory as fallback
 		cwd, cwdErr := os.Getwd()
 		if cwdErr != nil {
 			return fmt.Errorf("plugin not found in exec dir or CWD")
 		}
 		pluginSrc = filepath.Join(cwd, "metronous-plugin.ts")
-		if _, err := os.Stat(pluginSrc); os.IsNotExist(err) {
+		if _, err := os.Stat(pluginSrc); err != nil && os.IsNotExist(err) {
 			return fmt.Errorf("metronous-plugin.ts not found")
 		}
 	}
@@ -193,7 +193,7 @@ func installOpenCodePlugin(userHome string) error {
 	if err != nil {
 		return fmt.Errorf("read plugin: %w", err)
 	}
-	if err := os.WriteFile(pluginDst, data, 0644); err != nil {
+	if err := os.WriteFile(pluginDst, data, 0600); err != nil {
 		return fmt.Errorf("write plugin: %w", err)
 	}
 	return nil

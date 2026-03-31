@@ -28,9 +28,14 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-// Always use ~/.metronous/data — normalize any legacy path that lacks /data
-const _rawDataDir = (process.env.METRONOUS_DATA_DIR ?? "~/.metronous/data").replace("~", process.env.HOME ?? "")
-const METRONOUS_DATA_DIR = _rawDataDir.endsWith("/data") ? _rawDataDir : `${_rawDataDir}/data`
+const os = require("os")
+// Use explicit METRONOUS_DATA_DIR if set; otherwise default to ~/.metronous/data
+// If user provides a path without /data, append it for backward compatibility
+const _rawDataDir = process.env.METRONOUS_DATA_DIR
+  ? process.env.METRONOUS_DATA_DIR
+  : os.homedir() + "/.metronous/data"
+const METRONOUS_DATA_DIR = _rawDataDir.endsWith("/data") ? _rawDataDir : _rawDataDir + "/data"
+
 const METRONOUS_DEBUG = process.env.METRONOUS_DEBUG === "true" || process.env.METRONOUS_DEBUG === "1"
 
 // Log to file instead of console to avoid TUI interference
@@ -184,7 +189,10 @@ async function waitForServer(agentId: string): Promise<void> {
 
 // httpPost sends a JSON payload to POST /ingest on the server.
 async function httpPost(payload: object): Promise<void> {
-  if (!serverPort) return
+  if (!serverPort) {
+    log("httpPost: serverPort is null, dropping event")
+    return
+  }
   try {
     const http = require("http") as typeof import("http")
     const body = JSON.stringify(payload)
