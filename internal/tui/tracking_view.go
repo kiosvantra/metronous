@@ -63,14 +63,17 @@ type TrackingModel struct {
 
 // Column header widths.
 var (
-	colWidths = []int{20, 16, 12, 22, 8, 8, 14}
-	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent(total)"}
+	colWidths = []int{20, 16, 12, 22, 8, 8, 14, 10, 10}
+	colNames  = []string{"Time", "Agent", "Type", "Model", "In", "Out", "Spent(total)", "Session", "Dur"}
 
 	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("33"))
 	errStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	dimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	cursorStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236"))
 	spentTotalRedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	sevGreenStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	sevAmberStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	sevRedStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	popupBgStyle       = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("33")).
@@ -333,11 +336,12 @@ func (m *TrackingModel) renderBackground() string {
 	for ri, s := range m.sessions {
 		isCursor := ri == m.cursor
 		cells := formatSessionRow(s)
-		style := lipgloss.NewStyle()
+		baseStyle := lipgloss.NewStyle()
 		if isCursor {
-			style = cursorStyle
+			baseStyle = cursorStyle
 		}
-		sb.WriteString(renderRowMain(cells, colWidths, style))
+		spentStyle, durationStyle := severityStylesForDuration(s.DurationMs)
+		sb.WriteString(renderSessionRowMain(cells, colWidths, baseStyle, isCursor, spentStyle, durationStyle))
 		sb.WriteString("\n")
 	}
 
@@ -492,7 +496,24 @@ func formatSessionRow(s store.SessionSummary) []string {
 		spent = fmt.Sprintf("$%.4f", *s.CostUSD)
 	}
 
-	return []string{ts, s.AgentID, "complete", s.Model, in, out, spent}
+	sessionShort := shortSessionID(s.SessionID)
+
+	durationCell := "-"
+	if s.DurationMs != nil && *s.DurationMs > 0 {
+		secs := float64(*s.DurationMs) / 1000.0
+		// Keep compact so the table stays readable.
+		durationCell = fmt.Sprintf("[%.2fs]", secs)
+	}
+
+	return []string{ts, s.AgentID, "complete", s.Model, in, out, spent, sessionShort, durationCell}
+}
+
+func shortSessionID(sid string) string {
+	const n = 8
+	if len(sid) <= n {
+		return sid
+	}
+	return sid[len(sid)-n:]
 }
 
 // formatEventRowCompact converts a store.Event into compact display columns (for popup).
@@ -520,7 +541,6 @@ func formatEventRowCompact(ev store.Event) []string {
 // It colorizes the Spent column (values that look like $...) in bright red.
 func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
 	var sb strings.Builder
-	spentCol := 6
 	for i, col := range cols {
 		if i >= len(widths) {
 			break
@@ -531,10 +551,59 @@ func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
 			cell = cell[:w-1] + "…"
 		}
 
-		cellStyle := style
-		if i == spentCol && strings.HasPrefix(strings.TrimSpace(cell), "$") {
-			cellStyle = style.Copy().Foreground(lipgloss.Color("196"))
+		sb.WriteString(style.Render(fmt.Sprintf("%-*s", w, cell)))
+		sb.WriteString(" ")
+	}
+	return sb.String()
+}
+
+func severityStylesForDuration(durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
+	// Default (unknown/slow).
+	spentStyle = sevRedStyle
+	durationStyle = sevRedStyle
+	if durationMs == nil || *durationMs <= 0 {
+		return spentStyle, durationStyle
+	}
+
+	secs := float64(*durationMs) / 1000.0
+	if secs <= 10.0 {
+		return sevGreenStyle, sevGreenStyle
+	}
+	if secs <= 30.0 {
+		return sevAmberStyle, sevAmberStyle
+	}
+	return sevRedStyle, sevRedStyle
+}
+
+func renderSessionRowMain(cols []string, widths []int, baseStyle lipgloss.Style, isCursor bool, spentStyle, durationStyle lipgloss.Style) string {
+	var sb strings.Builder
+	spentCol := 6
+	durationCol := 8
+
+	for i, col := range cols {
+		if i >= len(widths) {
+			break
 		}
+		w := widths[i]
+		cell := col
+		if len(cell) > w {
+			cell = cell[:w-1] + "…"
+		}
+
+		cellStyle := baseStyle
+		if i == spentCol {
+			cellStyle = spentStyle
+			if isCursor {
+				cellStyle = cellStyle.Background(lipgloss.Color("236"))
+			}
+		}
+		if i == durationCol {
+			cellStyle = durationStyle
+			if isCursor {
+				cellStyle = cellStyle.Background(lipgloss.Color("236"))
+			}
+		}
+
 		sb.WriteString(cellStyle.Render(fmt.Sprintf("%-*s", w, cell)))
 		sb.WriteString(" ")
 	}

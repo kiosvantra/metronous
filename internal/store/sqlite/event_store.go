@@ -318,6 +318,7 @@ func (es *EventStore) QuerySessions(ctx context.Context, query store.SessionQuer
 				agent_id,
 				model,
 				timestamp,
+				duration_ms,
 				prompt_tokens,
 				completion_tokens,
 				cost_usd,
@@ -331,10 +332,10 @@ func (es *EventStore) QuerySessions(ctx context.Context, query store.SessionQuer
 				MAX(timestamp) OVER (PARTITION BY session_id) AS max_ts
 			FROM events` + whereClause + `
 		)
-		SELECT session_id, agent_id, model, timestamp, prompt_tokens, completion_tokens, cost_usd
-		FROM session_events
-		WHERE rn = 1
-		ORDER BY max_ts DESC`
+			SELECT session_id, agent_id, model, timestamp, prompt_tokens, completion_tokens, cost_usd, duration_ms
+			FROM session_events
+			WHERE rn = 1
+			ORDER BY max_ts DESC`
 
 	if query.Limit > 0 {
 		q += " LIMIT ?"
@@ -365,6 +366,7 @@ func (es *EventStore) QuerySessions(ctx context.Context, query store.SessionQuer
 			&s.PromptTokens,
 			&s.CompletionTokens,
 			&s.CostUSD,
+			&s.DurationMs,
 		); err != nil {
 			return nil, fmt.Errorf("scan session row: %w", err)
 		}
