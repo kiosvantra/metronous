@@ -72,10 +72,80 @@ connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`
 	}
 }
 
+// checkOpencodeConfig verifies that OpenCode is configured with at least one agent.
+// Returns a descriptive error with remediation steps if not.
+func checkOpencodeConfig(userHome string) error {
+	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf(`OpenCode is not configured yet.
+
+Metronous requires a working OpenCode configuration before installing.
+
+Steps to fix:
+  1. Make sure OpenCode is installed: curl -fsSL https://opencode.ai/install | bash
+  2. Create a minimal config:
+
+     mkdir -p ~/.config/opencode
+     cat > ~/.config/opencode/opencode.json << 'EOF'
+     {
+       "$schema": "https://opencode.ai/config.json",
+       "agent": {
+         "default": {
+           "model": "anthropic/claude-sonnet-4-5",
+           "mode": "primary"
+         }
+       }
+     }
+     EOF
+
+  3. Run 'metronous install' again`)
+		}
+		return fmt.Errorf("read opencode.json: %w", err)
+	}
+
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("opencode.json is not valid JSON: %w", err)
+	}
+
+	agents, _ := cfg["agent"].(map[string]interface{})
+	if len(agents) == 0 {
+		return fmt.Errorf(`OpenCode has no agents configured.
+
+Metronous requires at least one agent in your OpenCode configuration.
+
+Add a default agent to ~/.config/opencode/opencode.json:
+
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "agent": {
+      "default": {
+        "model": "anthropic/claude-sonnet-4-5",
+        "mode": "primary"
+      }
+    }
+  }
+
+Then run 'metronous install' again.`)
+	}
+	return nil
+}
+
 // runInstall performs all installation steps.
 func runInstall() error {
 	if os.Geteuid() == 0 {
 		return fmt.Errorf("run 'metronous install' as your normal user, not with sudo or root")
+	}
+
+	// Pre-flight: verify OpenCode is configured before touching anything.
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get user home: %w", err)
+	}
+	if err := checkOpencodeConfig(userHome); err != nil {
+		return err
 	}
 
 	// Step 1: Initialize ~/.metronous (idempotent).
@@ -101,11 +171,7 @@ func runInstall() error {
 		return err
 	}
 
-	// Step 4: Determine user home and pre-flight backup of OpenCode files.
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get user home: %w", err)
-	}
+	// Step 4: Pre-flight backup of OpenCode files.
 	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
 	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
 	configBackup, err := backupFile(configPath)
