@@ -367,6 +367,33 @@ func (m *TrackingModel) renderPopup() string {
 	sb.WriteString(popupHeaderStyle.Render(title) + "\n")
 	sb.WriteString(strings.Repeat("─", min(len(title)+4, 80)) + "\n")
 
+	// Compute total spent from the session's complete event (actual final cost).
+	totalSpent := "-"
+	if !m.popupLoading {
+		var maxCost float64
+		found := false
+		for _, ev := range m.popupEvents {
+			if ev.EventType != "complete" {
+				continue
+			}
+			if ev.CostUSD == nil {
+				continue
+			}
+			if *ev.CostUSD <= 0 {
+				continue
+			}
+			if !found || *ev.CostUSD > maxCost {
+				maxCost = *ev.CostUSD
+				found = true
+			}
+		}
+		if found {
+			totalSpent = fmt.Sprintf("$%.4f", maxCost)
+		}
+	}
+	// Show in the popup header so the user can see real final cost.
+	sb.WriteString(popupDimStyle.Render(fmt.Sprintf("  Total spent: %s", totalSpent)) + "\n")
+
 	if m.popupLoading {
 		// Show fixed-height placeholder while events are loading.
 		sb.WriteString(popupDimStyle.Render("  Loading events…") + "\n")
