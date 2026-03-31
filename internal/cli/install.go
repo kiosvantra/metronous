@@ -72,7 +72,7 @@ connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`
 	}
 }
 
-// checkOpencodeConfig verifies that OpenCode is configured with at least one agent.
+// checkOpencodeConfig verifies that OpenCode is installed and has a valid config file.
 // Returns a descriptive error with remediation steps if not.
 func checkOpencodeConfig(userHome string) error {
 	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
@@ -81,24 +81,20 @@ func checkOpencodeConfig(userHome string) error {
 		if os.IsNotExist(err) {
 			return fmt.Errorf(`OpenCode is not configured yet.
 
-Metronous requires a working OpenCode configuration before installing.
+Metronous requires OpenCode to be installed and configured before running.
 
-Steps to fix:
-  1. Make sure OpenCode is installed: curl -fsSL https://opencode.ai/install | bash
-  2. Create a minimal config:
+Steps:
+  1. Install OpenCode:
+       curl -fsSL https://opencode.ai/install | bash
 
-     mkdir -p ~/.config/opencode
-     cat > ~/.config/opencode/opencode.json << 'EOF'
-     {
-       "$schema": "https://opencode.ai/config.json",
-       "agent": {
-         "default": {
-           "model": "anthropic/claude-sonnet-4-5",
-           "mode": "primary"
-         }
-       }
-     }
-     EOF
+  2. Run OpenCode once and connect a provider:
+       opencode
+       # Then use /connect to add your API key
+
+     Or create a minimal config manually:
+       mkdir -p ~/.config/opencode
+       echo '{"$schema":"https://opencode.ai/config.json","model":"anthropic/claude-sonnet-4-5"}' \
+         > ~/.config/opencode/opencode.json
 
   3. Run 'metronous install' again`)
 		}
@@ -107,29 +103,9 @@ Steps to fix:
 
 	var cfg map[string]interface{}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("opencode.json is not valid JSON: %w", err)
+		return fmt.Errorf("opencode.json exists but is not valid JSON — fix it and run 'metronous install' again: %w", err)
 	}
 
-	agents, _ := cfg["agent"].(map[string]interface{})
-	if len(agents) == 0 {
-		return fmt.Errorf(`OpenCode has no agents configured.
-
-Metronous requires at least one agent in your OpenCode configuration.
-
-Add a default agent to ~/.config/opencode/opencode.json:
-
-  {
-    "$schema": "https://opencode.ai/config.json",
-    "agent": {
-      "default": {
-        "model": "anthropic/claude-sonnet-4-5",
-        "mode": "primary"
-      }
-    }
-  }
-
-Then run 'metronous install' again.`)
-	}
 	return nil
 }
 
