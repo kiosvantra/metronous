@@ -553,6 +553,12 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 		return sb.String()
 	}
 
+	// Avoid multi-line layout shifts from DecisionReason (which can contain
+	// newlines). Keeping the detail panel single-line per field prevents
+	// terminal scrolling artifacts while moving the cursor.
+	reason := strings.ReplaceAll(run.DecisionReason, "\n", " ")
+	reason = strings.TrimSpace(reason)
+
 	// Verdict line: show switch arrow if applicable.
 	verdictLine := string(run.Verdict)
 	if (run.Verdict == store.VerdictSwitch || run.Verdict == store.VerdictUrgentSwitch) && run.RecommendedModel != "" {
@@ -569,7 +575,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 	writeDetailField(&sb, "Cost", fmt.Sprintf("$%.2f  Savings: %s", run.TotalCostUSD, savingsStr))
 	writeDetailField(&sb, "Samples", fmt.Sprintf("%d events", run.SampleSize))
 	sb.WriteString("\n")
-	writeDetailField(&sb, "Reason", run.DecisionReason)
+	writeDetailField(&sb, "Reason", reason)
 	writeDetailField(&sb, "Context", evaluateAgentContext(run))
 
 	// Trend line: show last N verdicts with direction indicator.
