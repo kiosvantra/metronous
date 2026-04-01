@@ -48,18 +48,35 @@ func TestAppInit(t *testing.T) {
 func TestAppTabSwitchingByNumber(t *testing.T) {
 	m := newTestApp(t)
 
-	updated, _ := sendKey(m, "2")
+	// 1 → Tracking (already there)
+	updated, _ := sendKey(m, "1")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmark {
-		t.Errorf("expected TabBenchmark after pressing 2, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabTracking {
+		t.Errorf("expected TabTracking after pressing 1, got %d", m.CurrentTab)
 	}
 
+	// 2 → Benchmark Summary
+	updated, _ = sendKey(m, "2")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected TabBenchmarkSummary after pressing 2, got %d", m.CurrentTab)
+	}
+
+	// 3 → Benchmark Detailed
 	updated, _ = sendKey(m, "3")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabConfig {
-		t.Errorf("expected TabConfig after pressing 3, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Errorf("expected TabBenchmarkDetailed after pressing 3, got %d", m.CurrentTab)
 	}
 
+	// 4 → Config
+	updated, _ = sendKey(m, "4")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabConfig {
+		t.Errorf("expected TabConfig after pressing 4, got %d", m.CurrentTab)
+	}
+
+	// Back to 1 → Tracking
 	updated, _ = sendKey(m, "1")
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabTracking {
@@ -70,35 +87,54 @@ func TestAppTabSwitchingByNumber(t *testing.T) {
 func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	m := newTestApp(t)
 
+	// right → TabBenchmarkSummary
 	updated, _ := sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmark {
-		t.Errorf("expected TabBenchmark after right arrow, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected TabBenchmarkSummary after right arrow, got %d", m.CurrentTab)
 	}
 
+	// right → TabBenchmarkDetailed
+	updated, _ = sendSpecialKey(m, tea.KeyRight)
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Errorf("expected TabBenchmarkDetailed after right arrow, got %d", m.CurrentTab)
+	}
+
+	// right → TabConfig
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
 		t.Errorf("expected TabConfig after right arrow, got %d", m.CurrentTab)
 	}
 
+	// left → TabBenchmarkDetailed
 	updated, _ = sendSpecialKey(m, tea.KeyLeft)
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmark {
-		t.Errorf("expected TabBenchmark after left arrow, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Errorf("expected TabBenchmarkDetailed after left arrow, got %d", m.CurrentTab)
+	}
+
+	// left → TabBenchmarkSummary
+	updated, _ = sendSpecialKey(m, tea.KeyLeft)
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected TabBenchmarkSummary after left arrow, got %d", m.CurrentTab)
 	}
 }
 
 func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 	m := newTestApp(t)
 
+	// Left at first tab → stays at TabTracking.
 	updated, _ := sendSpecialKey(m, tea.KeyLeft)
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabTracking {
 		t.Errorf("expected tab to stay at TabTracking, got %d", m.CurrentTab)
 	}
 
-	updated, _ = sendKey(m, "3")
+	// Jump to last tab (4 = Config) then press right → stays at TabConfig.
+	updated, _ = sendKey(m, "4")
 	m = updated.(*tui.AppModel)
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
@@ -1088,4 +1124,126 @@ func TestTrackingRefreshWithNewSessionsDoesNotClosePopup(t *testing.T) {
 	if len(frozen) != 2 {
 		t.Fatalf("frozen events count changed after refresh: got %d, want 2", len(frozen))
 	}
+}
+
+// ----- Benchmark Summary tab tests -------------------------------------------
+
+// TestAppTabSwitchingFourTabs verifies all four tabs are reachable via 1/2/3/4.
+func TestAppTabSwitchingFourTabs(t *testing.T) {
+	m := newTestApp(t)
+
+	cases := []struct {
+		key     string
+		wantTab tui.Tab
+		label   string
+	}{
+		{"1", tui.TabTracking, "TabTracking"},
+		{"2", tui.TabBenchmarkSummary, "TabBenchmarkSummary"},
+		{"3", tui.TabBenchmarkDetailed, "TabBenchmarkDetailed"},
+		{"4", tui.TabConfig, "TabConfig"},
+	}
+	for _, tc := range cases {
+		updated, _ := sendKey(m, tc.key)
+		m = updated.(*tui.AppModel)
+		if m.CurrentTab != tc.wantTab {
+			t.Errorf("key %q: expected %s (%d), got %d", tc.key, tc.label, tc.wantTab, m.CurrentTab)
+		}
+	}
+}
+
+// TestAppTabBarContainsSummaryAndDetailed verifies the rendered tab bar includes
+// both "Summary" and "Detailed" labels.
+func TestAppTabBarContainsSummaryAndDetailed(t *testing.T) {
+	m := newTestApp(t)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	view := updated.(*tui.AppModel).View()
+	if !strings.Contains(view, "Summary") {
+		t.Errorf("tab bar should contain 'Summary', got: %q", view[:min(len(view), 300)])
+	}
+	if !strings.Contains(view, "Detailed") {
+		t.Errorf("tab bar should contain 'Detailed', got: %q", view[:min(len(view), 300)])
+	}
+}
+
+// TestBenchmarkSummaryViewShowsTitle verifies the summary view renders its title.
+func TestBenchmarkSummaryViewShowsTitle(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil)
+	// Inject synthetic rows directly via the data message.
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{
+		Rows: []tui.SummaryRowForTest{
+			{AgentID: "agent-x", Model: "gpt-4", Runs: 3},
+		},
+	})
+	view := m.View()
+	if !strings.Contains(view, "Benchmark Summary") {
+		t.Errorf("expected 'Benchmark Summary' title in view, got: %q", view)
+	}
+}
+
+// TestBenchmarkSummaryViewShowsEmptyState verifies the empty-state message.
+func TestBenchmarkSummaryViewShowsEmptyState(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil)
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: nil})
+	view := m.View()
+	if !strings.Contains(view, "No benchmark runs yet") {
+		t.Errorf("expected empty state message, got: %q", view)
+	}
+}
+
+// TestBenchmarkSummaryCursorNavigation verifies ↑/↓ moves the cursor.
+func TestBenchmarkSummaryCursorNavigation(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil)
+	rows := []tui.SummaryRowForTest{
+		{AgentID: "agent-a", Model: "gpt-4", Runs: 2},
+		{AgentID: "agent-b", Model: "gpt-4", Runs: 1},
+		{AgentID: "agent-c", Model: "gpt-4", Runs: 5},
+	}
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: rows})
+
+	if tui.GetBenchmarkSummaryCursor(m) != 0 {
+		t.Fatalf("expected initial cursor = 0, got %d", tui.GetBenchmarkSummaryCursor(m))
+	}
+
+	// Down → cursor 1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	if tui.GetBenchmarkSummaryCursor(m) != 1 {
+		t.Errorf("after down: expected cursor = 1, got %d", tui.GetBenchmarkSummaryCursor(m))
+	}
+
+	// Up → cursor 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetBenchmarkSummaryCursor(m) != 0 {
+		t.Errorf("after up: expected cursor = 0, got %d", tui.GetBenchmarkSummaryCursor(m))
+	}
+
+	// Up at 0 → stays at 0.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	if tui.GetBenchmarkSummaryCursor(m) != 0 {
+		t.Errorf("after up at 0: expected cursor = 0, got %d", tui.GetBenchmarkSummaryCursor(m))
+	}
+}
+
+// TestBenchmarkSummaryViewRendersAgentRows verifies agent rows appear in the view.
+func TestBenchmarkSummaryViewRendersAgentRows(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil)
+	rows := []tui.SummaryRowForTest{
+		{AgentID: "sdd-orchestrator", Model: "claude-sonnet", Runs: 5},
+		{AgentID: "sdd-apply", Model: "gpt-4-mini", Runs: 3},
+	}
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: rows})
+	view := m.View()
+	if !strings.Contains(view, "sdd-orchestrator") {
+		t.Errorf("expected 'sdd-orchestrator' in view, got: %q", view)
+	}
+	if !strings.Contains(view, "sdd-apply") {
+		t.Errorf("expected 'sdd-apply' in view, got: %q", view)
+	}
+}
+
+// min is a small helper for test output truncation.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

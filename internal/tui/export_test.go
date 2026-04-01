@@ -7,6 +7,20 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
+// GetBenchmarkSummaryCursor returns the current cursor for summary tests.
+func GetBenchmarkSummaryCursor(m BenchmarkSummaryModel) int {
+	return m.cursor
+}
+
+// GetBenchmarkSummaryRows returns the rows loaded into the summary model.
+func GetBenchmarkSummaryRows(m BenchmarkSummaryModel) []summaryRow {
+	return m.rows
+}
+
+// SummaryRowForTest is the exported name for the internal summaryRow struct.
+// It allows tests to build synthetic BenchmarkSummaryDataMsg payloads.
+type SummaryRowForTest = summaryRow
+
 // TrackingSessionEventsMsg exports the internal trackingSessionEventsMsg for tests.
 type TrackingSessionEventsMsg = trackingSessionEventsMsg
 

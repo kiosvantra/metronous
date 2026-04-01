@@ -1,6 +1,7 @@
 // Package tui provides the Bubble Tea terminal user interface for Metronous.
-// It exposes a three-tab dashboard: Tracking (real-time events), Benchmark
-// (historical runs), and Config (threshold editor).
+// It exposes a four-tab dashboard: Tracking (real-time events), Benchmark Summary
+// (aggregated per-agent/model), Benchmark Detailed (historical runs), and Config
+// (threshold editor).
 package tui
 
 import (
@@ -25,19 +26,29 @@ type UpdateCheckMsg struct {
 	LatestVersion string
 }
 
-// Tab identifies one of the three dashboard panels.
+// Tab identifies one of the four dashboard panels.
 type Tab int
 
 const (
-	TabTracking  Tab = iota // 0 — real-time event stream
-	TabBenchmark            // 1 — benchmark history
-	TabConfig               // 2 — threshold editor
+	TabTracking          Tab = iota // 0 — real-time event stream
+	TabBenchmarkSummary             // 1 — aggregated benchmark summary
+	TabBenchmarkDetailed            // 2 — per-run benchmark history
+	TabConfig                       // 3 — threshold editor
 )
 
-const numTabs = 3
+// TabBenchmark is an alias for TabBenchmarkDetailed kept for backwards compat
+// in any code that still references the old name.
+const TabBenchmark = TabBenchmarkDetailed
+
+const numTabs = 4
 
 // tabNames are the display labels for each tab (1-indexed for humans).
-var tabNames = [numTabs]string{"[1] Tracking", "[2] Benchmark", "[3] Config"}
+var tabNames = [numTabs]string{
+	"[1] Tracking",
+	"[2] Benchmark Summary",
+	"[3] Benchmark Detailed",
+	"[4] Config",
+}
 
 // Styles are shared across all views.
 var (
@@ -74,9 +85,10 @@ type AppModel struct {
 	Height int
 
 	// Sub-models for each tab.
-	tracking  TrackingModel
-	benchmark BenchmarkModel
-	config    ConfigModel
+	tracking         TrackingModel
+	benchmarkSummary BenchmarkSummaryModel
+	benchmark        BenchmarkModel
+	config           ConfigModel
 
 	// StatusMsg is a transient message shown at the bottom of the screen.
 	StatusMsg string
@@ -96,13 +108,14 @@ type AppModel struct {
 // version is the current application version for update checking.
 func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string, workDir string, version string) AppModel {
 	return AppModel{
-		CurrentTab:      TabTracking,
-		tracking:        NewTrackingModel(es),
-		benchmark:       NewBenchmarkModel(bs, dataDir, workDir),
-		config:          NewConfigModel(configPath),
-		CurrentVersion:  version,
-		UpdateAvailable: false,
-		LatestVersion:   "",
+		CurrentTab:       TabTracking,
+		tracking:         NewTrackingModel(es),
+		benchmarkSummary: NewBenchmarkSummaryModel(bs),
+		benchmark:        NewBenchmarkModel(bs, dataDir, workDir),
+		config:           NewConfigModel(configPath),
+		CurrentVersion:   version,
+		UpdateAvailable:  false,
+		LatestVersion:    "",
 	}
 }
 
@@ -110,6 +123,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 func (m AppModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.tracking.Init(),
+		m.benchmarkSummary.Init(),
 		m.benchmark.Init(),
 		m.config.Init(),
 		checkForUpdate,
@@ -261,10 +275,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "2":
-			m.CurrentTab = TabBenchmark
+			m.CurrentTab = TabBenchmarkSummary
 			return m, nil
 
 		case "3":
+			m.CurrentTab = TabBenchmarkDetailed
+			return m, nil
+
+		case "4":
 			m.CurrentTab = TabConfig
 			return m, nil
 
@@ -302,7 +320,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.CurrentTab {
 		case TabTracking:
 			m.tracking, cmd = m.tracking.Update(msg)
-		case TabBenchmark:
+		case TabBenchmarkSummary:
+			m.benchmarkSummary, cmd = m.benchmarkSummary.Update(msg)
+		case TabBenchmarkDetailed:
 			m.benchmark, cmd = m.benchmark.Update(msg)
 		case TabConfig:
 			m.config, cmd = m.config.Update(msg)
@@ -317,11 +337,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = ws.Height
 	}
 
-	var tCmd, bCmd, cCmd tea.Cmd
+	var tCmd, sCmd, bCmd, cCmd tea.Cmd
 	m.tracking, tCmd = m.tracking.Update(msg)
+	m.benchmarkSummary, sCmd = m.benchmarkSummary.Update(msg)
 	m.benchmark, bCmd = m.benchmark.Update(msg)
 	m.config, cCmd = m.config.Update(msg)
-	return m, tea.Batch(tCmd, bCmd, cCmd)
+	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd)
 }
 
 // View renders the full dashboard.
@@ -338,7 +359,9 @@ func (m *AppModel) View() string {
 	switch m.CurrentTab {
 	case TabTracking:
 		content = m.tracking.View()
-	case TabBenchmark:
+	case TabBenchmarkSummary:
+		content = m.benchmarkSummary.View()
+	case TabBenchmarkDetailed:
 		content = m.benchmark.View()
 	case TabConfig:
 		content = m.config.View()
@@ -356,9 +379,9 @@ func (m *AppModel) View() string {
 	}
 
 	// Status bar - show "u: update" only if update is available
-	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
+	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
 	if m.UpdateAvailable {
-		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
+		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
 	return fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
