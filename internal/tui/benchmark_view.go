@@ -13,7 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/kiosvantra/metronous/internal/benchmark"
 	"github.com/kiosvantra/metronous/internal/discovery"
 	"github.com/kiosvantra/metronous/internal/store"
 )
@@ -31,9 +30,8 @@ type benchmarkTickMsg struct{ t time.Time }
 // BenchmarkDataMsg carries fetched benchmark runs.
 type BenchmarkDataMsg struct {
 	Runs      []store.BenchmarkRun
-	TypeByID  map[string]string         // agentID → type label (primary/subagent/built-in/all)
-	TrendByID map[string][]string       // agentID → verdict trend (oldest first)
-	AggStats  []benchmark.AggregateStat // cross-agent weekly aggregation (NEW)
+	TypeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
+	TrendByID map[string][]string // agentID → verdict trend (oldest first)
 	Err       error
 }
 
@@ -117,9 +115,6 @@ type BenchmarkModel struct {
 	frozenTrend []string
 	pricing     map[string]float64
 	workDir     string
-	// aggStats holds the latest cross-agent weekly aggregation results, updated on
-	// each background refresh alongside m.runs.
-	aggStats []benchmark.AggregateStat
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -174,8 +169,6 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			if msg.TrendByID != nil {
 				m.trendByID = msg.TrendByID
 			}
-			// Update weekly aggregation stats.
-			m.aggStats = msg.AggStats
 			// Clamp cursor to actual result size.
 			if m.cursor >= len(m.runs) {
 				if len(m.runs) > 0 {
@@ -342,14 +335,7 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Fetch cross-agent aggregation: top 4 runs per agent, then aggregate by model.
-		recentRuns, err := m.bs.GetRecentRunsAllAgents(ctx, 4)
-		var aggStats []benchmark.AggregateStat
-		if err == nil {
-			aggStats = benchmark.AggregateWeeklyStats(recentRuns)
-		}
-
-		return BenchmarkDataMsg{Runs: page, TypeByID: typeByID, TrendByID: trendByID, AggStats: aggStats}
+		return BenchmarkDataMsg{Runs: page, TypeByID: typeByID, TrendByID: trendByID}
 	}
 }
 
@@ -431,9 +417,6 @@ func (m BenchmarkModel) View() string {
 		}
 		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend))
 	}
-
-	// Weekly aggregation table — shown after the detail panel when data is available.
-	sb.WriteString(renderAggregationTable(m.aggStats))
 
 	return sb.String()
 }
@@ -693,52 +676,6 @@ func computeSavings(currentModel, recommendedModel string, verdict store.Verdict
 		return 0, "-"
 	}
 	return savings, fmt.Sprintf("~%.0f%%", savings)
-}
-
-// aggColWidths / aggColNames describe the weekly aggregation table columns.
-// Columns: Model | Agents | Samples | Accuracy | P95 (ms) | ToolSuccess | TotalCost | Score
-var (
-	aggColWidths = []int{20, 7, 9, 10, 10, 12, 11, 7}
-	aggColNames  = []string{"Model", "Agents", "Samples", "Accuracy", "P95 (ms)", "ToolSuccess", "TotalCost", "Score"}
-)
-
-// renderAggregationTable renders the "Weekly Aggregation (by model)" section.
-// Returns an empty string when stats is nil or empty, so the caller does not
-// need to guard before appending to the view output.
-func renderAggregationTable(stats []benchmark.AggregateStat) string {
-	if len(stats) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("\n")
-	sb.WriteString(titleStyle.Render("Weekly Aggregation (by model)") + "\n\n")
-	sb.WriteString(renderRow(aggColNames, aggColWidths, headerStyle))
-	sb.WriteString("\n")
-	sb.WriteString(strings.Repeat("─", totalWidth(aggColWidths)) + "\n")
-
-	for _, s := range stats {
-		row := []string{
-			s.Model,
-			fmt.Sprintf("%d", s.AgentCount),
-			fmt.Sprintf("%d", s.TotalSampleSize),
-			fmt.Sprintf("%.1f%%", s.WeightedAccuracy*100),
-			fmt.Sprintf("%.0f", s.WeightedP95LatencyMs),
-			fmt.Sprintf("%.1f%%", s.WeightedToolSuccessRate*100),
-			fmt.Sprintf("$%.2f", s.TotalCostUSD),
-			fmt.Sprintf("%.2f", s.HealthScore),
-		}
-		sb.WriteString(renderRow(row, aggColWidths, lipgloss.NewStyle()))
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render(
-		"  Score = 0.50×KEEP + 0.20×SWITCH + 0.30×URGENT  (higher = healthier)  |  top 4 runs per agent",
-	))
-	sb.WriteString("\n")
-
-	return sb.String()
 }
 
 // verdictStyle returns the lipgloss style for a verdict.

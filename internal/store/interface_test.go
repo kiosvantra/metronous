@@ -274,9 +274,6 @@ func (m *mockBenchmarkStore) ListAgents(ctx context.Context) ([]string, error) {
 func (m *mockBenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) GetRecentRunsAllAgents(ctx context.Context, topNPerAgent int) ([]store.BenchmarkRun, error) {
-	return nil, nil
-}
 func (m *mockBenchmarkStore) Close() error { return nil }
 
 // Verify JSON round-trip for Event metadata using stdlib json.
