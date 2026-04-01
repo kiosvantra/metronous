@@ -334,88 +334,115 @@ func makeRuns(n int) []store.BenchmarkRun {
 	return runs
 }
 
-// TestBenchmarkPageSizeIs20 verifies the page-size constant is 20.
-func TestBenchmarkPageSizeIs20(t *testing.T) {
-	if tui.BenchmarkPageSize != 20 {
-		t.Errorf("expected BenchmarkPageSize == 20, got %d", tui.BenchmarkPageSize)
+// makeCycles builds N week-start times (Sundays) going back N weeks from now.
+func makeCycles(n int) []time.Time {
+	cycles := make([]time.Time, n)
+	// Start from the most recent Sunday.
+	now := time.Now()
+	daysBack := int(now.Weekday())
+	lastSunday := now.AddDate(0, 0, -daysBack)
+	base := time.Date(lastSunday.Year(), lastSunday.Month(), lastSunday.Day(), 0, 0, 0, 0, time.Local)
+	for i := 0; i < n; i++ {
+		cycles[i] = base.AddDate(0, 0, -i*7)
 	}
+	return cycles
 }
 
-// TestBenchmarkViewRendersMax20Rows verifies that injecting 25 runs renders at most 20 rows.
-func TestBenchmarkViewRendersMax20Rows(t *testing.T) {
+// TestBenchmarkViewRendersAgentRows verifies that injecting runs renders the agent rows.
+func TestBenchmarkViewRendersAgentRows(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "")
-	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(25)})
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
 
-	// Count table data rows by counting lines that contain "agent-" followed by a space
-	// (column padding) — this matches only table rows, not the detail panel.
 	view := m.View()
-	tableRowCount := 0
-	for _, line := range strings.Split(view, "\n") {
-		// Table data rows contain "agent-XX" padded with spaces to column width.
-		// The detail panel shows "Agent:    agent-XX" which won't match this pattern.
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "2026-") || strings.HasPrefix(trimmed, "-  ") {
-			// Lines starting with a date/time (data rows) or "-" (no-data rows).
-			if strings.Contains(trimmed, "agent-") {
-				tableRowCount++
-			}
-		}
-	}
-	if tableRowCount > 20 {
-		t.Errorf("expected at most 20 table data rows rendered, got %d", tableRowCount)
-	}
-	if tableRowCount == 0 {
-		t.Errorf("expected some rows rendered, got 0 (view: %q)", view)
+	// At least one agent row should appear.
+	if !strings.Contains(view, "agent-00") {
+		t.Errorf("expected 'agent-00' in view, got: %q", view)
 	}
 }
 
-// TestBenchmarkPgDnIncreasesPageOffset verifies PgDn moves pageOffset forward by one page.
-func TestBenchmarkPgDnIncreasesPageOffset(t *testing.T) {
+// TestBenchmarkCycleIndexStartsAtZero verifies cycleIndex is 0 initially.
+func TestBenchmarkCycleIndexStartsAtZero(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "")
-	// Inject data so the model is not in loading state.
-	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(20)})
-
-	initialOffset := tui.GetBenchmarkPageOffset(m)
-	if initialOffset != 0 {
-		t.Fatalf("expected initial pageOffset = 0, got %d", initialOffset)
-	}
-
-	// Send PgDn.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
-	afterOffset := tui.GetBenchmarkPageOffset(m)
-	if afterOffset != tui.BenchmarkPageSize {
-		t.Errorf("after PgDn: expected pageOffset = %d, got %d", tui.BenchmarkPageSize, afterOffset)
+	if tui.GetBenchmarkCycleIndex(m) != 0 {
+		t.Errorf("expected initial cycleIndex = 0, got %d", tui.GetBenchmarkCycleIndex(m))
 	}
 }
 
-// TestBenchmarkPgUpDecreasesPageOffset verifies PgUp moves pageOffset backward without underflow.
-func TestBenchmarkPgUpDecreasesPageOffset(t *testing.T) {
+// TestBenchmarkPgDnAdvancesCycleIndex verifies PgDn moves to the next (older) cycle.
+func TestBenchmarkPgDnAdvancesCycleIndex(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "")
-	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(20)})
+	// Inject 3 cycles so PgDn has room to move.
+	cycles := makeCycles(3)
+	m, _ = m.Update(tui.BenchmarkDataMsg{
+		Runs:   makeRuns(3),
+		Cycles: cycles,
+	})
 
-	// Simulate two PgDn presses to get pageOffset = 2*pageSize.
+	if tui.GetBenchmarkCycleIndex(m) != 0 {
+		t.Fatalf("expected initial cycleIndex = 0, got %d", tui.GetBenchmarkCycleIndex(m))
+	}
+
+	// PgDn → cycleIndex = 1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetBenchmarkCycleIndex(m) != 1 {
+		t.Errorf("after PgDn: expected cycleIndex = 1, got %d", tui.GetBenchmarkCycleIndex(m))
+	}
+}
+
+// TestBenchmarkPgUpDecreaseCycleIndex verifies PgUp moves to the previous (newer) cycle without underflow.
+func TestBenchmarkPgUpDecreaseCycleIndex(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	cycles := makeCycles(3)
+	m, _ = m.Update(tui.BenchmarkDataMsg{
+		Runs:   makeRuns(3),
+		Cycles: cycles,
+	})
+
+	// Two PgDn presses → cycleIndex = 2 (last cycle).
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
-	if tui.GetBenchmarkPageOffset(m) != 2*tui.BenchmarkPageSize {
-		t.Fatalf("setup: expected pageOffset = %d, got %d", 2*tui.BenchmarkPageSize, tui.GetBenchmarkPageOffset(m))
+	if tui.GetBenchmarkCycleIndex(m) != 2 {
+		t.Fatalf("setup: expected cycleIndex = 2, got %d", tui.GetBenchmarkCycleIndex(m))
 	}
 
-	// One PgUp should subtract one page.
+	// One PgUp → cycleIndex = 1.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
-	if tui.GetBenchmarkPageOffset(m) != tui.BenchmarkPageSize {
-		t.Errorf("after PgUp: expected pageOffset = %d, got %d", tui.BenchmarkPageSize, tui.GetBenchmarkPageOffset(m))
+	if tui.GetBenchmarkCycleIndex(m) != 1 {
+		t.Errorf("after PgUp: expected cycleIndex = 1, got %d", tui.GetBenchmarkCycleIndex(m))
 	}
 
-	// Another PgUp should go to 0, not negative.
+	// Another PgUp → cycleIndex = 0.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
-	if tui.GetBenchmarkPageOffset(m) != 0 {
-		t.Errorf("after second PgUp: expected pageOffset = 0, got %d", tui.GetBenchmarkPageOffset(m))
+	if tui.GetBenchmarkCycleIndex(m) != 0 {
+		t.Errorf("after second PgUp: expected cycleIndex = 0, got %d", tui.GetBenchmarkCycleIndex(m))
 	}
 
-	// A third PgUp should stay at 0.
+	// Third PgUp at 0 → stays at 0 (no underflow).
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
-	if tui.GetBenchmarkPageOffset(m) != 0 {
-		t.Errorf("after third PgUp from 0: expected pageOffset = 0, got %d", tui.GetBenchmarkPageOffset(m))
+	if tui.GetBenchmarkCycleIndex(m) != 0 {
+		t.Errorf("after third PgUp from 0: expected cycleIndex = 0, got %d", tui.GetBenchmarkCycleIndex(m))
+	}
+}
+
+// TestBenchmarkPgDnAtLastCycleDoesNotAdvance verifies PgDn at the last cycle is a no-op.
+func TestBenchmarkPgDnAtLastCycleDoesNotAdvance(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "")
+	cycles := makeCycles(2)
+	m, _ = m.Update(tui.BenchmarkDataMsg{
+		Runs:   makeRuns(2),
+		Cycles: cycles,
+	})
+
+	// Move to last cycle.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetBenchmarkCycleIndex(m) != 1 {
+		t.Fatalf("expected cycleIndex = 1, got %d", tui.GetBenchmarkCycleIndex(m))
+	}
+
+	// Another PgDn at last cycle → stays at 1.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if tui.GetBenchmarkCycleIndex(m) != 1 {
+		t.Errorf("PgDn at last cycle should not advance: got cycleIndex = %d", tui.GetBenchmarkCycleIndex(m))
 	}
 }
 
@@ -564,7 +591,8 @@ func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
 // TestBenchmarkPgDnResetsCursor verifies PgDn resets cursor to 0.
 func TestBenchmarkPgDnResetsCursor(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "")
-	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
+	cycles := makeCycles(3)
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5), Cycles: cycles})
 
 	// Move cursor to row 3.
 	for i := 0; i < 3; i++ {
