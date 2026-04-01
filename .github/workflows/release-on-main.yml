@@ -35,6 +35,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compute next tag
+        id: version
+        run: |
+          python .github/scripts/bump-version.py --out-version version.txt --out-notes release_notes.md
+          NEXT_TAG=$(cat version.txt | tr -d '\n')
+          PREV_TAG=$(git tag --list "v[0-9]*.[0-9]*.[0-9]*" --sort=-v:refname | head -n 1)
+          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create local tag
+        run: |
+          git tag -a "${{ steps.version.outputs.next_tag }}" -m "Release ${{ steps.version.outputs.next_tag }}" || true
+
+      - name: Push tag to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push origin "${{ steps.version.outputs.next_tag }}" || true
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -44,9 +68,6 @@ jobs:
         uses: goreleaser/goreleaser-action@v5
         with:
           version: v2.14.3
-          # Since this workflow runs on every push to main (not on tag events),
-          # use --snapshot so GoReleaser does not require a tag to exist on
-          # the current commit.
-          args: release --clean --snapshot
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
