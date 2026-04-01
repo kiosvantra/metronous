@@ -40,6 +40,14 @@ func LoadThresholds(path string) (*config.Thresholds, error) {
 
 // Evaluate produces a Verdict for the given WindowMetrics using the engine's thresholds.
 // Per-agent overrides are applied automatically.
+//
+// Free-model behaviour: if the model reported in m.Model is listed in model_pricing with
+// price == 0, ROI/cost checks are skipped — only quality metrics (accuracy, error rate,
+// latency, tool success rate) can trigger a SWITCH or URGENT_SWITCH.
+//
+// Unreliable-cost safeguard: for paid models, if m.TotalCostUSD == 0 (no billing data
+// was collected), the ROI check is also suppressed to avoid false positives.
+//
 // ctx is reserved for future use (e.g., timeout, cancellation).
 func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics) Verdict {
 	_ = ctx // reserved for future use
@@ -48,9 +56,9 @@ func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics
 	urgent := e.thresholds.UrgentTriggers
 	models := e.thresholds.EffectiveModelRecommendations()
 
-	vt := EvaluateRules(m, effective, urgent)
-	reason := BuildReason(vt, m, effective, urgent)
-	recommended := recommendModel(vt, m, effective, models)
+	vt := EvaluateRulesWithPricing(m, effective, urgent, e.thresholds)
+	reason := BuildReasonWithPricing(vt, m, effective, urgent, e.thresholds)
+	recommended := recommendModel(vt, m, effective, models, e.thresholds)
 
 	return Verdict{
 		AgentID:          m.AgentID,
@@ -65,18 +73,24 @@ func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics
 // recommendModel returns a suggested replacement model based on which thresholds
 // failed. Returns an empty string when no switch is needed.
 //
+// For free models or when cost data is unreliable, ROI failures do not drive the
+// recommendation — only quality failures (accuracy, latency, tool success) do.
+//
 // Heuristic:
 //   - Accuracy or error-rate failures → recommend a stronger/smarter model
-//   - Latency or cost failures        → recommend a faster/cheaper model
+//   - Latency failures                → recommend a faster/cheaper model
+//   - ROI failure (paid + reliable)   → recommend a faster/cheaper model
 //   - Both accuracy and latency fail  → accuracy takes precedence (correctness first)
-func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations) string {
+func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations, root *config.Thresholds) string {
 	if vt != store.VerdictSwitch && vt != store.VerdictUrgentSwitch {
 		return ""
 	}
 
 	accuracyFailed := m.Accuracy < thresholds.MinAccuracy
 	latencyFailed := m.P95LatencyMs > float64(thresholds.MaxLatencyP95Ms)
-	roiFailed := m.ROIScore < thresholds.MinROIScore
+
+	// ROI is only considered when the model is paid AND cost data is reliable.
+	roiFailed := roiActive(m.Model, m, root) && m.ROIScore < thresholds.MinROIScore
 
 	// Accuracy issues require a stronger model regardless of other failures.
 	if accuracyFailed {

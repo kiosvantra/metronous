@@ -63,6 +63,17 @@ type AgentThresholds struct {
 	MaxCostUSDPerSession *float64 `json:"max_cost_usd_per_session,omitempty"`
 }
 
+// ModelPricing holds pricing information for known models.
+// A model with price == 0 is considered free and ROI/cost checks are skipped.
+type ModelPricing struct {
+	// Note is an informational comment about the pricing data.
+	Note string `json:"note,omitempty"`
+
+	// Models maps model names to their output price per 1M tokens in USD.
+	// A value of 0.0 means the model is free; absent keys are treated as unknown (paid).
+	Models map[string]float64 `json:"models,omitempty"`
+}
+
 // Thresholds is the root configuration structure loaded from thresholds.json.
 type Thresholds struct {
 	// Version is the schema version of this configuration file.
@@ -79,6 +90,20 @@ type Thresholds struct {
 
 	// PerAgent maps agent IDs to agent-specific threshold overrides.
 	PerAgent map[string]AgentThresholds `json:"per_agent,omitempty"`
+
+	// ModelPricing holds pricing data used to determine whether a model is free.
+	// Models with price == 0 have ROI/cost checks skipped in the decision engine.
+	ModelPricing ModelPricing `json:"model_pricing,omitempty"`
+}
+
+// IsModelFree returns true if the model is explicitly listed in ModelPricing with
+// a price of exactly 0. Models not listed in the pricing table are treated as paid.
+func (t *Thresholds) IsModelFree(model string) bool {
+	if t == nil || t.ModelPricing.Models == nil {
+		return false
+	}
+	price, ok := t.ModelPricing.Models[model]
+	return ok && price == 0
 }
 
 // DefaultThresholdValues returns a Thresholds struct populated with the
