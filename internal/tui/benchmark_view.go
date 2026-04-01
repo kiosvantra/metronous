@@ -374,9 +374,13 @@ func (m BenchmarkModel) View() string {
 		row := formatBenchmarkRow(run, agentType, m.pricing)
 		baseStyle := lipgloss.NewStyle()
 		isNoDataRow := isNoData(run)
-		// For NO DATA rows: make the entire line grey, and do not apply cursor background.
+		// For NO DATA rows: keep grey text, but if the cursor is on the row
+		// show only the background highlight (so the cursor doesn't disappear).
 		if isNoDataRow {
 			baseStyle = dimStyle
+			if i == m.cursor {
+				baseStyle = dimStyle.Copy().Background(lipgloss.Color("236"))
+			}
 		} else if i == m.cursor {
 			baseStyle = cursorStyle
 		}
@@ -386,7 +390,7 @@ func (m BenchmarkModel) View() string {
 		// Verdict column: remove cursor background from this specific column.
 		var verdictCell string
 		if isNoDataRow {
-			verdictCell = dimStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
 		} else {
 			verdictCell = verdictStyle(run.Verdict).Render(
 				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))

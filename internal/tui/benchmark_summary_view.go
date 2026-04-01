@@ -305,10 +305,17 @@ func (m BenchmarkSummaryModel) View() string {
 		healthCell := healthStyle(row.HealthScore).Inherit(baseStyle).Render(
 			fmt.Sprintf("%-*s", summaryColWidths[healthColIdx], cells[healthColIdx]))
 		rendered += healthCell
-		// Last Verdict column: remove cursor background from this specific column.
-		// We keep only verdict foreground colour.
-		verdictCell := verdictStyle(row.LastVerdict).Render(
-			fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
+		// Last Verdict column: for INSUFFICIENT_DATA rows we show grey text,
+		// and still allow the cursor background highlight.
+		verdictCell := ""
+		if row.LastVerdict == store.VerdictInsufficientData {
+			verdictCell = baseStyle.Render(
+				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
+		} else {
+			// Remove cursor background from this specific column.
+			verdictCell = verdictStyle(row.LastVerdict).Render(
+				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
+		}
 		rendered += " " + verdictCell
 
 		sb.WriteString(rendered)
