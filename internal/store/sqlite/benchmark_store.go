@@ -428,6 +428,82 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	return &run, nil
 }
 
+// ListRunCycles returns the distinct week-start timestamps (Sunday 00:00 in loc, stored as UTC)
+// for all benchmark runs, ordered newest first.
+// limit=0 returns all; offset skips the first N cycle rows.
+func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
+	if loc == nil {
+		loc = time.Local
+	}
+
+	// Pull all distinct run_at values (milliseconds UTC).
+	// We compute week-start grouping in Go so we can use the caller's local timezone
+	// (SQLite has no timezone support, and strftime('%w') is UTC-only).
+	const q = `SELECT DISTINCT run_at FROM benchmark_runs ORDER BY run_at DESC`
+	rows, err := bs.readDB.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list run_at for cycles: %w", err)
+	}
+	defer rows.Close()
+
+	// Collect unique week-start times in loc.
+	seen := make(map[time.Time]struct{})
+	var ordered []time.Time // insertion order = newest first (since query is DESC)
+	for rows.Next() {
+		var ms int64
+		if err := rows.Scan(&ms); err != nil {
+			return nil, fmt.Errorf("scan run_at: %w", err)
+		}
+		t := time.UnixMilli(ms).In(loc)
+		ws := weekStartInLoc(t)
+		if _, ok := seen[ws]; !ok {
+			seen[ws] = struct{}{}
+			ordered = append(ordered, ws)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate run_at rows: %w", err)
+	}
+
+	// Apply offset and limit.
+	if offset >= len(ordered) {
+		return nil, nil
+	}
+	ordered = ordered[offset:]
+	if limit > 0 && limit < len(ordered) {
+		ordered = ordered[:limit]
+	}
+	return ordered, nil
+}
+
+// weekStartInLoc returns midnight Sunday of the week containing t, in the same location as t.
+// Sunday is weekday 0 in Go's time.Weekday().
+func weekStartInLoc(t time.Time) time.Time {
+	// Shift back to Sunday.
+	daysBack := int(t.Weekday()) // Sunday=0, Monday=1, … Saturday=6
+	d := t.AddDate(0, 0, -daysBack)
+	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, d.Location())
+}
+
+// QueryRunsInWindow returns all benchmark runs whose run_at falls within [since, until),
+// ordered by run_at DESC.
+func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
+	const q = `SELECT id, run_at, window_days, agent_id, model,
+		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+		tool_success_rate, roi_score, total_cost_usd, sample_size,
+		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score
+		FROM benchmark_runs
+		WHERE run_at >= ? AND run_at < ?
+		ORDER BY run_at DESC`
+
+	rows, err := bs.readDB.QueryContext(ctx, q, since.UTC().UnixMilli(), until.UTC().UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("query runs in window: %w", err)
+	}
+	defer rows.Close()
+	return scanBenchmarkRuns(rows)
+}
+
 // GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
 // Returns an empty slice if the agent has no runs or fewer than requested.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {

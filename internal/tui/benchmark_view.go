@@ -17,9 +17,6 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
-// maxBenchmarkRows is the maximum number of rows to fetch per page in the benchmark tab.
-const maxBenchmarkRows = 20
-
 // benchmarkRefreshInterval is the auto-refresh period for the benchmark tab,
 // matching the tracking tab's cadence.
 const benchmarkRefreshInterval = 2 * time.Second
@@ -30,6 +27,7 @@ type benchmarkTickMsg struct{ t time.Time }
 // BenchmarkDataMsg carries fetched benchmark runs.
 type BenchmarkDataMsg struct {
 	Runs      []store.BenchmarkRun
+	Cycles    []time.Time         // week-start timestamps, newest first (nil = no change)
 	TypeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
 	TrendByID map[string][]string // agentID → verdict trend (oldest first)
 	Err       error
@@ -94,18 +92,20 @@ func loadModelPricing(dataDir string) map[string]float64 {
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
 	bs        store.BenchmarkStore
-	runs      []store.BenchmarkRun
+	runs      []store.BenchmarkRun // rows for the current cycle (one per agent, placeholder if no run)
 	agents    []discovery.AgentInfo
 	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
 	trendByID map[string][]string // agentID → verdict trend (oldest first)
 	err       error
-	// cursor is the local row index within the current page (0..maxBenchmarkRows-1).
+	// cursor is the row index within the current cycle's agent list.
 	cursor  int
 	loading bool
-	// pageOffset is the number of runs skipped from the top (run_at DESC).
-	// PgDn increases pageOffset (moves toward older runs).
-	// PgUp decreases pageOffset (moves toward newer runs).
-	pageOffset int
+	// cycles is the ordered list of week-start times (newest first) discovered in the DB.
+	cycles []time.Time
+	// cycleIndex is the index into cycles currently displayed (0 = newest cycle).
+	// PgDn increases cycleIndex (moves toward older cycles).
+	// PgUp decreases cycleIndex (moves toward newer cycles).
+	cycleIndex int
 	// detailFrozen indicates whether the detail panel is locked to frozenRun/frozenTrend.
 	// When true, the detail does not update even if the background refresh changes m.runs.
 	detailFrozen bool
@@ -157,12 +157,14 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
-			// Enforce page size — the view always renders at most maxBenchmarkRows rows.
-			runs := msg.Runs
-			if len(runs) > maxBenchmarkRows {
-				runs = runs[:maxBenchmarkRows]
+			m.runs = msg.Runs
+			if msg.Cycles != nil {
+				m.cycles = msg.Cycles
+				// Clamp cycleIndex to valid range when cycles change.
+				if m.cycleIndex >= len(m.cycles) && len(m.cycles) > 0 {
+					m.cycleIndex = len(m.cycles) - 1
+				}
 			}
-			m.runs = runs
 			if msg.TypeByID != nil {
 				m.typeByID = msg.TypeByID
 			}
@@ -183,35 +185,35 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
-			// Move selection one row up within the current page.
+			// Move selection one row up within the current cycle.
 			if m.cursor > 0 {
 				m.cursor--
 			}
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
 		case "down", "j":
-			// Move selection one row down within the current page.
+			// Move selection one row down within the current cycle.
 			if m.cursor < len(m.runs)-1 {
 				m.cursor++
 			}
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
 		case "pgdown":
-			// Slide window toward older runs (increase pageOffset by one full page).
-			m.pageOffset += maxBenchmarkRows
-			m.cursor = 0
-			m.detailFrozen = false
-			return m, m.fetchRuns()
-		case "pgup":
-			// Slide window toward newer runs (decrease pageOffset by one full page).
-			if m.pageOffset >= maxBenchmarkRows {
-				m.pageOffset -= maxBenchmarkRows
-			} else {
-				m.pageOffset = 0
+			// Move to the next (older) cycle.
+			if m.cycleIndex < len(m.cycles)-1 {
+				m.cycleIndex++
+				m.cursor = 0
+				m.detailFrozen = false
+				return m, m.fetchRuns()
 			}
-			m.cursor = 0
-			m.detailFrozen = false
-			return m, m.fetchRuns()
+		case "pgup":
+			// Move to the previous (newer) cycle.
+			if m.cycleIndex > 0 {
+				m.cycleIndex--
+				m.cursor = 0
+				m.detailFrozen = false
+				return m, m.fetchRuns()
+			}
 		case "enter":
 			// Freeze the detail panel on the currently selected run.
 			if m.cursor >= 0 && m.cursor < len(m.runs) {
@@ -245,39 +247,40 @@ func agentTypeOrder(t string) int {
 	}
 }
 
-// fetchRuns returns a command that queries all discovered agents' latest runs.
-// Agents with no data are included as placeholder rows (Verdict == "").
-// The pageOffset field controls which window of sorted rows is returned.
+// fetchRuns returns a command that builds the current cycle's agent rows.
+// Each cycle corresponds to one Sunday-bounded week in local time.
+// All agents (discovered + DB) appear; agents with no run in the cycle get a NO RUN placeholder.
 func (m BenchmarkModel) fetchRuns() tea.Cmd {
 	if m.bs == nil {
 		return nil
 	}
-	// Snapshot the agent list and pageOffset at scheduling time so the closure is self-contained.
+	// Snapshot mutable state so the closure is self-contained.
 	agents := m.agents
-	pageOffset := m.pageOffset
+	cycleIndex := m.cycleIndex
+	knownCycles := m.cycles
+	loc := time.Local
+
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Build a map of agent types from the discovered agent list.
+		// ── 1. Build typeByID from discovered agents + DB agents ──────────────
 		typeByID := make(map[string]string, len(agents))
 		for _, a := range agents {
 			typeByID[a.ID] = a.Type
 		}
 
-		// Also pick up any agents that have runs in the DB but were not
-		// discovered via config files (e.g. agents from old sessions).
 		dbAgents, err := m.bs.ListAgents(ctx)
 		if err != nil {
 			return BenchmarkDataMsg{Err: err}
 		}
 		for _, id := range dbAgents {
 			if _, found := typeByID[id]; !found {
-				typeByID[id] = "primary" // default type for DB-only agents
+				typeByID[id] = "primary"
 			}
 		}
 
-		// Merge discovered and DB agent IDs into a unified set.
+		// Merge into ordered allIDs (discovered first, then DB-only).
 		seen := make(map[string]bool)
 		var allIDs []string
 		for _, a := range agents {
@@ -293,40 +296,74 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Build one row per agent (latest run only).
-		var all []store.BenchmarkRun
-		for _, agentID := range allIDs {
-			runs, err := m.bs.GetRuns(ctx, agentID, 1)
-			if err != nil || len(runs) == 0 {
-				// No data yet — create a placeholder row.
-				all = append(all, store.BenchmarkRun{AgentID: agentID})
-				continue
-			}
-			all = append(all, runs[0])
+		// ── 2. Fetch/refresh cycle list ───────────────────────────────────────
+		cycles, err := m.bs.ListRunCycles(ctx, loc, 0, 0)
+		if err != nil {
+			return BenchmarkDataMsg{Err: err}
+		}
+		// Fall back to previously known cycles so the UI stays consistent while
+		// the store hasn't written any runs yet.
+		if len(cycles) == 0 && len(knownCycles) > 0 {
+			cycles = knownCycles
 		}
 
-		// Sort rows: primary → subagent → all → built-in, then alphabetical within each group.
-		sort.Slice(all, func(i, j int) bool {
-			ti := agentTypeOrder(typeByID[all[i].AgentID])
-			tj := agentTypeOrder(typeByID[all[j].AgentID])
+		// ── 3. Determine the active cycle window ──────────────────────────────
+		// cycleIndex 0 = newest cycle; clamp to valid range.
+		if cycleIndex < 0 {
+			cycleIndex = 0
+		}
+		if cycleIndex >= len(cycles) && len(cycles) > 0 {
+			cycleIndex = len(cycles) - 1
+		}
+
+		var (
+			cycleStart time.Time
+			cycleEnd   time.Time
+		)
+		if len(cycles) > 0 {
+			cycleStart = cycles[cycleIndex]
+			cycleEnd = cycleStart.AddDate(0, 0, 7)
+		}
+
+		// ── 4. Fetch runs in the active cycle window ──────────────────────────
+		var windowRuns []store.BenchmarkRun
+		if !cycleStart.IsZero() {
+			windowRuns, err = m.bs.QueryRunsInWindow(ctx, cycleStart.UTC(), cycleEnd.UTC())
+			if err != nil {
+				return BenchmarkDataMsg{Err: err}
+			}
+		}
+
+		// Build a lookup: agentID → run in this cycle (last run if multiple per agent per cycle).
+		runByAgent := make(map[string]store.BenchmarkRun, len(windowRuns))
+		for _, r := range windowRuns {
+			if existing, ok := runByAgent[r.AgentID]; !ok || r.RunAt.After(existing.RunAt) {
+				runByAgent[r.AgentID] = r
+			}
+		}
+
+		// ── 5. Build one row per agent (NO RUN placeholder if absent) ─────────
+		var page []store.BenchmarkRun
+		for _, agentID := range allIDs {
+			if run, ok := runByAgent[agentID]; ok {
+				page = append(page, run)
+			} else {
+				// Placeholder: AgentID set, RunAt zero → isNoData() returns true.
+				page = append(page, store.BenchmarkRun{AgentID: agentID})
+			}
+		}
+
+		// Sort: primary → subagent → all → built-in, then alphabetical.
+		sort.Slice(page, func(i, j int) bool {
+			ti := agentTypeOrder(typeByID[page[i].AgentID])
+			tj := agentTypeOrder(typeByID[page[j].AgentID])
 			if ti != tj {
 				return ti < tj
 			}
-			return all[i].AgentID < all[j].AgentID
+			return page[i].AgentID < page[j].AgentID
 		})
 
-		// Apply sliding-window pagination: slice out the current page.
-		start := pageOffset
-		if start > len(all) {
-			start = len(all)
-		}
-		end := start + maxBenchmarkRows
-		if end > len(all) {
-			end = len(all)
-		}
-		page := all[start:end]
-
-		// Fetch verdict trends for each agent in the current page (last 8 weeks).
+		// ── 6. Fetch verdict trends for each agent in the page (last 8 weeks) ─
 		trendByID := make(map[string][]string, len(page))
 		for _, run := range page {
 			trend, err := m.bs.GetVerdictTrend(ctx, run.AgentID, 8)
@@ -335,7 +372,7 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		return BenchmarkDataMsg{Runs: page, TypeByID: typeByID, TrendByID: trendByID}
+		return BenchmarkDataMsg{Runs: page, Cycles: cycles, TypeByID: typeByID, TrendByID: trendByID}
 	}
 }
 
@@ -406,11 +443,19 @@ func (m BenchmarkModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	// Pagination footer.
+	// Pagination footer: show cycle number (1-based from newest).
 	sb.WriteString("\n")
-	pageNum := m.pageOffset/maxBenchmarkRows + 1
-	footer := fmt.Sprintf("  %d entries shown  |  page %d  (PgUp/PgDn to navigate, ↑↓ to select, Enter to freeze detail)",
-		len(m.runs), pageNum)
+	totalCycles := len(m.cycles)
+	var cycleLabel string
+	if totalCycles > 0 {
+		cycleStart := m.cycles[m.cycleIndex]
+		cycleLabel = fmt.Sprintf("cycle %d/%d  (week of %s)",
+			m.cycleIndex+1, totalCycles, cycleStart.Local().Format("2006-01-02"))
+	} else {
+		cycleLabel = "cycle 1/1"
+	}
+	footer := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail)",
+		len(m.runs), cycleLabel)
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
