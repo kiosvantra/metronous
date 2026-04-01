@@ -54,10 +54,12 @@ This document explains the **methodology** behind Metronous: what data it collec
    The `benchmark.db` contains summary tables (`agent_summaries`, `benchmark_runs`) that are updated incrementally as new events arrive.
 
 3. **Weekly Benchmark Pipeline**  
-   By default, Metronous runs a benchmark analysis every Sunday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
+    By default, Metronous runs a benchmark analysis every Sunday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
 
-   ### a. Data Collection  
-   For each model seen in the selected time window (default: last 7 days), gather:
+    **Run Cycle alignment (TUI):** the "Benchmark Detailed" tab groups results into *Sunday-bounded weeks* in *local time*; this is what PgUp/PgDn navigates.
+
+    ### a. Data Collection  
+    For each model seen in the selected time window (default: last 7 days), gather:
    - Total number of events (`N`)
    - Sum of input and output tokens
    - Sum of `cost_usd`
@@ -65,7 +67,9 @@ This document explains the **methodology** behind Metronous: what data it collec
    - Sum of `quality_score` (only over events where it is present)
    - Latency measurements (end‑to‑end duration of agent sessions or tool calls, depending on configuration)
    - Tool usage rate (fraction of events that are `tool_call`)
-   - Outcome metrics: proportion of `KEEP` vs `SWITCH` veredicts emitted by the agent (if applicable)
+    - Outcome metrics: proportion of `KEEP` vs `SWITCH` verdicts emitted by the agent (if applicable)
+
+    - **Discovery filter:** agents that are effectively *error-only* are excluded from benchmark discovery to avoid `opencode/unknown` placeholders.
 
    ### b. Normalization  
    Each raw metric is converted to a **score in [0, 1]** so that disparate units can be combined.  
@@ -100,10 +104,10 @@ This document explains the **methodology** behind Metronous: what data it collec
    }
    ```
 
-   Because the cost score is `1.0` for any free model (price = 0 → min cost = 0 → score_cost = 1.0), free models automatically receive the full benefit of the `w_cost` term. This is intentional: Metronous should favor cheaper alternatives when other factors are equal.
-
-   ### d. Decision Thresholds  
-   The system does not declare a SWITCH simply because one model has a higher score. It requires a **minimum improvement** to avoid flapping on negligible differences.
+    Pricing can affect *decision triggers* (SWITCH/URGENT_SWITCH), not only raw scores. The pricing rules are defined in `model_pricing` in `thresholds.json`.
+ 
+    ### d. Decision Thresholds  
+    The system does not declare a SWITCH simply because one model has a higher score. It requires a **minimum improvement** to avoid flapping on negligible differences.
 
    - Let `S_base` be the score of the currently active baseline model for the agent being evaluated.
    - Let `S_cand` be the score of the candidate model being evaluated.
@@ -115,7 +119,12 @@ This document explains the **methodology** behind Metronous: what data it collec
    - Otherwise → **INSUFFICIENT_DATA** (or effectively KEEP if the UI treats it as such).  
      Typical defaults: `switch_threshold = 0.05`, `keep_threshold = 0.03`.
 
-   These thresholds are also configurable in `thresholds.json`.
+    These thresholds are also configurable in `thresholds.json`.
+
+    ### Pricing-aware behavior (free models and ROI neutrality)
+    Metronous applies the following overrides when deciding whether to trigger SWITCH/URGENT_SWITCH:
+    - **Free models (price == 0):** ROI/cost-driven triggers are skipped (ROI is ignored for these models).
+    - **Unreliable ROI (TotalCostUSD == 0):** ROI is neutralized; quality/latency/tool signals dominate.
 
 4. **Verdict Propagation**  
    The benchmark engine writes the winning model (or the directive to keep the current one) into `~/.metronous/thresholds.json` under the `active_model` key.  
@@ -132,7 +141,7 @@ This document explains the **methodology** behind Metronous: what data it collec
 5. **Why This Methodology Works**  
    - **Robustness to Noise**: By aggregating over a window and normalizing relative to peers, Metronous filters out day‑to‑day jitter (e.g., temporary network latency, varying prompt complexity).  
    - **Actionable Trade‑offs**: The weighted sum forces an explicit consideration of accuracy vs. speed vs. cost vs. tool usage—trade‑offs that teams already make intuitively but now see quantified.  
-   - **Cost‑Awareness**: Free models are not punished; they receive the maximum possible score on the cost dimension, making it easy to spot zero‑cost alternatives when they are comparable in other regards.  
+    - **Pricing-Aware Decisions**: Free models are not penalized via ROI/cost-driven triggers, and ROI is neutralized when cost data is unreliable.
    - **Low Operational Overhead**: Once installed as a systemd service, Metronous runs in the background with virtually no maintenance. The main periodic action is reviewing the benchmark verdict and deciding whether to update OpenCode model settings.  
    - **Extensibility**: New metrics (e.g., carbon footprint, safety scores) can be added by extending the event schema, adding a normalization rule, and assigning a weight—without changing the core pipeline logic.
 

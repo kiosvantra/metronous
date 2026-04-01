@@ -31,7 +31,7 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service)
 - **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
 - **Daemon (metronous)**: Long-lived system service (systemd on Linux, Windows SCM on Windows) that handles telemetry ingestion, storage, and weekly benchmarks
 - **HTTP Endpoint**: Dynamic port (written to `~/.metronous/data/mcp.port`) for shim-to-daemon communication
-- **TUI Dashboard**: 3-tab terminal UI (Tracking / Benchmark / Config)
+- **TUI Dashboard**: 4-tab terminal UI (Tracking / Benchmark Summary / Benchmark Detailed / Config)
 
 ## Prerequisites
 
@@ -168,8 +168,11 @@ metronous dashboard
 ```
 
 - **[1] Tracking** — Real-time event stream with tokens and cost per tool call
-- **[2] Benchmark** — Agent performance history with verdict, recommended model, and savings estimate
-- **[3] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
+- **[2] Benchmark Summary** — Aggregated benchmark table with verdicts and recommendations
+- **[3] Benchmark Detailed** — Per-agent run history grouped into Sunday-bounded cycles (freeze detail with Enter)
+- **[4] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
+
+For TUI navigation keys, see [docs/tui-controls.md](docs/tui-controls.md).
 
 ### Manual benchmark
 

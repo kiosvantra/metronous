@@ -77,17 +77,18 @@ This document describes the runtime architecture of Metronous, focusing on compo
    - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
 
 4. **Daemon Ingestion**  
-   - Daemon’s HTTP handler (`ingestHandler`) receives the POST, deserializes the JSON, and passes it to `tracking.HandleIngest`.
-   - `Handlingest` writes the event into `tracking.db` (events table) and updates the in‑memory `agent_summaries` table (via `upsertAgentSummary` inside a transaction).
+    - Daemon’s HTTP handler (`ingestHandler`) receives the POST, deserializes the JSON, and passes it to `tracking.HandleIngest`.
+    - `tracking.HandleIngest` writes the event into `tracking.db` (events table) and updates benchmark aggregates (via `upsertAgentSummary` inside a transaction).
 
 5. **Storage**  
    - `tracking.db` stores every raw event (append‑only, WAL mode for concurrent readers/writers).
    - `benchmark.db` holds pre‑aggregated summaries used by the weekly benchmark engine (updated incrementally as events arrive).
 
 6. **Weekly Benchmark**  
-   - At the configured time (default: Sundays 02:00 local), the daemon triggers the benchmark engine.
-   - Engine reads aggregates from `benchmark.db`, computes per‑model scores (accuracy, latency_p95, tool_rate, cost, quality), normalizes them against the min/max observed across all models in the window, applies weights, and calculates delta vs. baseline.
-   - Result: a veredict (`KEEP`, `SWITCH`, or `INSUFFICIENT_DATA`) per model, plus an `active_model` recommendation written to `~/.metronous/thresholds.json`.
+    - At the configured time (default: Sundays 02:00 local), the daemon triggers the benchmark engine.
+    - Engine reads aggregates from `benchmark.db`, computes per‑model scores (accuracy, latency_p95, tool_rate, cost, quality), normalizes them against the min/max observed across all models in the window, applies weights, and calculates delta vs. baseline.
+    - Benchmark discovery excludes effectively error-only agents to avoid placeholder rows like `opencode/unknown` and `INSUFFICIENT_DATA`.
+    - Result: a verdict (`KEEP`, `SWITCH`, or `INSUFFICIENT_DATA`) per model, plus an `active_model` recommendation written to `~/.metronous/thresholds.json`.
 
 7. **Presentation**  
    - TUI Dashboard reads `tracking.db` (for real‑time event stream) and `benchmark.db`/`thresholds.json` (for benchmark tab and active model display).
