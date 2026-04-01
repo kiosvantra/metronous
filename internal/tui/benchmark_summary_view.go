@@ -305,8 +305,9 @@ func (m BenchmarkSummaryModel) View() string {
 		healthCell := healthStyle(row.HealthScore).Inherit(baseStyle).Render(
 			fmt.Sprintf("%-*s", summaryColWidths[healthColIdx], cells[healthColIdx]))
 		rendered += healthCell
-		// Last Verdict column with verdict colour.
-		verdictCell := verdictStyle(row.LastVerdict).Inherit(baseStyle).Render(
+		// Last Verdict column: remove cursor background from this specific column.
+		// We keep only verdict foreground colour.
+		verdictCell := verdictStyle(row.LastVerdict).Render(
 			fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
 		rendered += " " + verdictCell
 
