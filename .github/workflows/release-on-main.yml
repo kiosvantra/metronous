@@ -44,6 +44,9 @@ jobs:
         uses: goreleaser/goreleaser-action@v5
         with:
           version: v2.14.3
-          args: release --clean
+          # Since this workflow runs on every push to main (not on tag events),
+          # use --snapshot so GoReleaser does not require a tag to exist on
+          # the current commit.
+          args: release --clean --snapshot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
