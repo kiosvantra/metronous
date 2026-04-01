@@ -1,0 +1,31 @@
+name: Versioning - Conventional Commits (Warnings)
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Conventional Commits check (warning only)
+        run: |
+          BASE='${{ github.event.pull_request.base.sha }}'
+          HEAD='${{ github.event.pull_request.head.sha }}'
+          RANGE="$BASE...$HEAD"
+          python .github/scripts/validate-conventional-commits.py --range "$RANGE"
+
+          # Always succeed (this workflow is warning-only)
