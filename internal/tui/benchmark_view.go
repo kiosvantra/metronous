@@ -373,15 +373,24 @@ func (m BenchmarkModel) View() string {
 		agentType := m.typeByID[run.AgentID]
 		row := formatBenchmarkRow(run, agentType, m.pricing)
 		baseStyle := lipgloss.NewStyle()
-		if i == m.cursor {
+		isNoDataRow := isNoData(run)
+		// For NO DATA rows: make the entire line grey, and do not apply cursor background.
+		if isNoDataRow {
+			baseStyle = dimStyle
+		} else if i == m.cursor {
 			baseStyle = cursorStyle
 		}
 		// Render columns before Verdict without special colour.
 		// verdictColIdx = 5 (Time, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
 		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
-		// Verdict column with colour — combine cursor background with verdict foreground.
-		verdictCell := verdictStyle(run.Verdict).Inherit(baseStyle).Render(
-			fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		// Verdict column: remove cursor background from this specific column.
+		var verdictCell string
+		if isNoDataRow {
+			verdictCell = dimStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		} else {
+			verdictCell = verdictStyle(run.Verdict).Render(
+				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		}
 		rendered += verdictCell
 		// → Model column (index 6).
 		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
