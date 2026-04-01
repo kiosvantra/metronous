@@ -32,7 +32,7 @@ type summaryRow struct {
 	Runs         int     // total benchmark runs
 	AvgAccuracy  float64 // weighted average accuracy
 	AvgP95Ms     float64 // weighted average P95 latency
-	TotalCostUSD float64 // sum of all run costs
+	TotalCostUSD float64 // cost from the run used for LastVerdict
 	HealthScore  float64 // composite 0-100 (higher is better)
 	LastVerdict  store.VerdictType
 	LastRunAt    time.Time
@@ -42,7 +42,7 @@ type summaryRow struct {
 // Columns: Agent | Model | Runs | Accuracy | P95 | Total Cost | Health | Last Verdict
 var (
 	summaryColWidths = []int{18, 22, 5, 10, 12, 12, 8, 20}
-	summaryColNames  = []string{"Agent", "Model", "Runs", "Accuracy", "P95 Latency", "Total Cost", "Health", "Last Verdict"}
+	summaryColNames  = []string{"Agent", "Model", "Runs", "Accuracy", "P95 Latency", "Last Cost", "Health", "Last Verdict"}
 )
 
 // healthStyle returns a colour for the health score (0-100).
@@ -188,7 +188,7 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			totalSamples int
 			sumAccuracy  float64
 			sumP95       float64
-			totalCost    float64
+			lastCostUSD  float64
 			lastVerdict  store.VerdictType
 			lastRunAt    time.Time
 		}
@@ -225,7 +225,9 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 					a.sumP95 += r.P95LatencyMs * float64(samples)
 				}
 				a.runs++
-				a.totalCost += r.TotalCostUSD
+				// Cost is not accumulated across runs because weekly/intraweek
+				// windows overlap, which would double-count events.
+				// We keep cost aligned with LastVerdict (lastCostUSD).
 
 				// LastVerdict: prefer the most recent non-INSUFFICIENT_DATA verdict.
 				// Falls back to INSUFFICIENT_DATA only if no valid run exists.
@@ -234,10 +236,12 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 						// Non-insufficient run is always a better LastVerdict candidate.
 						a.lastRunAt = r.RunAt
 						a.lastVerdict = r.Verdict
+						a.lastCostUSD = r.TotalCostUSD
 					} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
 						// Only use INSUFFICIENT_DATA if we have nothing better yet.
 						a.lastRunAt = r.RunAt
 						a.lastVerdict = r.Verdict
+						a.lastCostUSD = r.TotalCostUSD
 					}
 				}
 			}
@@ -259,7 +263,7 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 				Runs:         a.runs,
 				AvgAccuracy:  avgAcc,
 				AvgP95Ms:     avgP95,
-				TotalCostUSD: a.totalCost,
+				TotalCostUSD: a.lastCostUSD,
 				HealthScore:  health,
 				LastVerdict:  a.lastVerdict,
 				LastRunAt:    a.lastRunAt,
@@ -420,7 +424,7 @@ func (m BenchmarkSummaryModel) View() string {
 		writeDetailField(&sb, "Runs", fmt.Sprintf("%d benchmark run(s)", r.Runs))
 		writeDetailField(&sb, "Accuracy", fmt.Sprintf("%.1f%%  (weighted avg)", r.AvgAccuracy*100))
 		writeDetailField(&sb, "P95", fmt.Sprintf("%.0fms  (weighted avg)", r.AvgP95Ms))
-		writeDetailField(&sb, "Cost", fmt.Sprintf("$%.4f  (total across all runs)", r.TotalCostUSD))
+		writeDetailField(&sb, "Cost", fmt.Sprintf("$%.4f  (from last verdict run)", r.TotalCostUSD))
 		writeDetailField(&sb, "Health", fmt.Sprintf("%.0f / 100", r.HealthScore))
 		writeDetailField(&sb, "Verdict", string(r.LastVerdict))
 		if !r.LastRunAt.IsZero() {
