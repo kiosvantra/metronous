@@ -2,11 +2,15 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/kiosvantra/metronous/internal/store"
 	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
+
+	// Register the SQLite driver used by the rest of the test suite.
+	_ "modernc.org/sqlite"
 )
 
 // newTestBenchmarkStore creates an in-memory BenchmarkStore for testing.
@@ -801,5 +805,148 @@ func TestListRunCyclesNilLocDefaultsToLocal(t *testing.T) {
 	}
 	if len(cycles) != 1 {
 		t.Errorf("expected 1 cycle, got %d", len(cycles))
+	}
+}
+
+// ─── RunKind / WindowStart / WindowEnd tests ─────────────────────────────────
+
+// TestBenchmarkMigrationAddsNewColumns verifies that ApplyBenchmarkMigrations adds
+// run_kind, window_start, and window_end without breaking existing data.
+// It simulates an "old" database by creating the schema without the new columns,
+// inserting a row with the old INSERT, then applying migrations and verifying
+// the new columns exist with their default values.
+func TestBenchmarkMigrationAddsNewColumns(t *testing.T) {
+	ctx := context.Background()
+
+	// Open a raw in-memory SQLite DB using the same driver as the rest of the test suite.
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer rawDB.Close()
+
+	// Create the "old" schema without run_kind / window_start / window_end.
+	oldSchema := `
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    id                TEXT PRIMARY KEY,
+    run_at            INTEGER NOT NULL,
+    window_days       INTEGER NOT NULL DEFAULT 7,
+    agent_id          TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    accuracy          REAL NOT NULL DEFAULT 0.0,
+    avg_latency_ms    REAL NOT NULL DEFAULT 0.0,
+    p50_latency_ms    REAL NOT NULL DEFAULT 0.0,
+    p95_latency_ms    REAL NOT NULL DEFAULT 0.0,
+    p99_latency_ms    REAL NOT NULL DEFAULT 0.0,
+    tool_success_rate REAL NOT NULL DEFAULT 0.0,
+    roi_score         REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    sample_size       INTEGER NOT NULL DEFAULT 0,
+    verdict           TEXT NOT NULL,
+    recommended_model TEXT NOT NULL DEFAULT '',
+    decision_reason   TEXT NOT NULL DEFAULT '',
+    artifact_path     TEXT NOT NULL DEFAULT '',
+    avg_quality_score REAL NOT NULL DEFAULT 0.0
+);`
+	if _, err := rawDB.ExecContext(ctx, oldSchema); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+
+	// Insert a legacy row using only the old columns.
+	const oldInsert = `INSERT INTO benchmark_runs
+		(id, run_at, window_days, agent_id, model, verdict, avg_quality_score)
+		VALUES ('legacy-1', 1700000000000, 7, 'old-agent', 'gpt-4', 'KEEP', 0.9)`
+	if _, err := rawDB.ExecContext(ctx, oldInsert); err != nil {
+		t.Fatalf("old insert: %v", err)
+	}
+
+	// Now apply migrations — should add run_kind, window_start, window_end idempotently.
+	if err := sqlitestore.ApplyBenchmarkMigrations(ctx, rawDB); err != nil {
+		t.Fatalf("ApplyBenchmarkMigrations: %v", err)
+	}
+
+	// Verify the legacy row can be read via the full SELECT list.
+	const q = `SELECT run_kind, window_start, window_end FROM benchmark_runs WHERE id = 'legacy-1'`
+	row := rawDB.QueryRowContext(ctx, q)
+	var runKind string
+	var windowStart, windowEnd int64
+	if err := row.Scan(&runKind, &windowStart, &windowEnd); err != nil {
+		t.Fatalf("scan new columns: %v", err)
+	}
+	if runKind != "weekly" {
+		t.Errorf("run_kind default: got %q, want 'weekly'", runKind)
+	}
+	if windowStart != 0 {
+		t.Errorf("window_start default: got %d, want 0", windowStart)
+	}
+	if windowEnd != 0 {
+		t.Errorf("window_end default: got %d, want 0", windowEnd)
+	}
+
+	// Calling ApplyBenchmarkMigrations again must be idempotent (no error).
+	if err := sqlitestore.ApplyBenchmarkMigrations(ctx, rawDB); err != nil {
+		t.Fatalf("second ApplyBenchmarkMigrations: %v", err)
+	}
+}
+
+// TestSaveRunPreservesRunKindAndWindow verifies that RunKind, WindowStart,
+// and WindowEnd round-trip correctly through SaveRun → GetLatestRun.
+func TestSaveRunPreservesRunKindAndWindow(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	windowStart := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	windowEnd := time.Date(2024, 3, 4, 12, 0, 0, 0, time.UTC)
+
+	run := sampleRun("kind-agent", store.VerdictKeep)
+	run.RunKind = store.RunKindIntraweek
+	run.WindowStart = windowStart.Truncate(time.Millisecond)
+	run.WindowEnd = windowEnd.Truncate(time.Millisecond)
+
+	if err := bs.SaveRun(ctx, run); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+
+	got, err := bs.GetLatestRun(ctx, "kind-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetLatestRun returned nil")
+	}
+	if got.RunKind != store.RunKindIntraweek {
+		t.Errorf("RunKind: got %q, want %q", got.RunKind, store.RunKindIntraweek)
+	}
+	if !got.WindowStart.Equal(windowStart) {
+		t.Errorf("WindowStart: got %v, want %v", got.WindowStart, windowStart)
+	}
+	if !got.WindowEnd.Equal(windowEnd) {
+		t.Errorf("WindowEnd: got %v, want %v", got.WindowEnd, windowEnd)
+	}
+}
+
+// TestSaveRunDefaultsRunKindToWeekly verifies that a run with empty RunKind is
+// stored and retrieved as RunKindWeekly.
+func TestSaveRunDefaultsRunKindToWeekly(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	run := sampleRun("default-kind-agent", store.VerdictKeep)
+	// Leave RunKind unset (zero value).
+	run.RunKind = ""
+
+	if err := bs.SaveRun(ctx, run); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+
+	got, err := bs.GetLatestRun(ctx, "default-kind-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetLatestRun returned nil")
+	}
+	if got.RunKind != store.RunKindWeekly {
+		t.Errorf("RunKind: got %q, want %q (default should be weekly)", got.RunKind, store.RunKindWeekly)
 	}
 }

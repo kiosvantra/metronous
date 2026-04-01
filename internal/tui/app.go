@@ -16,6 +16,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kiosvantra/metronous/internal/config"
+	"github.com/kiosvantra/metronous/internal/decision"
+	"github.com/kiosvantra/metronous/internal/runner"
 	"github.com/kiosvantra/metronous/internal/store"
 	"github.com/kiosvantra/metronous/internal/version"
 )
@@ -107,11 +110,26 @@ type AppModel struct {
 // workDir is the current working directory used for project-level agent discovery.
 // version is the current application version for update checking.
 func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string, dataDir string, workDir string, version string) AppModel {
+	// Build an intraweek runner when all dependencies are available.
+	// If any dependency is nil, the runner is omitted and F5 is a no-op.
+	var iwr IntraweekRunner
+	if es != nil && bs != nil {
+		thresholdsPath := dataDir + "/../thresholds.json"
+		thresholds, err := decision.LoadThresholds(thresholdsPath)
+		if err != nil {
+			// Fall back to defaults when the file cannot be read.
+			defaults := config.DefaultThresholdValues()
+			thresholds = &defaults
+		}
+		engine := decision.NewDecisionEngine(thresholds)
+		iwr = runner.NewRunner(es, bs, engine, dataDir, nil)
+	}
+
 	return AppModel{
 		CurrentTab:       TabTracking,
 		tracking:         NewTrackingModel(es),
 		benchmarkSummary: NewBenchmarkSummaryModel(bs),
-		benchmark:        NewBenchmarkModel(bs, dataDir, workDir),
+		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
 		config:           NewConfigModel(configPath),
 		CurrentVersion:   version,
 		UpdateAvailable:  false,
