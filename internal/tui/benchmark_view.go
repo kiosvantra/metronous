@@ -343,7 +343,7 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 func (m BenchmarkModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Benchmark History") + "\n\n")
+	sb.WriteString(titleStyle.Render("Run Cycle") + "\n\n")
 
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
