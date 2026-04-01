@@ -301,6 +301,17 @@ type BenchmarkStore interface {
 	// ordered oldest first. Returns an empty slice if no runs exist.
 	GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error)
 
+	// ListRunCycles returns the distinct week-start timestamps (Sunday 00:00 local time,
+	// stored as UTC) for all benchmark runs, ordered newest first.
+	// Each returned time is the start of the ISO week (Sunday) that contains at least
+	// one run_at value in the database.
+	// limit=0 returns all cycles; offset skips the first N cycles for pagination.
+	ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error)
+
+	// QueryRunsInWindow returns all benchmark runs whose run_at falls within
+	// [since, until) (inclusive start, exclusive end), ordered by run_at DESC.
+	QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]BenchmarkRun, error)
+
 	// Close releases all resources held by the store.
 	Close() error
 }

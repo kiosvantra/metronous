@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/store"
 )
@@ -35,12 +37,14 @@ func TrendDirection(verdicts []string) string {
 	return trendDirection(verdicts)
 }
 
-// BenchmarkPageSize exposes maxBenchmarkRows for pagination tests.
-const BenchmarkPageSize = maxBenchmarkRows
+// GetBenchmarkCycleIndex returns the current cycleIndex for tests.
+func GetBenchmarkCycleIndex(m BenchmarkModel) int {
+	return m.cycleIndex
+}
 
-// GetBenchmarkPageOffset returns the current pageOffset for tests.
-func GetBenchmarkPageOffset(m BenchmarkModel) int {
-	return m.pageOffset
+// GetBenchmarkCycles returns the list of cycle week-starts for tests.
+func GetBenchmarkCycles(m BenchmarkModel) []time.Time {
+	return m.cycles
 }
 
 // GetBenchmarkCursor returns the current cursor for tests.
