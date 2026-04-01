@@ -196,6 +196,12 @@ func (r *Runner) discoverAgents(ctx context.Context, start, end time.Time) ([]st
 	seen := make(map[string]struct{})
 	var agents []string
 	for _, e := range events {
+		// Only consider agents that emitted at least one non-error event.
+		// Error-only agents usually come from telemetry ingestion issues and
+		// produce INSUFFICIENT_DATA benchmark entries (e.g. model == "unknown").
+		if e.EventType == "error" {
+			continue
+		}
 		if _, ok := seen[e.AgentID]; !ok {
 			seen[e.AgentID] = struct{}{}
 			agents = append(agents, e.AgentID)
