@@ -59,12 +59,13 @@ func healthStyle(score float64) lipgloss.Style {
 
 // BenchmarkSummaryModel is the Bubble Tea sub-model for the benchmark summary tab.
 type BenchmarkSummaryModel struct {
-	bs      store.BenchmarkStore
-	rows    []summaryRow
-	err     error
-	cursor  int
-	offset  int
-	loading bool
+	bs            store.BenchmarkStore
+	rows          []summaryRow
+	err           error
+	cursor        int
+	offset        int
+	loading       bool
+	lastViewLines int
 }
 
 const maxSummaryRows = 10
@@ -323,7 +324,7 @@ func max64(a, b float64) float64 {
 }
 
 // View renders the benchmark summary tab.
-func (m BenchmarkSummaryModel) View() string {
+func (m *BenchmarkSummaryModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Benchmark Summary") + "\n\n")
@@ -433,14 +434,13 @@ func (m BenchmarkSummaryModel) View() string {
 	}
 
 	out := sb.String()
-	// Pad to a minimum line count to avoid terminal remnant artifacts when
-	// the cursor moves (detail panel content changes). This keeps the table
-	// header visible and prevents rows from appearing to "disappear".
-	const minLines = 55
+	// Stabilize output height across cursor moves so the terminal does not show
+	// remnants or cause implicit scrolling.
 	lineCount := strings.Count(out, "\n")
-	if lineCount < minLines {
-		out += strings.Repeat("\n", minLines-lineCount)
+	if lineCount < m.lastViewLines {
+		out += strings.Repeat("\n", m.lastViewLines-lineCount)
 	}
+	m.lastViewLines = maxInt(m.lastViewLines, lineCount)
 	return out
 }
 
