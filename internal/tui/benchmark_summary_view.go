@@ -63,7 +63,24 @@ type BenchmarkSummaryModel struct {
 	rows    []summaryRow
 	err     error
 	cursor  int
+	offset  int
 	loading bool
+}
+
+const maxSummaryRows = 10
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // NewBenchmarkSummaryModel creates a BenchmarkSummaryModel wired to the given BenchmarkStore.
@@ -71,6 +88,7 @@ func NewBenchmarkSummaryModel(bs store.BenchmarkStore) BenchmarkSummaryModel {
 	return BenchmarkSummaryModel{
 		bs:      bs,
 		loading: true,
+		offset:  0,
 	}
 }
 
@@ -107,6 +125,21 @@ func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.C
 					m.cursor = 0
 				}
 			}
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			// Clamp offset so cursor is visible.
+			if m.cursor < m.offset {
+				m.offset = m.cursor
+			}
+			if m.cursor >= m.offset+maxSummaryRows {
+				m.offset = m.cursor - (maxSummaryRows - 1)
+			}
+			// Clamp offset to valid range.
+			maxOffset := maxInt(0, len(m.rows)-maxSummaryRows)
+			if m.offset > maxOffset {
+				m.offset = maxOffset
+			}
 		}
 		return m, nil
 
@@ -115,10 +148,16 @@ func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.C
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
+				if m.cursor < m.offset {
+					m.offset = m.cursor
+				}
 			}
 		case "down", "j":
 			if m.cursor < len(m.rows)-1 {
 				m.cursor++
+				if m.cursor >= m.offset+maxSummaryRows {
+					m.offset = m.cursor - (maxSummaryRows - 1)
+				}
 			}
 		}
 	}
@@ -304,9 +343,24 @@ func (m BenchmarkSummaryModel) View() string {
 	sb.WriteString(strings.Repeat("─", totalWidth(summaryColWidths)) + "\n")
 
 	// Data rows.
-	for i, row := range m.rows {
+	offset := m.offset
+	maxOffset := maxInt(0, len(m.rows)-maxSummaryRows)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	end := minInt(len(m.rows), offset+maxSummaryRows)
+	visible := []summaryRow(nil)
+	if offset < len(m.rows) {
+		visible = m.rows[offset:end]
+	}
+
+	for i, row := range visible {
+		absIdx := offset + i
 		baseStyle := lipgloss.NewStyle()
-		if i == m.cursor {
+		if absIdx == m.cursor {
 			baseStyle = cursorStyle
 		}
 
@@ -340,8 +394,16 @@ func (m BenchmarkSummaryModel) View() string {
 
 	// Footer.
 	sb.WriteString("\n")
-	footer := fmt.Sprintf("  %d agent/model pair(s)  |  ↑↓ to navigate  |  3: switch to Detailed view",
-		len(m.rows))
+	pageNum := 1
+	if len(m.rows) > 0 {
+		pageNum = m.offset/maxSummaryRows + 1
+	}
+	totalPages := 1
+	if len(m.rows) > 0 {
+		totalPages = (len(m.rows) + maxSummaryRows - 1) / maxSummaryRows
+	}
+	footer := fmt.Sprintf("  %d agent/model pair(s)  |  page %d/%d  |  ↑↓ to navigate  |  3: switch to Detailed view",
+		len(m.rows), pageNum, totalPages)
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
 
