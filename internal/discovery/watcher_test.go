@@ -37,7 +37,8 @@ func TestWatcherEmitsCreateWriteRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Debounce can be slower on macOS runners depending on fs notification coalescing.
-	expectEvent(t, w.Events(), discovery.EventWrite, testFile, 5*time.Second)
+	// Keep this timeout generous to avoid CI flakiness.
+	expectEvent(t, w.Events(), discovery.EventWrite, testFile, 10*time.Second)
 
 	// REMOVE
 	if err := os.Remove(testFile); err != nil {
