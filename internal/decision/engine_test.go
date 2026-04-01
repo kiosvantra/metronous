@@ -91,11 +91,29 @@ func TestVerdictSwitchLowToolRate(t *testing.T) {
 func TestVerdictSwitchLowROI(t *testing.T) {
 	defaults := config.DefaultThresholdValues()
 	m := goodMetrics("agent-a")
+	m.TotalCostUSD = 2.0
 	m.ROIScore = 0.02 // Below MinROIScore=0.05
 
 	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
 	if vt != store.VerdictSwitch {
 		t.Errorf("expected VerdictSwitch, got %s", vt)
+	}
+}
+
+// TestVerdictKeepWhenCostMissingAndLowROI verifies that ROI is ignored when
+// TotalCostUSD==0 (cost data unreliable), so low ROIScore should not force a SWITCH.
+func TestVerdictKeepWhenCostMissingAndLowROI(t *testing.T) {
+	defaults := config.DefaultThresholdValues()
+	m := goodMetrics("agent-a")
+	m.TotalCostUSD = 0
+	m.ROIScore = 0.02 // would fail if ROI were considered
+	m.Accuracy = 0.92
+	m.P95LatencyMs = 15000
+	m.ToolSuccessRate = 0.95
+
+	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
+	if vt != store.VerdictKeep {
+		t.Errorf("expected VerdictKeep, got %s", vt)
 	}
 }
 
@@ -154,6 +172,7 @@ func TestVerdictTableDriven(t *testing.T) {
 		{"switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictSwitch},
 		{"switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictSwitch},
 		{"switch low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01 }, store.VerdictSwitch},
+		{"keep low roi when cost missing", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01; m.TotalCostUSD = 0 }, store.VerdictKeep},
 	}
 
 	for _, tc := range tests {

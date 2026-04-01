@@ -33,42 +33,9 @@ type Verdict struct {
 	Metrics benchmark.WindowMetrics
 }
 
-// roiActive returns true when the ROI/cost rule should participate in the decision.
-//
-// ROI is suppressed when either:
-//  1. The model is free (price == 0 in model_pricing) — quality is the only axis that
-//     matters for free models because there is no cost to optimize.
-//  2. The cost data is unreliable — TotalCostUSD == 0 means no real billing data was
-//     collected, so an ROI score derived from it would be meaningless.
-func roiActive(model string, m benchmark.WindowMetrics, thresholds *config.Thresholds) bool {
-	if thresholds.IsModelFree(model) {
-		return false
-	}
-	// Paid model but cost data is unreliable — suppress ROI to avoid false positives.
-	if m.TotalCostUSD == 0 {
-		return false
-	}
-	return true
-}
-
 // EvaluateRules applies threshold rules to the given metrics and returns the verdict type.
 // Urgent triggers are checked first; then switch triggers; finally KEEP.
-//
-// For free models (price == 0) or when cost data is unreliable (TotalCostUSD == 0),
-// the ROI check is skipped so that only quality metrics (accuracy, error rate, latency,
-// tool success rate) can trigger a SWITCH or URGENT_SWITCH.
 func EvaluateRules(m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers) store.VerdictType {
-	return EvaluateRulesWithPricing(m, thresholds, urgent, nil)
-}
-
-// EvaluateRulesWithPricing is the full-featured variant of EvaluateRules that
-// honours the model pricing table when deciding whether ROI participates.
-// Pass the root *config.Thresholds (not the flattened DefaultThresholds) so that
-// the pricing map is accessible.
-//
-// Callers that do not have access to the root Thresholds can use EvaluateRules,
-// which falls back to the old behaviour (ROI always active).
-func EvaluateRulesWithPricing(m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers, root *config.Thresholds) store.VerdictType {
 	// Insufficient data check.
 	if m.SampleSize < benchmark.MinSampleSize {
 		return store.VerdictInsufficientData
@@ -92,9 +59,9 @@ func EvaluateRulesWithPricing(m benchmark.WindowMetrics, thresholds config.Defau
 	if m.ToolSuccessRate < thresholds.MinToolSuccessRate {
 		return store.VerdictSwitch
 	}
-
-	// ROI check: only when the model is paid AND cost data is reliable.
-	if roiActive(m.Model, m, root) && m.ROIScore < thresholds.MinROIScore {
+	// ROI is reliable only when we have non-zero cost data.
+	// When TotalCostUSD==0, treat ROI as non-blocking to avoid noise.
+	if m.TotalCostUSD > 0 && m.ROIScore < thresholds.MinROIScore {
 		return store.VerdictSwitch
 	}
 
@@ -105,14 +72,6 @@ func EvaluateRulesWithPricing(m benchmark.WindowMetrics, thresholds config.Defau
 // For URGENT_SWITCH and SWITCH verdicts, all failing thresholds are accumulated
 // and joined with "; " so users see every issue at once.
 func BuildReason(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers) string {
-	return BuildReasonWithPricing(vt, m, thresholds, urgent, nil)
-}
-
-// BuildReasonWithPricing is the full-featured variant that includes a note in the
-// reason string when ROI is being ignored due to free model or unreliable cost data.
-func BuildReasonWithPricing(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers, root *config.Thresholds) string {
-	roiEnabled := roiActive(m.Model, m, root)
-
 	switch vt {
 	case store.VerdictInsufficientData:
 		return fmt.Sprintf("Insufficient data: only %d events (minimum %d required)", m.SampleSize, benchmark.MinSampleSize)
@@ -141,8 +100,15 @@ func BuildReasonWithPricing(vt store.VerdictType, m benchmark.WindowMetrics, thr
 		if m.ToolSuccessRate < thresholds.MinToolSuccessRate {
 			failures = append(failures, fmt.Sprintf("Tool success rate %.2f below threshold %.2f", m.ToolSuccessRate, thresholds.MinToolSuccessRate))
 		}
-		if roiEnabled && m.ROIScore < thresholds.MinROIScore {
-			failures = append(failures, fmt.Sprintf("ROI score %.2f below threshold %.2f", m.ROIScore, thresholds.MinROIScore))
+		if m.TotalCostUSD > 0 {
+			if m.ROIScore < thresholds.MinROIScore {
+				failures = append(failures, fmt.Sprintf("ROI score %.2f below threshold %.2f", m.ROIScore, thresholds.MinROIScore))
+			}
+		} else {
+			// When cost is missing/unreliable (TotalCostUSD==0), ROI thresholds are ignored.
+			if m.ROIScore < thresholds.MinROIScore {
+				failures = append(failures, fmt.Sprintf("ROI ignored (TotalCostUSD==0; roi=%.2f < %.2f)", m.ROIScore, thresholds.MinROIScore))
+			}
 		}
 		if len(failures) > 0 {
 			return strings.Join(failures, "; ")
@@ -150,16 +116,8 @@ func BuildReasonWithPricing(vt store.VerdictType, m benchmark.WindowMetrics, thr
 		return "One or more soft thresholds breached"
 
 	case store.VerdictKeep:
-		base := fmt.Sprintf("All thresholds passed (accuracy=%.2f, p95=%.0fms, tool_rate=%.2f, roi=%.2f)",
+		return fmt.Sprintf("All thresholds passed (accuracy=%.2f, p95=%.0fms, tool_rate=%.2f, roi=%.2f)",
 			m.Accuracy, m.P95LatencyMs, m.ToolSuccessRate, m.ROIScore)
-		if !roiEnabled {
-			if root != nil && root.IsModelFree(m.Model) {
-				base += fmt.Sprintf("; ROI ignored (free model: %s)", m.Model)
-			} else {
-				base += "; ROI ignored (unreliable cost data: TotalCostUSD=0)"
-			}
-		}
-		return base
 
 	default:
 		return "Unknown verdict"
