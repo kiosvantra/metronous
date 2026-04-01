@@ -24,9 +24,6 @@ jobs:
       - name: Compute next version (SemVer) and release notes
         run: |
           python .github/scripts/bump-version.py --out-version version.txt --out-notes release_notes.md
-        env:
-          # Uses the repo-local script so you can adjust behavior later.
-          # bump-version.py is copied from the environment template.
 
       - name: Create and push tag
         env:
