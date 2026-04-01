@@ -51,13 +51,28 @@ jobs:
 
       - name: Create local tag
         run: |
-          git tag -a "${{ steps.version.outputs.next_tag }}" -m "Release ${{ steps.version.outputs.next_tag }}" || true
+          # Ensure git identity so annotated tags can be created.
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+          if git show-ref --tags --verify --quiet "refs/tags/$NEXT_TAG"; then
+            echo "Tag $NEXT_TAG already exists locally"
+          else
+            git tag -a "$NEXT_TAG" -m "Release $NEXT_TAG"
+          fi
 
       - name: Push tag to GitHub
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git push origin "${{ steps.version.outputs.next_tag }}" || true
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+          # Duplicate pushes are ignored by git.
+          git push origin "$NEXT_TAG"
+
+      - name: Cleanup workspace before GoReleaser
+        run: |
+          # GoReleaser fails on a dirty git working tree.
+          rm -f version.txt release_notes.md || true
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -71,3 +86,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          rm -f version.txt release_notes.md || true
