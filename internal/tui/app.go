@@ -96,6 +96,10 @@ type AppModel struct {
 	// StatusMsg is a transient message shown at the bottom of the screen.
 	StatusMsg string
 
+	// needsClear triggers an ANSI clear only when switching between tabs.
+	// Doing it on every render can cause terminal redraw artifacts.
+	needsClear bool
+
 	// UpdateAvailable indicates a new version is available.
 	UpdateAvailable bool
 	// LatestVersion is the version string of the latest release.
@@ -132,6 +136,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
 		config:           NewConfigModel(configPath),
 		CurrentVersion:   version,
+		needsClear:       true,
 		UpdateAvailable:  false,
 		LatestVersion:    "",
 	}
@@ -290,30 +295,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "1":
 			m.CurrentTab = TabTracking
+			m.needsClear = true
 			return m, nil
 
 		case "2":
 			m.CurrentTab = TabBenchmarkSummary
+			m.needsClear = true
 			return m, nil
 
 		case "3":
 			m.CurrentTab = TabBenchmarkDetailed
+			m.needsClear = true
 			return m, nil
 
 		case "4":
 			m.CurrentTab = TabConfig
+			m.needsClear = true
 			return m, nil
 
 		case "left":
 			if m.CurrentTab > 0 {
 				m.CurrentTab--
 			}
+			m.needsClear = true
 			return m, nil
 
 		case "right":
 			if int(m.CurrentTab) < numTabs-1 {
 				m.CurrentTab++
 			}
+			m.needsClear = true
 			return m, nil
 
 		case "ctrl+s":
@@ -369,9 +380,12 @@ func (m *AppModel) View() string {
 		return "loading…"
 	}
 
-	// Clear screen to avoid rendering artifacts when switching tabs/views.
-	// This helps prevent stale lines from previous views from remaining visible.
 	clearSeq := "\x1b[2J\x1b[H"
+	prefix := ""
+	if m.needsClear {
+		prefix = clearSeq
+		m.needsClear = false
+	}
 
 	// Tab bar.
 	tabBar := m.renderTabBar()
@@ -406,7 +420,7 @@ func (m *AppModel) View() string {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
-	return clearSeq + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
+	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
 }
 
 // renderTabBar returns the rendered tab bar string with the current version on the right.
