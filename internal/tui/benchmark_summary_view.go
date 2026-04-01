@@ -171,19 +171,35 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 					a = &agg{}
 					aggMap[k] = a
 				}
-				samples := r.SampleSize
-				if samples <= 0 {
-					samples = 1
+
+				// INSUFFICIENT_DATA runs are excluded from metric averages and health
+				// because they have too few samples to be meaningful.
+				// They are still considered for LastVerdict if no better run exists.
+				isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
+				if !isInsufficient {
+					samples := r.SampleSize
+					if samples <= 0 {
+						samples = 1
+					}
+					a.totalSamples += samples
+					a.sumAccuracy += r.Accuracy * float64(samples)
+					a.sumP95 += r.P95LatencyMs * float64(samples)
 				}
 				a.runs++
-				a.totalSamples += samples
-				a.sumAccuracy += r.Accuracy * float64(samples)
-				a.sumP95 += r.P95LatencyMs * float64(samples)
 				a.totalCost += r.TotalCostUSD
-				// Track the latest run's verdict.
+
+				// LastVerdict: prefer the most recent non-INSUFFICIENT_DATA verdict.
+				// Falls back to INSUFFICIENT_DATA only if no valid run exists.
 				if r.RunAt.After(a.lastRunAt) {
-					a.lastRunAt = r.RunAt
-					a.lastVerdict = r.Verdict
+					if !isInsufficient {
+						// Non-insufficient run is always a better LastVerdict candidate.
+						a.lastRunAt = r.RunAt
+						a.lastVerdict = r.Verdict
+					} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+						// Only use INSUFFICIENT_DATA if we have nothing better yet.
+						a.lastRunAt = r.RunAt
+						a.lastVerdict = r.Verdict
+					}
 				}
 			}
 		}

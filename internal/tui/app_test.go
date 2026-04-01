@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -223,7 +224,7 @@ func TestTrackingViewShowsEmptyState(t *testing.T) {
 // ----- Task 28: Benchmark view tests -----------------------------------------
 
 func TestBenchmarkViewRendersHistoricalRuns(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{
 		Runs: []store.BenchmarkRun{
 			{
@@ -247,7 +248,7 @@ func TestBenchmarkViewRendersHistoricalRuns(t *testing.T) {
 }
 
 func TestBenchmarkViewShowsEmptyState(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: nil})
 	view := m.View()
 	if !strings.Contains(view, "No benchmark") {
@@ -350,7 +351,7 @@ func makeCycles(n int) []time.Time {
 
 // TestBenchmarkViewRendersAgentRows verifies that injecting runs renders the agent rows.
 func TestBenchmarkViewRendersAgentRows(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
 
 	view := m.View()
@@ -362,7 +363,7 @@ func TestBenchmarkViewRendersAgentRows(t *testing.T) {
 
 // TestBenchmarkCycleIndexStartsAtZero verifies cycleIndex is 0 initially.
 func TestBenchmarkCycleIndexStartsAtZero(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	if tui.GetBenchmarkCycleIndex(m) != 0 {
 		t.Errorf("expected initial cycleIndex = 0, got %d", tui.GetBenchmarkCycleIndex(m))
 	}
@@ -370,7 +371,7 @@ func TestBenchmarkCycleIndexStartsAtZero(t *testing.T) {
 
 // TestBenchmarkPgDnAdvancesCycleIndex verifies PgDn moves to the next (older) cycle.
 func TestBenchmarkPgDnAdvancesCycleIndex(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	// Inject 3 cycles so PgDn has room to move.
 	cycles := makeCycles(3)
 	m, _ = m.Update(tui.BenchmarkDataMsg{
@@ -391,7 +392,7 @@ func TestBenchmarkPgDnAdvancesCycleIndex(t *testing.T) {
 
 // TestBenchmarkPgUpDecreaseCycleIndex verifies PgUp moves to the previous (newer) cycle without underflow.
 func TestBenchmarkPgUpDecreaseCycleIndex(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	cycles := makeCycles(3)
 	m, _ = m.Update(tui.BenchmarkDataMsg{
 		Runs:   makeRuns(3),
@@ -426,7 +427,7 @@ func TestBenchmarkPgUpDecreaseCycleIndex(t *testing.T) {
 
 // TestBenchmarkPgDnAtLastCycleDoesNotAdvance verifies PgDn at the last cycle is a no-op.
 func TestBenchmarkPgDnAtLastCycleDoesNotAdvance(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	cycles := makeCycles(2)
 	m, _ = m.Update(tui.BenchmarkDataMsg{
 		Runs:   makeRuns(2),
@@ -448,7 +449,7 @@ func TestBenchmarkPgDnAtLastCycleDoesNotAdvance(t *testing.T) {
 
 // TestBenchmarkCursorMovesWithinPage verifies up/down move within the current page.
 func TestBenchmarkCursorMovesWithinPage(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5)})
 
 	// Cursor starts at 0.
@@ -477,7 +478,7 @@ func TestBenchmarkCursorMovesWithinPage(t *testing.T) {
 
 // TestBenchmarkDetailFreezeOnEnter verifies Enter freezes the detail panel.
 func TestBenchmarkDetailFreezeOnEnter(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	runs := makeRuns(3)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: runs})
 
@@ -525,7 +526,7 @@ func TestBenchmarkDetailFreezeOnEnter(t *testing.T) {
 
 // TestBenchmarkDetailUnfreezeOnEsc verifies Esc unfreezes the detail panel.
 func TestBenchmarkDetailUnfreezeOnEsc(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(3)})
 
 	// Freeze.
@@ -543,7 +544,7 @@ func TestBenchmarkDetailUnfreezeOnEsc(t *testing.T) {
 
 // TestBenchmarkDetailUnfreezeOnNavigation verifies cursor movement unfreezes the detail.
 func TestBenchmarkDetailUnfreezeOnNavigation(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(3)})
 
 	// Freeze with Enter.
@@ -561,7 +562,7 @@ func TestBenchmarkDetailUnfreezeOnNavigation(t *testing.T) {
 
 // TestBenchmarkViewShowsDateAndTime verifies the Time column shows date+time not just date.
 func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	// Use a fixed timestamp in the local timezone to avoid UTC conversion differences.
 	ts := time.Date(2026, 3, 15, 14, 30, 0, 0, time.Local)
 	m, _ = m.Update(tui.BenchmarkDataMsg{
@@ -590,7 +591,7 @@ func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
 
 // TestBenchmarkPgDnResetsCursor verifies PgDn resets cursor to 0.
 func TestBenchmarkPgDnResetsCursor(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	cycles := makeCycles(3)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(5), Cycles: cycles})
 
@@ -612,7 +613,7 @@ func TestBenchmarkPgDnResetsCursor(t *testing.T) {
 // TestBenchmarkViewFrozenDetailNotAffectedByPageChange verifies that the frozen detail
 // does not change when navigating to a different page.
 func TestBenchmarkViewFrozenDetailNotAffectedByPageChange(t *testing.T) {
-	m := tui.NewBenchmarkModel(nil, "", "")
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	runs := makeRuns(5)
 	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: runs})
 
@@ -1274,4 +1275,273 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ─── F5 intraweek trigger tests ───────────────────────────────────────────────
+
+// mockIntraweekRunner is a test double for tui.IntraweekRunner that records calls
+// and returns a configurable error.
+type mockIntraweekRunner struct {
+	called bool
+	retErr error
+}
+
+func (r *mockIntraweekRunner) RunIntraweek(_ context.Context, _ int) error {
+	r.called = true
+	return r.retErr
+}
+
+// TestBenchmarkF5SetsRunningFlag verifies that pressing F5 sets the running flag
+// and returns a non-nil tea.Cmd when a runner is wired.
+func TestBenchmarkF5SetsRunningFlag(t *testing.T) {
+	mock := &mockIntraweekRunner{}
+	m := tui.NewBenchmarkModelWithRunner(nil, mock)
+
+	// Pressing F5 should set running=true and return a Cmd.
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+
+	if !tui.GetBenchmarkRunning(m) {
+		t.Error("expected running=true after F5 press")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil tea.Cmd after F5 press")
+	}
+}
+
+// TestBenchmarkF5NoOpWhenAlreadyRunning verifies that a second F5 press while a run
+// is in progress is ignored (no new Cmd, running stays true).
+func TestBenchmarkF5NoOpWhenAlreadyRunning(t *testing.T) {
+	mock := &mockIntraweekRunner{}
+	m := tui.NewBenchmarkModelWithRunner(nil, mock)
+
+	// First F5 — starts the run.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+	if !tui.GetBenchmarkRunning(m) {
+		t.Fatal("setup: expected running=true after first F5")
+	}
+
+	// Second F5 while running — must be a no-op (nil Cmd).
+	_, cmd2 := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+	if cmd2 != nil {
+		t.Error("expected nil Cmd on second F5 press while already running")
+	}
+}
+
+// TestBenchmarkF5NoOpWithoutRunner verifies that F5 is a no-op when no runner is wired.
+func TestBenchmarkF5NoOpWithoutRunner(t *testing.T) {
+	// No runner (nil).
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
+
+	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+
+	if tui.GetBenchmarkRunning(m) {
+		t.Error("expected running=false when no runner is wired")
+	}
+	if cmd != nil {
+		t.Error("expected nil Cmd when no runner is wired")
+	}
+}
+
+// TestBenchmarkIntraweekDoneClearsRunning verifies that receiving intraweekRunDoneMsg
+// clears the running flag and triggers a data refresh.
+func TestBenchmarkIntraweekDoneClearsRunning(t *testing.T) {
+	mock := &mockIntraweekRunner{}
+	m := tui.NewBenchmarkModelWithRunner(nil, mock)
+
+	// Simulate F5 press to set running.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+	if !tui.GetBenchmarkRunning(m) {
+		t.Fatal("setup: expected running=true")
+	}
+
+	// Simulate the run completing successfully.
+	m, _ = m.Update(tui.IntraweekRunDoneMsg{})
+
+	if tui.GetBenchmarkRunning(m) {
+		t.Error("expected running=false after run completes")
+	}
+	if tui.GetBenchmarkRunErr(m) != nil {
+		t.Errorf("expected no error, got: %v", tui.GetBenchmarkRunErr(m))
+	}
+	// Note: a refresh Cmd may be nil when no BenchmarkStore is wired (test scenario).
+	// The important invariant is that running=false and runErr=nil after a successful run.
+}
+
+// TestBenchmarkIntraweekDoneSetsErrOnFailure verifies that a failed run stores
+// the error in runErr and still clears the running flag.
+func TestBenchmarkIntraweekDoneSetsErrOnFailure(t *testing.T) {
+	mock := &mockIntraweekRunner{retErr: fmt.Errorf("benchmark pipeline failed")}
+	m := tui.NewBenchmarkModelWithRunner(nil, mock)
+
+	// F5 to start.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+
+	// Simulate a failed run.
+	m, _ = m.Update(tui.IntraweekRunDoneMsg{Err: mock.retErr})
+
+	if tui.GetBenchmarkRunning(m) {
+		t.Error("expected running=false after failed run")
+	}
+	if tui.GetBenchmarkRunErr(m) == nil {
+		t.Error("expected runErr to be set after failed run")
+	}
+}
+
+// TestBenchmarkF5ViewShowsRunningStatus verifies the View() renders a running
+// indicator while an intraweek run is in progress.
+func TestBenchmarkF5ViewShowsRunningStatus(t *testing.T) {
+	mock := &mockIntraweekRunner{}
+	m := tui.NewBenchmarkModelWithRunner(nil, mock)
+	// Inject some runs so View() has data to render.
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(2)})
+
+	// F5 to start run.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f5")})
+
+	view := m.View()
+	if !strings.Contains(view, "Running intraweek") {
+		t.Errorf("expected 'Running intraweek' in view while running, got: %q", view[:min(len(view), 400)])
+	}
+}
+
+// TestBenchmarkF5ViewShowsF5HintInFooter verifies that the footer always shows
+// the F5 keybind hint (regardless of running state).
+func TestBenchmarkF5ViewShowsF5HintInFooter(t *testing.T) {
+	m := tui.NewBenchmarkModel(nil, "", "", nil)
+	m, _ = m.Update(tui.BenchmarkDataMsg{Runs: makeRuns(2)})
+
+	view := m.View()
+	if !strings.Contains(view, "F5") {
+		t.Errorf("expected 'F5' hint in view footer, got: %q", view[:min(len(view), 400)])
+	}
+}
+
+// ─── Benchmark Summary filtering tests ───────────────────────────────────────
+
+// makeRun is a helper that builds a BenchmarkRun with required fields populated.
+func makeRun(agentID, model string, verdict store.VerdictType, accuracy, p95 float64, sampleSize int, runAt time.Time) store.BenchmarkRun {
+	return store.BenchmarkRun{
+		AgentID:      agentID,
+		Model:        model,
+		Verdict:      verdict,
+		Accuracy:     accuracy,
+		P95LatencyMs: p95,
+		SampleSize:   sampleSize,
+		RunAt:        runAt,
+		TotalCostUSD: 0.01,
+	}
+}
+
+// TestSummaryIgnoresInsufficientDataInAverages verifies that INSUFFICIENT_DATA runs
+// (verdict == INSUFFICIENT_DATA or SampleSize < 50) are excluded from the weighted
+// averages for AvgAccuracy, AvgP95Ms, and HealthScore.
+func TestSummaryIgnoresInsufficientDataInAverages(t *testing.T) {
+	base := time.Now().UTC()
+
+	// One good run (KEEP, SampleSize=100, Accuracy=1.0) and one bad run
+	// (INSUFFICIENT_DATA, SampleSize=5, Accuracy=0.0).
+	// Without filtering the weighted average would be:
+	//   (1.0 * 100 + 0.0 * 5) / (100 + 5) ≈ 0.952
+	// With filtering the average must be:
+	//   (1.0 * 100) / 100 = 1.0
+	runs := []store.BenchmarkRun{
+		makeRun("agent-a", "model-x", store.VerdictKeep, 1.0, 500, 100, base.Add(-1*time.Hour)),
+		makeRun("agent-a", "model-x", store.VerdictInsufficientData, 0.0, 99999, 5, base.Add(-2*time.Hour)),
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	row := rows[0]
+
+	// AvgAccuracy must be 1.0 (only the good run contributes).
+	if row.AvgAccuracy < 0.999 {
+		t.Errorf("AvgAccuracy: got %.4f, want ~1.0 (INSUFFICIENT_DATA must be excluded)", row.AvgAccuracy)
+	}
+
+	// HealthScore must reflect 1.0 accuracy (no penalty from the bad run).
+	// Formula: accPart = 1.0 * 50 = 50; latPart = 30 * max(0, 1-500/10000) = 30*0.95 ≈ 28.5
+	// verdictPart = 20 (KEEP); total ≈ 98.5
+	if row.HealthScore < 90 {
+		t.Errorf("HealthScore: got %.1f, expected > 90 (bad run must not drag health down)", row.HealthScore)
+	}
+
+	// Runs count still includes both runs.
+	if row.Runs != 2 {
+		t.Errorf("Runs: got %d, want 2 (INSUFFICIENT_DATA counts in total but not in averages)", row.Runs)
+	}
+}
+
+// TestSummaryLastVerdictPrefersMeaningfulVerdict verifies that LastVerdict is set to
+// the most recent non-INSUFFICIENT_DATA verdict, even when the latest run is INSUFFICIENT_DATA.
+func TestSummaryLastVerdictPrefersMeaningfulVerdict(t *testing.T) {
+	base := time.Now().UTC()
+
+	// Order: oldest KEEP run, then a newer INSUFFICIENT_DATA run.
+	// LastVerdict must be KEEP (skipping the INSUFFICIENT_DATA).
+	runs := []store.BenchmarkRun{
+		makeRun("agent-b", "model-y", store.VerdictKeep, 0.9, 1000, 80, base.Add(-7*24*time.Hour)),
+		makeRun("agent-b", "model-y", store.VerdictInsufficientData, 0.0, 0, 3, base.Add(-1*time.Hour)),
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	row := rows[0]
+
+	if row.LastVerdict != store.VerdictKeep {
+		t.Errorf("LastVerdict: got %q, want KEEP (must skip INSUFFICIENT_DATA)", row.LastVerdict)
+	}
+}
+
+// TestSummaryLastVerdictFallsBackToInsufficientWhenNoOtherExists verifies that when
+// ALL runs are INSUFFICIENT_DATA, LastVerdict is set to INSUFFICIENT_DATA.
+func TestSummaryLastVerdictFallsBackToInsufficientWhenNoOtherExists(t *testing.T) {
+	base := time.Now().UTC()
+
+	runs := []store.BenchmarkRun{
+		makeRun("agent-c", "model-z", store.VerdictInsufficientData, 0.0, 0, 10, base.Add(-1*time.Hour)),
+		makeRun("agent-c", "model-z", store.VerdictInsufficientData, 0.0, 0, 5, base.Add(-2*time.Hour)),
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	row := rows[0]
+
+	if row.LastVerdict != store.VerdictInsufficientData {
+		t.Errorf("LastVerdict: got %q, want INSUFFICIENT_DATA (fallback when all runs are insufficient)", row.LastVerdict)
+	}
+	// Averages must be zero (no samples contributed).
+	if row.AvgAccuracy != 0 {
+		t.Errorf("AvgAccuracy: got %.4f, want 0 (no valid samples)", row.AvgAccuracy)
+	}
+}
+
+// TestSummaryExcludesRunsBySampleSizeThreshold verifies that runs with SampleSize<50
+// (even if their verdict is not INSUFFICIENT_DATA) are excluded from averages.
+func TestSummaryExcludesRunsBySampleSizeThreshold(t *testing.T) {
+	base := time.Now().UTC()
+
+	// Good run: KEEP, SampleSize=100, Accuracy=0.8
+	// Noisy run: KEEP verdict but SampleSize=30 (< 50), Accuracy=0.0
+	// Expected: only the good run contributes to averages.
+	runs := []store.BenchmarkRun{
+		makeRun("agent-d", "model-w", store.VerdictKeep, 0.8, 2000, 100, base.Add(-1*time.Hour)),
+		makeRun("agent-d", "model-w", store.VerdictKeep, 0.0, 99999, 30, base.Add(-2*time.Hour)),
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	row := rows[0]
+
+	// AvgAccuracy must be 0.8 (only the 100-sample run contributes).
+	if row.AvgAccuracy < 0.79 || row.AvgAccuracy > 0.81 {
+		t.Errorf("AvgAccuracy: got %.4f, want ~0.8 (low-sample run must be excluded)", row.AvgAccuracy)
+	}
 }

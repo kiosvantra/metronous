@@ -53,16 +53,57 @@ type agentResult struct {
 	run     store.BenchmarkRun
 }
 
-// RunWeekly executes the benchmark pipeline for the given window in days.
-// It discovers all agents by listing distinct agent IDs from recent events,
-// then processes each agent in sequence.
+// RunWeekly executes the scheduled weekly benchmark pipeline.
+// The event window is [now-windowDays, now). All runs are tagged run_kind=weekly.
 func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 	end := time.Now().UTC()
 	start := end.Add(-time.Duration(windowDays) * 24 * time.Hour)
+	return r.run(ctx, store.RunKindWeekly, start, end, windowDays)
+}
 
-	r.logger.Info("starting weekly benchmark run",
-		zap.Time("start", start),
-		zap.Time("end", end),
+// RunIntraweek executes a manual on-demand benchmark pipeline.
+// The event window starts at lastRunAt+1ms (the first moment after the most recent
+// stored run) and ends at now. If no prior run exists for any agent, the window
+// falls back to [now-windowDays, now) — the same as a weekly run.
+//
+// Per-agent window derivation: we use the global max(run_at) across all agents
+// so the interval is consistent across the whole batch.
+func (r *Runner) RunIntraweek(ctx context.Context, windowDays int) error {
+	end := time.Now().UTC()
+
+	// Determine the global last run_at across all agents.
+	// We query the benchmark store for the most recent run regardless of agent.
+	runs, err := r.benchmarkStore.GetRuns(ctx, "", 1)
+	if err != nil {
+		return fmt.Errorf("get last run for intraweek interval: %w", err)
+	}
+
+	var start time.Time
+	if len(runs) > 0 && !runs[0].RunAt.IsZero() {
+		// Start 1ms after the last recorded benchmark run.
+		start = runs[0].RunAt.Add(time.Millisecond)
+		r.logger.Info("intraweek: derived start from last run",
+			zap.Time("last_run_at", runs[0].RunAt),
+			zap.Time("window_start", start),
+		)
+	} else {
+		// No prior run — fall back to windowDays.
+		start = end.Add(-time.Duration(windowDays) * 24 * time.Hour)
+		r.logger.Info("intraweek: no prior run found, using windowDays fallback",
+			zap.Int("window_days", windowDays),
+			zap.Time("window_start", start),
+		)
+	}
+
+	return r.run(ctx, store.RunKindIntraweek, start, end, windowDays)
+}
+
+// run is the shared implementation for RunWeekly and RunIntraweek.
+func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end time.Time, windowDays int) error {
+	r.logger.Info("starting benchmark run",
+		zap.String("run_kind", string(kind)),
+		zap.Time("window_start", start),
+		zap.Time("window_end", end),
 		zap.Int("window_days", windowDays),
 	)
 
@@ -92,6 +133,10 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 			failedAgents = append(failedAgents, agentID)
 			continue
 		}
+		// Tag with run kind and window bounds.
+		res.run.RunKind = kind
+		res.run.WindowStart = start
+		res.run.WindowEnd = end
 		results = append(results, res)
 	}
 
@@ -125,7 +170,8 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 		}
 	}
 
-	r.logger.Info("weekly benchmark run complete",
+	r.logger.Info("benchmark run complete",
+		zap.String("run_kind", string(kind)),
 		zap.Int("agents_processed", len(results)),
 		zap.Int("agents_failed", len(failedAgents)),
 	)
@@ -136,8 +182,8 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 }
 
 // processAgent computes metrics and evaluates the verdict for a single agent.
-// It returns an agentResult with a fully-populated BenchmarkRun (ArtifactPath is
-// left empty — RunWeekly sets it after the artifact file is written).
+// It returns an agentResult with a partially-populated BenchmarkRun.
+// ArtifactPath, RunKind, WindowStart, and WindowEnd are filled in by the caller (run).
 func (r *Runner) processAgent(ctx context.Context, agentID string, start, end time.Time, windowDays int) (agentResult, error) {
 	// 1. Fetch events for the window.
 	events, err := benchmark.FetchEventsForWindow(ctx, r.eventStore, agentID, start, end)

@@ -198,7 +198,17 @@ const (
 	VerdictInsufficientData VerdictType = "INSUFFICIENT_DATA"
 )
 
-// BenchmarkRun holds all metrics and the verdict for a single weekly benchmark run.
+// RunKindType distinguishes how a benchmark run was triggered.
+type RunKindType string
+
+const (
+	// RunKindWeekly is the scheduled Sunday cron run.
+	RunKindWeekly RunKindType = "weekly"
+	// RunKindIntraweek is a manual on-demand run triggered outside the cron schedule.
+	RunKindIntraweek RunKindType = "intraweek"
+)
+
+// BenchmarkRun holds all metrics and the verdict for a single benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
 	ID string
@@ -206,7 +216,18 @@ type BenchmarkRun struct {
 	// RunAt is when this benchmark was computed (UTC).
 	RunAt time.Time
 
+	// RunKind distinguishes a scheduled weekly run from a manual intraweek run.
+	// Defaults to RunKindWeekly for backward compatibility.
+	RunKind RunKindType
+
+	// WindowStart is the inclusive start of the event window used for this run (UTC).
+	WindowStart time.Time
+
+	// WindowEnd is the exclusive end of the event window used for this run (UTC).
+	WindowEnd time.Time
+
 	// WindowDays is the number of days in the evaluation window (default 7).
+	// For intraweek runs this is approximate; prefer WindowStart/WindowEnd for auditing.
 	WindowDays int
 
 	// AgentID identifies the agent that was benchmarked.

@@ -17,6 +17,18 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
+// IntraweekRunner is the interface the benchmark view uses to trigger a manual
+// intraweek benchmark run. It is satisfied by *runner.Runner and can be mocked
+// in tests.
+type IntraweekRunner interface {
+	RunIntraweek(ctx context.Context, windowDays int) error
+}
+
+// intraweekRunDoneMsg is sent by the async intraweek benchmark command when the
+// run completes (successfully or with an error).
+// Err is exported so tests can construct the message via the IntraweekRunDoneMsg alias.
+type intraweekRunDoneMsg struct{ Err error }
+
 // benchmarkRefreshInterval is the auto-refresh period for the benchmark tab,
 // matching the tracking tab's cadence.
 const benchmarkRefreshInterval = 2 * time.Second
@@ -115,19 +127,30 @@ type BenchmarkModel struct {
 	frozenTrend []string
 	pricing     map[string]float64
 	workDir     string
+	// runner is an optional IntraweekRunner used to trigger manual F5 runs.
+	// When nil, F5 is a no-op.
+	runner IntraweekRunner
+	// running is true while an F5-triggered intraweek run is in progress.
+	// It prevents concurrent runs and shows a status indicator in the footer.
+	running bool
+	// runErr holds the error (if any) from the most recent F5 run.
+	// Cleared when the next F5 run starts.
+	runErr error
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
 // dataDir is the Metronous data directory (e.g. ~/.metronous/data); pricing is
 // loaded from dataDir/../thresholds.json. Pass an empty string to disable pricing.
 // workDir is used for project-level agent discovery; pass os.Getwd() from the caller.
-func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string) BenchmarkModel {
+// r is an optional IntraweekRunner; pass nil to disable F5 manual runs.
+func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string, r IntraweekRunner) BenchmarkModel {
 	return BenchmarkModel{
 		bs:      bs,
 		loading: true,
 		pricing: loadModelPricing(dataDir),
 		agents:  discovery.DiscoverAgents(workDir),
 		workDir: workDir,
+		runner:  r,
 	}
 }
 
@@ -146,6 +169,8 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case benchmarkTickMsg:
 		// Schedule next tick and refresh data.
+		// While a manual run is in progress we still schedule the next tick so the
+		// auto-refresh resumes normally once the run finishes.
 		return m, tea.Batch(
 			tea.Tick(benchmarkRefreshInterval, func(t time.Time) tea.Msg {
 				return benchmarkTickMsg{t: t}
@@ -181,6 +206,13 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case intraweekRunDoneMsg:
+		// The manual run finished — clear the running flag, capture any error, and
+		// immediately refresh the view so the new run appears in the table.
+		m.running = false
+		m.runErr = msg.Err
+		return m, m.fetchRuns()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -224,6 +256,20 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		case "esc", "escape":
 			// Unfreeze the detail panel.
 			m.detailFrozen = false
+		case "f5":
+			// Trigger a manual intraweek benchmark run.
+			// Guard: no concurrent runs and a runner must be wired.
+			if !m.running && m.runner != nil {
+				m.running = true
+				m.runErr = nil
+				r := m.runner
+				return m, func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+					defer cancel()
+					err := r.RunIntraweek(ctx, 7)
+					return intraweekRunDoneMsg{Err: err}
+				}
+			}
 		}
 	}
 	return m, nil
@@ -454,10 +500,21 @@ func (m BenchmarkModel) View() string {
 	} else {
 		cycleLabel = "cycle 1/1"
 	}
-	footer := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail)",
+	footer := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail, F5 to run intraweek)",
 		len(m.runs), cycleLabel)
 	sb.WriteString(dimStyle.Render(footer))
 	sb.WriteString("\n")
+
+	// Running status indicator — shown only while an F5 run is in progress.
+	if m.running {
+		runningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
+		sb.WriteString(runningStyle.Render("  ⏳ Running intraweek benchmark..."))
+		sb.WriteString("\n")
+	} else if m.runErr != nil {
+		errRunStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		sb.WriteString(errRunStyle.Render(fmt.Sprintf("  ✗ Intraweek run failed: %v", m.runErr)))
+		sb.WriteString("\n")
+	}
 
 	// Detail panel for the selected run.
 	// When detailFrozen, show the frozen snapshot — it won't change on background refresh.
@@ -684,6 +741,8 @@ func isNoData(run store.BenchmarkRun) bool {
 // formatBenchmarkRow converts a BenchmarkRun into display columns.
 // agentType is the type label for the Type column (primary/subagent/built-in/all).
 // For NO_DATA rows, metric fields are rendered as "-".
+// Intraweek runs are labelled with "(IW)" suffix on the Time column to distinguish
+// them from the scheduled weekly run within the same cycle.
 func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[string]float64) []string {
 	if agentType == "" {
 		agentType = "-"
@@ -695,6 +754,12 @@ func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[st
 	}
 
 	date := run.RunAt.Local().Format("2006-01-02 15:04")
+	// Append "(IW)" marker for intraweek runs so the cycle view clearly shows
+	// which runs were triggered manually vs the scheduled Sunday run.
+	if run.RunKind == store.RunKindIntraweek {
+		date += " (IW)"
+	}
+
 	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
 	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
 

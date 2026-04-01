@@ -19,6 +19,86 @@ func GetBenchmarkSummaryRows(m BenchmarkSummaryModel) []summaryRow {
 	return m.rows
 }
 
+// ComputeHealthScoreForTest exposes computeHealthScore for unit testing.
+func ComputeHealthScoreForTest(accuracy, p95Ms float64, verdict store.VerdictType) float64 {
+	return computeHealthScore(accuracy, p95Ms, verdict)
+}
+
+// AggregateSummaryRowsForTest runs the same aggregation logic as fetchSummary
+// over a provided slice of BenchmarkRuns and returns the computed summaryRows.
+// This allows unit tests to verify INSUFFICIENT_DATA filtering without a live store.
+func AggregateSummaryRowsForTest(runs []store.BenchmarkRun) []summaryRow {
+	type key struct{ agent, model string }
+	type agg struct {
+		runs         int
+		totalSamples int
+		sumAccuracy  float64
+		sumP95       float64
+		totalCost    float64
+		lastVerdict  store.VerdictType
+		lastRunAt    time.Time
+	}
+	aggMap := make(map[key]*agg)
+
+	for _, r := range runs {
+		if r.RunAt.IsZero() {
+			continue
+		}
+		k := key{r.AgentID, r.Model}
+		a := aggMap[k]
+		if a == nil {
+			a = &agg{}
+			aggMap[k] = a
+		}
+
+		isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
+		if !isInsufficient {
+			samples := r.SampleSize
+			if samples <= 0 {
+				samples = 1
+			}
+			a.totalSamples += samples
+			a.sumAccuracy += r.Accuracy * float64(samples)
+			a.sumP95 += r.P95LatencyMs * float64(samples)
+		}
+		a.runs++
+		a.totalCost += r.TotalCostUSD
+
+		if r.RunAt.After(a.lastRunAt) {
+			if !isInsufficient {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+			} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+			}
+		}
+	}
+
+	var rows []summaryRow
+	for k, a := range aggMap {
+		avgAcc := 0.0
+		avgP95 := 0.0
+		if a.totalSamples > 0 {
+			avgAcc = a.sumAccuracy / float64(a.totalSamples)
+			avgP95 = a.sumP95 / float64(a.totalSamples)
+		}
+		health := computeHealthScore(avgAcc, avgP95, a.lastVerdict)
+		rows = append(rows, summaryRow{
+			AgentID:      k.agent,
+			Model:        k.model,
+			Runs:         a.runs,
+			AvgAccuracy:  avgAcc,
+			AvgP95Ms:     avgP95,
+			TotalCostUSD: a.totalCost,
+			HealthScore:  health,
+			LastVerdict:  a.lastVerdict,
+			LastRunAt:    a.lastRunAt,
+		})
+	}
+	return rows
+}
+
 // SummaryRowForTest is the exported name for the internal summaryRow struct.
 // It allows tests to build synthetic BenchmarkSummaryDataMsg payloads.
 type SummaryRowForTest = summaryRow
@@ -61,6 +141,24 @@ func GetBenchmarkDetailFrozen(m BenchmarkModel) bool {
 func GetBenchmarkFrozenRun(m BenchmarkModel) interface{} {
 	return m.frozenRun
 }
+
+// GetBenchmarkRunning returns whether an intraweek run is in progress.
+func GetBenchmarkRunning(m BenchmarkModel) bool {
+	return m.running
+}
+
+// GetBenchmarkRunErr returns the error from the last intraweek run (nil if no error).
+func GetBenchmarkRunErr(m BenchmarkModel) error {
+	return m.runErr
+}
+
+// NewBenchmarkModelWithRunner creates a BenchmarkModel with an explicit runner for tests.
+func NewBenchmarkModelWithRunner(bs store.BenchmarkStore, r IntraweekRunner) BenchmarkModel {
+	return NewBenchmarkModel(bs, "", "", r)
+}
+
+// IntraweekRunDoneMsg exposes the internal intraweekRunDoneMsg for tests.
+type IntraweekRunDoneMsg = intraweekRunDoneMsg
 
 // --- Tracking session helpers (for tests) ---
 

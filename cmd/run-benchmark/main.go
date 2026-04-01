@@ -73,12 +73,25 @@ func main() {
 		}
 	}
 
+	// Determine run mode: intraweek (manual on-demand) vs weekly (scheduled).
+	runMode := os.Getenv("METRONOUS_RUN_KIND")
+	if runMode == "" {
+		runMode = "weekly"
+	}
+
 	ctx := context.Background()
-	fmt.Printf("🚀 Running benchmark (%d-day window)...\n", windowDays)
+	fmt.Printf("🚀 Running benchmark (mode=%s, window=%d days)...\n", runMode, windowDays)
 	fmt.Printf("📁 Data directory: %s\n\n", dataDir)
 
-	if err := r.RunWeekly(ctx, windowDays); err != nil {
-		log.Fatal("❌ Benchmark run failed:", err)
+	switch runMode {
+	case "intraweek":
+		if err := r.RunIntraweek(ctx, windowDays); err != nil {
+			log.Fatal("❌ Benchmark run failed:", err)
+		}
+	default:
+		if err := r.RunWeekly(ctx, windowDays); err != nil {
+			log.Fatal("❌ Benchmark run failed:", err)
+		}
 	}
 
 	fmt.Println("✅ Benchmark completed successfully!")

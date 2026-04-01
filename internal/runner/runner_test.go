@@ -184,3 +184,172 @@ func TestRunnerMultipleAgents(t *testing.T) {
 		}
 	}
 }
+
+// ─── Intraweek runner tests ───────────────────────────────────────────────────
+
+// TestRunnerWeeklyTagsRunKind verifies that RunWeekly persists run_kind=weekly.
+func TestRunnerWeeklyTagsRunKind(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	insertEvents(t, ctx, es, "tag-agent", 60, "complete")
+
+	if err := r.RunWeekly(ctx, 7); err != nil {
+		t.Fatalf("RunWeekly: %v", err)
+	}
+
+	got, err := bs.GetLatestRun(ctx, "tag-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetLatestRun returned nil")
+	}
+	if got.RunKind != store.RunKindWeekly {
+		t.Errorf("RunKind: got %q, want %q", got.RunKind, store.RunKindWeekly)
+	}
+	if got.WindowStart.IsZero() {
+		t.Error("WindowStart should not be zero for weekly run")
+	}
+	if got.WindowEnd.IsZero() {
+		t.Error("WindowEnd should not be zero for weekly run")
+	}
+}
+
+// TestRunnerIntraweekTagsRunKind verifies that RunIntraweek persists run_kind=intraweek.
+func TestRunnerIntraweekTagsRunKind(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	insertEvents(t, ctx, es, "iw-tag-agent", 60, "complete")
+
+	if err := r.RunIntraweek(ctx, 7); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+
+	got, err := bs.GetLatestRun(ctx, "iw-tag-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetLatestRun returned nil")
+	}
+	if got.RunKind != store.RunKindIntraweek {
+		t.Errorf("RunKind: got %q, want %q", got.RunKind, store.RunKindIntraweek)
+	}
+}
+
+// TestRunnerIntraweekUsesLastRunAtPlusOne verifies that RunIntraweek sets the
+// window start to lastRunAt+1ms when a prior run exists in the benchmark store.
+//
+// Strategy: directly save a synthetic "previous" BenchmarkRun with a well-known
+// RunAt in the past, then call RunIntraweek and verify the window start is
+// exactly lastRunAt+1ms.  We avoid actually processing agents (no events are
+// inserted) so the test focuses only on the interval derivation logic.
+func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	// Directly save a synthetic "previous" run with a known RunAt in the past.
+	// This simulates a weekly run that happened 3 days ago.
+	lastRunAt := time.Now().UTC().Add(-3 * 24 * time.Hour).Truncate(time.Millisecond)
+	prevRun := store.BenchmarkRun{
+		RunAt:      lastRunAt,
+		RunKind:    store.RunKindWeekly,
+		WindowDays: 7,
+		AgentID:    "synthetic-agent",
+		Model:      "claude-sonnet",
+		Verdict:    store.VerdictKeep,
+	}
+	if err := bs.SaveRun(ctx, prevRun); err != nil {
+		t.Fatalf("SaveRun (synthetic): %v", err)
+	}
+
+	// Insert events for a different agent so there is work for RunIntraweek to do,
+	// with timestamps falling within [lastRunAt+1ms, now].
+	// We use time.Now() timestamps so they naturally fall in the window.
+	insertEvents(t, ctx, es, "iw-interval-agent", 60, "complete")
+
+	beforeIntraweek := time.Now().UTC()
+	if err := r.RunIntraweek(ctx, 7); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+	afterIntraweek := time.Now().UTC()
+
+	// Verify the intraweek run was created for iw-interval-agent.
+	iwRun, err := bs.GetLatestRun(ctx, "iw-interval-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun after intraweek: %v", err)
+	}
+	if iwRun == nil {
+		t.Fatal("expected intraweek run for iw-interval-agent")
+	}
+
+	if iwRun.RunKind != store.RunKindIntraweek {
+		t.Errorf("RunKind: got %q, want intraweek", iwRun.RunKind)
+	}
+
+	// WindowStart must be lastRunAt+1ms (within 1ms storage precision).
+	expectedStart := lastRunAt.Add(time.Millisecond)
+	if diff := iwRun.WindowStart.Sub(expectedStart).Abs(); diff > time.Millisecond {
+		t.Errorf("WindowStart: got %v, want %v (diff=%v)", iwRun.WindowStart, expectedStart, diff)
+	}
+
+	// WindowEnd must be approximately now.
+	if iwRun.WindowEnd.Before(beforeIntraweek.Add(-time.Second)) {
+		t.Errorf("WindowEnd %v is before the intraweek run started %v", iwRun.WindowEnd, beforeIntraweek)
+	}
+	if iwRun.WindowEnd.After(afterIntraweek.Add(time.Second)) {
+		t.Errorf("WindowEnd %v is after the intraweek run completed %v", iwRun.WindowEnd, afterIntraweek)
+	}
+}
+
+// TestRunnerIntraweekFallbackWhenNoHistory verifies that when no prior run exists,
+// RunIntraweek falls back to the windowDays window (same as weekly).
+func TestRunnerIntraweekFallbackWhenNoHistory(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	insertEvents(t, ctx, es, "iw-fallback-agent", 60, "complete")
+
+	beforeRun := time.Now().UTC()
+	if err := r.RunIntraweek(ctx, 7); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+
+	got, err := bs.GetLatestRun(ctx, "iw-fallback-agent")
+	if err != nil {
+		t.Fatalf("GetLatestRun: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected a run")
+	}
+	if got.RunKind != store.RunKindIntraweek {
+		t.Errorf("RunKind: got %q, want intraweek", got.RunKind)
+	}
+	// With fallback, WindowStart should be ~7 days before the run (within a second of tolerance).
+	expectedStart := beforeRun.Add(-7 * 24 * time.Hour)
+	if diff := got.WindowStart.Sub(expectedStart).Abs(); diff > 2*time.Second {
+		t.Errorf("WindowStart fallback: got %v, expected near %v (diff=%v)", got.WindowStart, expectedStart, diff)
+	}
+}
