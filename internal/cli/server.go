@@ -167,9 +167,15 @@ func runServer(dataDir string, daemonMode bool) error {
 	// In daemon mode (--daemon-mode flag, set by systemd unit file) use HTTP-only
 	// transport so the process doesn't exit on stdin EOF (/dev/null under systemd).
 	serve := srv.ServeWithHealth
+	serveMode := "ServeWithHealth (stdio+http)"
 	if daemonMode {
 		serve = srv.ServeDaemon
+		serveMode = "ServeDaemon (http-only)"
 	}
+	logger.Info("serve mode selected",
+		zap.String("mode", serveMode),
+		zap.Bool("daemonMode", daemonMode),
+	)
 
 	if err := serve(ctx); err != nil && err != context.Canceled {
 		logger.Error("server error", zap.Error(err))

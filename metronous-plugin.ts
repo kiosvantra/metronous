@@ -149,11 +149,17 @@ function sleep(ms: number): Promise<void> {
 function readPortFile(): number | null {
   try {
     const fs = require("fs") as typeof import("fs")
+    log(`readPortFile: attempting to read ${PORT_FILE}`)
     const content = fs.readFileSync(PORT_FILE, "utf8").trim()
     const port = parseInt(content, 10)
-    if (isNaN(port) || port <= 0 || port > 65535) return null
+    if (isNaN(port) || port <= 0 || port > 65535) {
+      log(`readPortFile: parsed port is invalid: ${content} -> ${port}`)
+      return null
+    }
+    log(`readPortFile: success, port=${port}`)
     return port
-  } catch {
+  } catch (err) {
+    logError(`readPortFile: failed to read port file: ${(err as Error).message}`)
     return null
   }
 }
@@ -163,13 +169,15 @@ function readPortFile(): number | null {
 async function waitForServer(agentId: string): Promise<void> {
   log(`Waiting for Metronous server (port file: ${PORT_FILE})`)
   const deadline = Date.now() + MAX_PORT_WAIT_MS
+  let attempt = 0
 
   while (Date.now() < deadline) {
+    attempt++
     const port = readPortFile()
     if (port !== null) {
       serverPort = port
       serverReady = true
-      log(`Server ready on port ${port} — agent: ${agentId}`)
+      log(`Server ready on port ${port} — agent: ${agentId} (found after ${attempt} attempts)`)
 
       // Flush buffered pre-ready events.
       if (preReadyQueue.length > 0) {
@@ -181,10 +189,11 @@ async function waitForServer(agentId: string): Promise<void> {
       }
       return
     }
+    log(`waitForServer: attempt ${attempt}, port file not found yet, retrying in ${PORT_POLL_INTERVAL_MS}ms`)
     await sleep(PORT_POLL_INTERVAL_MS)
   }
 
-  logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session`)
+  logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session (tried ${attempt} times)`)
 }
 
 // httpPost sends a JSON payload to POST /ingest on the server.

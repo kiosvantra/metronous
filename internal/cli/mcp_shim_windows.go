@@ -118,13 +118,20 @@ func ensureDaemonRunning() (int, error) {
 	// Re-check after acquiring the lock: another process may have started the
 	// daemon while we were waiting.  Verify the port is reachable before
 	// trusting it; a stale file from a crashed daemon must not be accepted.
+	fmt.Fprintf(os.Stderr, "[metronous shim] Checking for existing daemon (lock acquired)\n")
 	if port, err := readShimPort(); err == nil {
-		if checkErr := shimCheckHealth(port); checkErr == nil {
+		fmt.Fprintf(os.Stderr, "[metronous shim] Port file exists, checking health on port %d\n", port)
+		var healthErr error
+		if healthErr = shimCheckHealth(port); healthErr == nil {
+			fmt.Fprintf(os.Stderr, "[metronous shim] Daemon is healthy on port %d\n", port)
 			return port, nil
 		}
+		fmt.Fprintf(os.Stderr, "[metronous shim] Daemon health check failed: %v — removing stale port file\n", healthErr)
 		// Port file exists but daemon is not responding — remove stale file
 		// and fall through to start a fresh daemon.
 		_ = os.Remove(shimPortFilePath())
+	} else {
+		fmt.Fprintf(os.Stderr, "[metronous shim] No port file found or error reading: %v\n", err)
 	}
 
 	// Start daemon as a detached background process.
@@ -133,6 +140,8 @@ func ensureDaemonRunning() (int, error) {
 		return 0, fmt.Errorf("get executable path: %w", err)
 	}
 	dataDir := defaultDataDir()
+
+	fmt.Fprintf(os.Stderr, "[metronous shim] Starting daemon: executable=%s, dataDir=%s\n", binaryPath, dataDir)
 
 	cmd := exec.Command(binaryPath, "server", "--data-dir", dataDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -153,17 +162,25 @@ func ensureDaemonRunning() (int, error) {
 	}
 
 	// Poll for port file up to 5 seconds.
+	fmt.Fprintf(os.Stderr, "[metronous shim] Polling for daemon port file...\n")
 	deadline := time.Now().Add(5 * time.Second)
+	attempt := 0
 	for time.Now().Before(deadline) {
+		attempt++
 		time.Sleep(500 * time.Millisecond)
 		if port, err := readShimPort(); err == nil {
+			fmt.Fprintf(os.Stderr, "[metronous shim] Poll attempt %d: port file found (port=%d), checking health...\n", attempt, port)
 			if err := shimCheckHealth(port); err != nil {
 				// Port file exists but daemon not healthy; continue polling.
+				fmt.Fprintf(os.Stderr, "[metronous shim] Poll attempt %d: health check failed, continuing...\n", attempt)
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "[metronous shim] Daemon ready on port %d after %d attempts\n", port, attempt)
 			return port, nil
 		}
+		fmt.Fprintf(os.Stderr, "[metronous shim] Poll attempt %d: no port file yet\n", attempt)
 	}
+	fmt.Fprintf(os.Stderr, "[metronous shim] ERROR: daemon did not start within 5 seconds (port file: %s)\n", shimPortFilePath())
 	return 0, fmt.Errorf("daemon did not start within 5 seconds (port file: %s)", shimPortFilePath())
 }
 
