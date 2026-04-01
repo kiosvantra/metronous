@@ -62,6 +62,9 @@ var detailLabelStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(lipgloss.Color("33"))
 
+// Keybind highlight styles.
+var f5KeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("19")).Bold(true) // dark blue
+
 // benchColWidths / benchColNames describe the benchmark history table.
 // Columns: Time | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
 // "Time" shows full date+time (YYYY-MM-DD HH:MM) so width is 17 to avoid truncation.
@@ -500,9 +503,10 @@ func (m BenchmarkModel) View() string {
 	} else {
 		cycleLabel = "cycle 1/1"
 	}
-	footer := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail, F5 to run intraweek)",
+	footerPrefix := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail,",
 		len(m.runs), cycleLabel)
-	sb.WriteString(dimStyle.Render(footer))
+	footerSuffix := " to run intraweek)"
+	sb.WriteString(dimStyle.Render(footerPrefix) + f5KeyStyle.Render(" F5") + dimStyle.Render(footerSuffix))
 	sb.WriteString("\n")
 
 	// Running status indicator — shown only while an F5 run is in progress.
