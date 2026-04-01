@@ -369,6 +369,10 @@ func (m *AppModel) View() string {
 		return "loading…"
 	}
 
+	// Clear screen to avoid rendering artifacts when switching tabs/views.
+	// This helps prevent stale lines from previous views from remaining visible.
+	clearSeq := "\x1b[2J\x1b[H"
+
 	// Tab bar.
 	tabBar := m.renderTabBar()
 
@@ -402,7 +406,7 @@ func (m *AppModel) View() string {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
-	return fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
+	return clearSeq + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
 }
 
 // renderTabBar returns the rendered tab bar string with the current version on the right.
