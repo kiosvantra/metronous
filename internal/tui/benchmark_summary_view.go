@@ -432,7 +432,16 @@ func (m BenchmarkSummaryModel) View() string {
 		}
 	}
 
-	return sb.String()
+	out := sb.String()
+	// Pad to a minimum line count to avoid terminal remnant artifacts when
+	// the cursor moves (detail panel content changes). This keeps the table
+	// header visible and prevents rows from appearing to "disappear".
+	const minLines = 55
+	lineCount := strings.Count(out, "\n")
+	if lineCount < minLines {
+		out += strings.Repeat("\n", minLines-lineCount)
+	}
+	return out
 }
 
 // formatSummaryRow converts a summaryRow into display columns.

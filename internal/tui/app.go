@@ -382,10 +382,9 @@ func (m *AppModel) View() string {
 
 	clearSeq := "\x1b[2J\x1b[H"
 	prefix := ""
-	// Clear on tab switch, but for Benchmark Summary (view 2) we also clear on
-	// every render to prevent header/table overlap artifacts while the cursor
-	// moves.
-	if m.needsClear || m.CurrentTab == TabBenchmarkSummary {
+	// Clear only when switching tabs to avoid terminal redraw artifacts while
+	// moving cursors inside the same tab.
+	if m.needsClear {
 		prefix = clearSeq
 		m.needsClear = false
 	}
