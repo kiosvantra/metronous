@@ -4,11 +4,12 @@ package cli
 
 import (
 	"fmt"
-	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // validateDataDir checks if the data directory is valid for installation.
@@ -65,14 +66,42 @@ func validateBinaryPath(binaryPath string) error {
 	return validateBinary(binaryPath)
 }
 
-// checkPortConflict checks if the default port is already in use.
-func checkPortConflict() error {
-	port := getDefaultPort()
-	ln, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+// checkDaemonRunning checks if a metronous daemon is already running by
+// reading the port file and performing a health check. This is the correct
+// way to check for conflicts since the daemon uses dynamic ports assigned
+// by the OS (via net.Listen("tcp", "127.0.0.1:0")).
+func checkDaemonRunning() error {
+	portPath := filepath.Join(defaultDataDir(), "mcp.port")
+	data, err := os.ReadFile(portPath)
 	if err != nil {
-		return fmt.Errorf("port %d is already in use. Stop the existing service or use a different port.", port)
+		if os.IsNotExist(err) {
+			// No port file = daemon not running = we're good
+			return nil
+		}
+		return fmt.Errorf("read port file: %w", err)
 	}
-	ln.Close()
+
+	var port int
+	if _, err := fmt.Sscanf(string(data), "%d", &port); err != nil {
+		// Invalid port file = treat as no daemon running
+		return nil
+	}
+
+	// Perform health check on the daemon
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url) //nolint:gosec
+	if err != nil {
+		// Daemon not reachable = we're good
+		return nil
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return fmt.Errorf("metronous daemon is already running on port %d", port)
+	}
+
+	// Non-200 response = treat as not running
 	return nil
 }
 

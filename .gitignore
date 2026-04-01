@@ -56,6 +56,11 @@ live-demo.sh
 live-demo*.sh
 coverage.out
 
+# Debug / test artifacts
+archive/
+tui-debug.log
+*.tmp
+
 # Agent tooling
 .atl/
 

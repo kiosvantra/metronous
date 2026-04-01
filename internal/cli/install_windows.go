@@ -61,7 +61,15 @@ func runInstall(force bool) error {
 		return fmt.Errorf("permission validation failed: %w", err)
 	}
 
-	// Step 1: Handle --force reinstall if service already exists.
+	// Step 1: Check if service already exists and auto-cleanup if not using --force
+	// This provides idempotency even without the --force flag
+	if !force {
+		if err := handleServiceExists(dataDir); err != nil {
+			return fmt.Errorf("service cleanup failed: %w", err)
+		}
+	}
+
+	// Step 2: Handle --force reinstall if service already exists.
 	if force {
 		if err := handleForceReinstall(dataDir); err != nil {
 			return fmt.Errorf("force reinstall failed: %w", err)
@@ -93,9 +101,9 @@ func runInstall(force bool) error {
 		return fmt.Errorf("binary validation failed: %w", err)
 	}
 
-	// Step 6: Check for port conflicts.
-	if err := checkPortConflict(); err != nil {
-		return fmt.Errorf("port conflict detected: %w", err)
+	// Step 6: Check if daemon is already running (daemon uses dynamic ports, not fixed 8844).
+	if err := checkDaemonRunning(); err != nil {
+		return fmt.Errorf("daemon conflict: %w (use 'metronous uninstall' first or --force to reinstall)", err)
 	}
 
 	// Step 7: Install the Windows service via kardianos/service.
@@ -151,6 +159,43 @@ func runInstall(force bool) error {
 	return nil
 }
 
+// handleServiceExists checks if service already exists and removes it for idempotency.
+// This enables `metronous install` to be run multiple times without --force.
+func handleServiceExists(dataDir string) error {
+	svc, err := buildService(dataDir)
+	if err != nil {
+		// Service might not exist yet - that's OK
+		return nil
+	}
+
+	status, err := svc.Status()
+	if err != nil || status == service.StatusUnknown {
+		// Service doesn't exist - nothing to do
+		return nil
+	}
+
+	// Service exists - stop, uninstall, and clean up
+	fmt.Println("Idempotent install: found existing service, cleaning up...")
+	if err := svc.Stop(); err != nil {
+		fmt.Printf("Warning: could not stop service: %v\n", err)
+	}
+
+	if !waitForServiceStop(svc, 10*time.Second) {
+		fmt.Printf("Warning: service did not stop within timeout\n")
+	}
+
+	if err := svc.Uninstall(); err != nil {
+		return fmt.Errorf("uninstall existing service: %w", err)
+	}
+
+	if !waitForServiceUninstalled(dataDir, 10*time.Second) {
+		fmt.Printf("Warning: service uninstall may not have completed\n")
+	}
+
+	cleanupServiceFiles()
+	return nil
+}
+
 // handleForceReinstall stops and uninstalls the existing service before reinstalling.
 func handleForceReinstall(dataDir string) error {
 	svc, err := buildService(dataDir)
@@ -170,16 +215,80 @@ func handleForceReinstall(dataDir string) error {
 		fmt.Printf("Warning: could not stop service: %v\n", err)
 	}
 
-	// Wait for service to fully stop before uninstalling
-	time.Sleep(2 * time.Second)
+	// Poll for service to fully stop before uninstalling
+	if !waitForServiceStop(svc, 10*time.Second) {
+		fmt.Printf("Warning: service did not stop within timeout, proceeding with uninstall anyway\n")
+	}
 
 	fmt.Println("Force reinstall: uninstalling existing service...")
 	if err := svc.Uninstall(); err != nil {
 		return fmt.Errorf("uninstall existing service: %w", err)
 	}
 
-	// Wait for uninstall to complete before proceeding
-	time.Sleep(2 * time.Second)
+	// Poll for uninstall to complete before proceeding
+	if !waitForServiceUninstalled(dataDir, 10*time.Second) {
+		fmt.Printf("Warning: service uninstall may not have completed within timeout\n")
+	}
+
+	// Clean up leftover files from previous installation
+	cleanupServiceFiles()
+
+	return nil
+}
+
+// waitForServiceStop polls service status until it stops or timeout.
+func waitForServiceStop(svc service.Service, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := svc.Status()
+		if err != nil || status == service.StatusUnknown || status == service.StatusStopped {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// waitForServiceUninstalled polls until service is completely removed.
+func waitForServiceUninstalled(dataDir string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		svc, err := buildService(dataDir)
+		if err != nil {
+			// Service doesn't exist - uninstall complete
+			return true
+		}
+		status, err := svc.Status()
+		if err != nil || status == service.StatusUnknown {
+			// Service doesn't exist - uninstall complete
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// cleanupServiceFiles removes leftover files from previous installation.
+func cleanupServiceFiles() error {
+	home := defaultMetronousHome()
+
+	filesToClean := []string{
+		"mcp.port",
+		"daemon.lock",
+		"daemon.pid",
+	}
+
+	var cleaned []string
+	for _, f := range filesToClean {
+		path := filepath.Join(home, f)
+		if err := os.Remove(path); err == nil {
+			cleaned = append(cleaned, f)
+		}
+	}
+
+	if len(cleaned) > 0 {
+		fmt.Printf("Cleaned up: %v\n", cleaned)
+	}
 
 	return nil
 }
