@@ -127,6 +127,9 @@ type SessionSummary struct {
 
 	// CostUSD is the total cost for the session (nullable).
 	CostUSD *float64
+
+	// DurationMs is the duration of the session in milliseconds (nullable).
+	DurationMs *int
 }
 
 // SessionQuery defines filter criteria for querying sessions.
@@ -194,6 +197,16 @@ const (
 	VerdictInsufficientData VerdictType = "INSUFFICIENT_DATA"
 )
 
+// RunKindType distinguishes how a benchmark run was triggered.
+type RunKindType string
+
+const (
+	// RunKindWeekly is the scheduled Sunday cron run.
+	RunKindWeekly RunKindType = "weekly"
+	// RunKindIntraweek is a manual on-demand run triggered outside the cron schedule.
+	RunKindIntraweek RunKindType = "intraweek"
+)
+
 // BenchmarkRun holds all metrics and the verdict for a single weekly benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
@@ -255,6 +268,15 @@ type BenchmarkRun struct {
 
 	// CompositeScore is the normalized 0-1 composite score combining all metrics.
 	CompositeScore float64
+
+	// RunKind distinguishes scheduled weekly runs from manual intraweek runs.
+	RunKind RunKindType
+
+	// WindowStart is the inclusive start timestamp of the benchmark window.
+	WindowStart time.Time
+
+	// WindowEnd is the exclusive end timestamp of the benchmark window.
+	WindowEnd time.Time
 }
 
 // BenchmarkQuery defines filter criteria for querying benchmark runs.
@@ -306,6 +328,17 @@ type BenchmarkStore interface {
 	// GetVerdictTrend returns the last N weekly verdicts for the given agent,
 	// ordered oldest first. Returns an empty slice if no runs exist.
 	GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error)
+
+	// ListRunCycles returns the distinct week-start timestamps (Sunday 00:00 local time,
+	// stored as UTC) for all benchmark runs, ordered newest first.
+	// Each returned time is the start of the ISO week (Sunday) that contains at least
+	// one run_at value in the database.
+	// limit=0 returns all cycles; offset skips the first N cycles for pagination.
+	ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error)
+
+	// QueryRunsInWindow returns all benchmark runs whose run_at falls within
+	// [since, until) (inclusive start, exclusive end), ordered by run_at DESC.
+	QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]BenchmarkRun, error)
 
 	// GetVerdictTrendByModel returns the last N weekly verdicts for a specific
 	// (agent_id, model) combination, ordered oldest first.

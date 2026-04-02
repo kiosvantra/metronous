@@ -31,7 +31,7 @@ func (m *mockBS) addRun(run store.BenchmarkRun) {
 	m.runsByKey[key] = &run
 }
 
-func (m *mockBS) SaveRun(context.Context, store.BenchmarkRun) error        { return nil }
+func (m *mockBS) SaveRun(context.Context, store.BenchmarkRun) error { return nil }
 func (m *mockBS) GetRuns(context.Context, string, int) ([]store.BenchmarkRun, error) {
 	return nil, nil
 }
@@ -63,6 +63,12 @@ func (m *mockBS) GetLatestRunByAgentModel(_ context.Context, agentID, model stri
 func (m *mockBS) GetVerdictTrend(context.Context, string, int) ([]string, error) {
 	return nil, nil
 }
+func (m *mockBS) ListRunCycles(context.Context, *time.Location, int, int) ([]time.Time, error) {
+	return nil, nil
+}
+func (m *mockBS) QueryRunsInWindow(context.Context, time.Time, time.Time) ([]store.BenchmarkRun, error) {
+	return nil, nil
+}
 func (m *mockBS) GetVerdictTrendByModel(_ context.Context, agentID, model string, _ int) ([]string, error) {
 	key := agentID + "\t" + model
 	return m.trendByKey[key], nil
@@ -72,16 +78,16 @@ func (m *mockBS) Close() error { return nil }
 // helper: make a BenchmarkRun with common defaults.
 func makeRun(agentID, model string, score float64, verdict store.VerdictType) store.BenchmarkRun {
 	return store.BenchmarkRun{
-		AgentID:        agentID,
-		Model:          model,
-		CompositeScore: score,
-		Accuracy:       1.0,
-		P95LatencyMs:   1000,
+		AgentID:         agentID,
+		Model:           model,
+		CompositeScore:  score,
+		Accuracy:        1.0,
+		P95LatencyMs:    1000,
 		ToolSuccessRate: 1.0,
-		TotalCostUSD:   0.50,
-		SampleSize:     100,
-		Verdict:        verdict,
-		RunAt:          time.Now(),
+		TotalCostUSD:    0.50,
+		SampleSize:      100,
+		Verdict:         verdict,
+		RunAt:           time.Now(),
 	}
 }
 

@@ -293,6 +293,12 @@ func (m *mockBenchmarkStore) GetLatestRunByAgentModel(ctx context.Context, agent
 func (m *mockBenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	return nil, nil
 }
+func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, _ *time.Location, _ int, _ int) ([]time.Time, error) {
+	return nil, nil
+}
+func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, _, _ time.Time) ([]store.BenchmarkRun, error) {
+	return nil, nil
+}
 func (m *mockBenchmarkStore) GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error) {
 	return nil, nil
 }
