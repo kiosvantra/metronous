@@ -429,6 +429,49 @@ func truncateSummaryText(s string, maxWidth int) string {
 	return string(runes[:maxWidth-1]) + "…"
 }
 
+func truncateProviderOnly(modelID string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	idx := strings.LastIndex(modelID, "/")
+	if idx < 0 {
+		// No provider separator — never truncate the model part.
+		return modelID
+	}
+	provider := modelID[:idx]
+	model := modelID[idx+1:]
+	modelW := lipgloss.Width(model)
+	if modelW >= maxWidth {
+		// Keep full model.
+		return model
+	}
+	providerAvailable := maxWidth - modelW - 1 // minus '/'
+	if providerAvailable <= 0 {
+		return model
+	}
+	providerW := lipgloss.Width(provider)
+	if providerW <= providerAvailable {
+		return provider + "/" + model
+	}
+	// Truncate provider only.
+	if providerAvailable == 1 {
+		return "…/" + model
+	}
+	// Provider truncation by runes with ellipsis.
+	runes := []rune(provider)
+	// This is an approximation since rune width may differ; lipgloss.Width is
+	// still used for the maxWidth checks.
+	cut := providerAvailable - 1
+	if cut < 1 {
+		cut = 1
+	}
+	if len(runes) < cut {
+		cut = len(runes)
+	}
+	truncProvider := string(runes[:cut])
+	return truncProvider + "…/" + model
+}
+
 func renderSummaryCard(title string, entries []chartSummaryEntry, width int, showResponsibility bool) string {
 	if width <= 0 {
 		width = 40
@@ -467,7 +510,7 @@ func renderSummaryCard(title string, entries []chartSummaryEntry, width int, sho
 		if modelWidth < 10 {
 			modelWidth = 10
 		}
-		model := truncateSummaryText(entry.Model, modelWidth)
+		model := truncateProviderOnly(entry.Model, modelWidth)
 		cost := fmt.Sprintf("$%.2f", entry.TotalCostUSD)
 		barWidth := 8
 		if innerWidth > 56 {
