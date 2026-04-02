@@ -62,7 +62,8 @@ tui-debug.log
 *.tmp
 
 # Agent tooling
-.atl/
+.atl/*
+!.atl/skill-registry.md
 
 # Environment
 .env
