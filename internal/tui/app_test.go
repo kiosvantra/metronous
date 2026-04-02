@@ -94,9 +94,12 @@ func TestAppTabSwitchingByNumber(t *testing.T) {
 
 func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	m := newTestApp(t)
+	// Dismiss the landing screen so arrow keys switch tabs normally.
+	updated, _ := sendKey(m, "1")
+	m = updated.(*tui.AppModel)
 
 	// right → TabBenchmarkSummary
-	updated, _ := sendSpecialKey(m, tea.KeyRight)
+	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmarkSummary {
 		t.Errorf("expected TabBenchmarkSummary after right arrow, got %d", m.CurrentTab)
@@ -137,6 +140,27 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	// When on Charts, left/right should not switch tabs.
 	if m.CurrentTab != tui.TabCharts {
 		t.Errorf("expected TabCharts after left arrow, got %d", m.CurrentTab)
+	}
+}
+
+func TestEscReturnsToLanding(t *testing.T) {
+	m := newTestApp(t)
+	// Ensure View() has a non-zero width.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(*tui.AppModel)
+	// Open a tab from the landing.
+	updated, _ = sendKey(m, "4")
+	m = updated.(*tui.AppModel)
+	view := m.View()
+	if strings.Contains(view, "METRONOUS") {
+		t.Fatalf("expected landing to be dismissed after selecting a tab")
+	}
+	// ESC should bring the user back to the landing.
+	updated, _ = sendSpecialKey(m, tea.KeyEsc)
+	m = updated.(*tui.AppModel)
+	view = m.View()
+	if !strings.Contains(view, "METRONOUS") {
+		t.Fatalf("expected METRONOUS landing after ESC, got: %q", view)
 	}
 }
 

@@ -100,6 +100,8 @@ type AppModel struct {
 	// This is shown on app start so users can discover the 5 tabs.
 	showLanding   bool
 	landingCursor int
+	// landingQuitIndex is the cursor index for the "Quit" option in landing.
+	landingQuitIndex int
 
 	// StatusMsg is a transient message shown at the bottom of the screen.
 	StatusMsg string
@@ -148,6 +150,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		needsClear:       true,
 		showLanding:      true,
 		landingCursor:    0,
+		landingQuitIndex: 5,
 		UpdateAvailable:  false,
 		LatestVersion:    "",
 	}
@@ -282,9 +285,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc", "escape":
-			// Allow leaving landing quickly.
-			m.showLanding = false
+			if m.showLanding {
+				// Allow leaving landing quickly.
+				m.showLanding = false
+				m.needsClear = true
+				return m, nil
+			}
+			// ESC returns to landing.
+			m.showLanding = true
 			m.needsClear = true
+			m.landingCursor = int(m.CurrentTab)
 			return m, nil
 
 		case "u":
@@ -341,9 +351,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "left":
 			// Allow Charts tab to handle month navigation with arrow keys.
 			if m.showLanding {
-				// During landing, arrow keys behave like tab selection.
-				m.showLanding = false
-				m.needsClear = true
+				if m.landingCursor > 0 {
+					m.landingCursor--
+					if m.landingCursor <= 4 {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
+				}
+				return m, nil
 			}
 			if m.CurrentTab == TabCharts {
 				break
@@ -358,8 +372,14 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "right":
 			// Allow Charts tab to handle month navigation with arrow keys.
 			if m.showLanding {
-				m.showLanding = false
-				m.needsClear = true
+				max := m.landingQuitIndex
+				if m.landingCursor < max {
+					m.landingCursor++
+					if m.landingCursor <= 4 {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
+				}
+				return m, nil
 			}
 			if m.CurrentTab == TabCharts {
 				break
@@ -390,6 +410,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			if m.showLanding {
+				if m.landingCursor == m.landingQuitIndex {
+					return m, tea.Quit
+				}
+				m.CurrentTab = Tab(m.landingCursor)
 				m.showLanding = false
 				m.needsClear = true
 				return m, nil
@@ -497,7 +521,7 @@ func (m *AppModel) View() string {
 	// Status bar - show "u: update" only if update is available
 	var hint string
 	if m.showLanding {
-		hint = statusBarStyle.Render("1/2/3/4/5 or ↑/↓: select tab  Enter: open  q: quit")
+		hint = statusBarStyle.Render("1/2/3/4/5 or ↑/↓: select  Enter: open/quit  q: quit")
 	} else {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
@@ -548,6 +572,7 @@ func (m *AppModel) renderLanding() string {
 		{2, "Benchmark Detailed", TabBenchmarkDetailed},
 		{3, "Charts", TabCharts},
 		{4, "Config", TabConfig},
+		{5, "Quit", TabTracking},
 	}
 
 	menuLines := make([]string, 0, len(entries))
@@ -562,7 +587,7 @@ func (m *AppModel) renderLanding() string {
 		menuLines = append(menuLines, style.Render(label))
 	}
 
-	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Originally developed within the Gentle AI ecosystem.")
+	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Originally developed within the Gentle AI ecosystem. Press Enter to open; select Quit to exit.")
 
 	frame := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
@@ -576,7 +601,7 @@ func (m *AppModel) renderLanding() string {
 		title,
 		sub,
 		"",
-		"Tabs:",
+		"Menu:",
 		strings.Join(menuLines, "\n"),
 		"",
 		footer,
