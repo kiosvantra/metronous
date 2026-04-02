@@ -707,12 +707,14 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			logMax = logMin + 1
 		}
 
-		costToBlocks := func(cost float64) int {
+		const unitsPerBlock = 2 // each terminal row represents 2 half-block units
+		barUnits := barHeight * unitsPerBlock
+		costToUnits := func(cost float64) int {
 			if cost <= 0 || len(data.selectedModels) == 0 {
 				return 0
 			}
 			if uniformPositive {
-				return barHeight
+				return barUnits
 			}
 			lg := math.Log10(cost)
 			r := (lg - logMin) / (logMax - logMin)
@@ -722,16 +724,26 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			if r > 1 {
 				r = 1
 			}
-			b := int(math.Round(r * float64(barHeight)))
-			// If the value is positive but extremely small, rounding can drop it to 0 blocks,
-			// making it invisible. Force at least 1 block so the user can still see it.
+			b := int(math.Round(r * float64(barUnits)))
+			// If the value is positive but extremely small, keep at least 0.5 block.
 			if b < 1 {
 				b = 1
 			}
-			if b > barHeight {
-				b = barHeight
+			if b > barUnits {
+				b = barUnits
 			}
 			return b
+		}
+		costToBlockRows := func(cost float64) int {
+			units := costToUnits(cost)
+			rows := int(math.Round(float64(units) / float64(unitsPerBlock)))
+			if rows < 1 {
+				rows = 1
+			}
+			if rows > barHeight {
+				rows = barHeight
+			}
+			return rows
 		}
 
 		formatY := func(v float64) string {
@@ -754,13 +766,7 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 
 		tickRowLabels := make(map[int]string)
 		for _, v := range yTicks {
-			b := costToBlocks(v)
-			if b < 1 {
-				continue
-			}
-			if b > barHeight {
-				b = barHeight
-			}
+			b := costToBlockRows(v)
 			tickRowLabels[b] = formatY(v)
 		}
 		// For log-scaled charts, cost=0 cannot be represented in the block mapping,
@@ -768,12 +774,12 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 		// The bottom visible row is y=1 blocks, so pin label for that row to $0.
 		tickRowLabels[1] = formatY(0)
 
-		heightsPerDay := make([][]int, len(chunkDays))
+		heightsPerDay := make([][]int, len(chunkDays)) // half-block units per segment
 		for i, d := range chunkDays {
 			rowCosts := data.costs[d.Format("2006-01-02")]
 			totalCost := chunkTotals[i]
-			totalBlocks := costToBlocks(totalCost)
-			if totalBlocks <= 0 || rowCosts == nil {
+			totalUnits := costToUnits(totalCost)
+			if totalUnits <= 0 || rowCosts == nil {
 				heightsPerDay[i] = make([]int, len(data.selectedModels))
 				continue
 			}
@@ -783,14 +789,14 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			sumFloors := 0
 			for j, model := range data.selectedModels {
 				c := rowCosts[model]
-				segExact := (float64(totalBlocks) * c) / totalCost
+				segExact := (float64(totalUnits) * c) / totalCost
 				f := int(segExact)
 				floors[j] = f
 				fracs[j] = segExact - float64(f)
 				sumFloors += f
 			}
 
-			rem := totalBlocks - sumFloors
+			rem := totalUnits - sumFloors
 			heights := make([]int, len(data.selectedModels))
 			copy(heights, floors)
 			if rem > 0 {
@@ -816,27 +822,72 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			}
 			row := strings.Repeat(" ", pad) + label + "|"
 
+			rowLowerStart := (y - 1) * unitsPerBlock
+			rowLowerEnd := rowLowerStart + 1
+			rowUpperStart := rowLowerEnd
+			rowUpperEnd := y * unitsPerBlock
+
 			for i := range chunkDays {
-				seg := -1
+				lowerSeg := -1
+				upperSeg := -1
 				cum := 0
 				heights := heightsPerDay[i]
 				for j := range data.selectedModels {
-					cum += heights[j]
-					if y <= cum {
-						seg = j
-						break
+					segStart := cum
+					segEnd := cum + heights[j]
+					if heights[j] > 0 {
+						if lowerSeg < 0 && segEnd > rowLowerStart && segStart < rowLowerEnd {
+							lowerSeg = j
+						}
+						if upperSeg < 0 && segEnd > rowUpperStart && segStart < rowUpperEnd {
+							upperSeg = j
+						}
 					}
+					cum = segEnd
 				}
-				if seg < 0 {
+
+				if lowerSeg < 0 && upperSeg < 0 {
 					row += strings.Repeat(" ", cellWidth)
 					continue
 				}
-				model := data.selectedModels[seg]
-				cell := data.blocks[model]
+
 				globalIdx := chunkStart + i
-				if globalIdx == cursorDayIndex {
-					cell = lipgloss.NewStyle().Foreground(data.colors[model]).Background(lipgloss.Color("240")).Render("█")
+				cursor := globalIdx == cursorDayIndex
+
+				var cell string
+				if upperSeg >= 0 && lowerSeg >= 0 && upperSeg == lowerSeg {
+					model := data.selectedModels[upperSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("█")
+				} else if upperSeg >= 0 && lowerSeg >= 0 {
+					upperModel := data.selectedModels[upperSeg]
+					lowerModel := data.selectedModels[lowerSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[upperModel])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					} else {
+						st = st.Background(data.colors[lowerModel])
+					}
+					cell = st.Render("▀")
+				} else if upperSeg >= 0 {
+					model := data.selectedModels[upperSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("▀")
+				} else {
+					model := data.selectedModels[lowerSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("▄")
 				}
+
 				row += " " + cell + " " + " "
 			}
 			lines = append(lines, row)
