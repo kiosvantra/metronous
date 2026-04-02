@@ -1011,7 +1011,8 @@ func (m ChartsModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render("Charts")
 	sub := fmt.Sprintf("Monthly cost chart plus benchmark summary cards — %s  (←/→ month, k/l or mouse only affect the cost chart)", m.monthStart.Format("January 2006"))
 
-	lines := []string{title + "\n" + sub}
+	legendLine := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Render("Legend: R = Responsibility score, H = Health score")
+	lines := []string{title + "\n" + sub, legendLine}
 	if m.loading {
 		lines = append(lines, "Loading…")
 	}
