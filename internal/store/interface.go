@@ -6,8 +6,21 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+// NormalizeModelName strips well-known provider prefixes from model identifiers
+// so that "opencode/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6" and
+// "claude-sonnet-4-6" are treated as the same model across all stores.
+func NormalizeModelName(model string) string {
+	for _, prefix := range []string{"opencode/", "anthropic/", "ollama-cloud/", "ollama/"} {
+		if strings.HasPrefix(model, prefix) {
+			return model[len(prefix):]
+		}
+	}
+	return model
+}
 
 // Event represents a single telemetry event ingested from an AI agent session.
 // Fields are aligned with the MCP ingest tool schema.

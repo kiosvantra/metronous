@@ -447,18 +447,6 @@ func (es *EventStore) GetAgentSummary(ctx context.Context, agentID string) (stor
 	return summary, nil
 }
 
-// normalizeModelName strips well-known provider prefixes from model identifiers
-// so that "opencode/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6" and
-// "claude-sonnet-4-6" are all treated as the same model in aggregations.
-func normalizeModelName(model string) string {
-	for _, prefix := range []string{"opencode/", "anthropic/", "ollama-cloud/", "ollama/"} {
-		if strings.HasPrefix(model, prefix) {
-			return model[len(prefix):]
-		}
-	}
-	return model
-}
-
 // QueryDailyCostByModel aggregates total incremental cost (USD) per model per
 // local-day for events where event_type='complete'.
 //
@@ -537,7 +525,7 @@ func (es *EventStore) QueryDailyCostByModel(ctx context.Context, since, until ti
 		day := time.Date(utcTs.Year(), utcTs.Month(), utcTs.Day(), 0, 0, 0, 0, time.UTC)
 		dayKey := day.Format("2006-01-02")
 		days[dayKey] = day
-		aggs[aggKey{day: dayKey, model: normalizeModelName(model)}] += delta
+		aggs[aggKey{day: dayKey, model: store.NormalizeModelName(model)}] += delta
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate daily cost rows: %w", err)

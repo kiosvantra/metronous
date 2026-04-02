@@ -302,10 +302,11 @@ func aggregateChartsModelStats(runs []store.BenchmarkRun) map[string]*chartModel
 		if run.Model == "" || run.RunAt.IsZero() {
 			continue
 		}
-		s := stats[run.Model]
+		model := store.NormalizeModelName(run.Model)
+		s := stats[model]
 		if s == nil {
-			s = &chartModelStats{Model: run.Model}
-			stats[run.Model] = s
+			s = &chartModelStats{Model: model}
+			stats[model] = s
 		}
 
 		s.Runs++
