@@ -619,8 +619,24 @@ func verdictAbbrev(v string) string {
 	}
 }
 
+// trendDirectionStyled returns the direction indicator with color applied.
+//   - improving → bright green (82)
+//   - degrading → bright red   (196)
+//   - stable    → bright blue  (39)
+func trendDirectionStyled(verdicts []string) string {
+	dir := trendDirection(verdicts)
+	switch dir {
+	case "↑ improving":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true).Render(dir)
+	case "↓ degrading":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render(dir)
+	default: // → stable
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Render(dir)
+	}
+}
+
 // formatVerdictTrend formats the last 5 verdicts as abbreviated single chars
-// separated by arrows, followed by a direction indicator.
+// separated by arrows, followed by a colored direction indicator.
 // Legend line is appended below.
 // e.g. "K → K → S → K → ?  (↓ degrading)\n  Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  ?=INSUFFICIENT_DATA"
 func formatVerdictTrend(trend []string) string {
@@ -637,7 +653,7 @@ func formatVerdictTrend(trend []string) string {
 		abbrevs[i] = verdictAbbrev(v)
 	}
 	trendLine := strings.Join(abbrevs, " → ")
-	direction := trendDirection(trend)
+	direction := trendDirectionStyled(trend)
 	legend := "  Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  ?=INSUFFICIENT_DATA"
 	return fmt.Sprintf("%s  (%s)\n%s", trendLine, direction, legend)
 }
