@@ -36,6 +36,51 @@ type ChartsModel struct {
 	err     error
 
 	dailyRows []store.DailyCostByModelRow
+
+	cursorDayIndex int // 0-based within the selected month
+}
+
+func daysInMonth(monthStart time.Time) int {
+	start := time.Date(monthStart.Year(), monthStart.Month(), 1, 0, 0, 0, 0, monthStart.Location())
+	count := 0
+	for d := start; d.Month() == start.Month(); d = d.AddDate(0, 0, 1) {
+		count++
+	}
+	return count
+}
+
+func (m *ChartsModel) handleMouse(msg tea.MouseMsg) {
+	// Only attempt tooltip selection when the chart fits in a single chunk.
+	if m.width <= 0 {
+		return
+	}
+	if msg.Type != tea.MouseMotion && msg.Type != tea.MouseLeft {
+		return
+	}
+
+	const cellWidth = 4
+	const leftGutter = 10
+
+	monthDays := daysInMonth(m.monthStart)
+	maxCols := m.width - leftGutter - 1
+	if maxCols <= 0 {
+		return
+	}
+	chunkSize := maxCols / cellWidth
+	if chunkSize < 5 {
+		chunkSize = 5
+	}
+	if chunkSize < monthDays {
+		return
+	}
+
+	// Approximate chart origin.
+	chartStartX := leftGutter + 1
+	idx := (msg.X - chartStartX) / cellWidth
+	if idx < 0 || idx >= monthDays {
+		return
+	}
+	m.cursorDayIndex = idx
 }
 
 // NewChartsModel creates a ChartsModel wired to the given EventStore.
@@ -43,9 +88,10 @@ func NewChartsModel(es store.EventStore) ChartsModel {
 	now := time.Now()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
 	return ChartsModel{
-		es:         es,
-		monthStart: monthStart,
-		loading:    true,
+		es:             es,
+		monthStart:     monthStart,
+		loading:        true,
+		cursorDayIndex: 0,
 	}
 }
 
@@ -63,6 +109,11 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 
+	case tea.MouseMsg:
+		// Tooltip driven by mouse hover/click.
+		m.handleMouse(msg)
+		return m, nil
+
 	case chartsTickMsg:
 		return m, tea.Batch(
 			tea.Tick(chartsRefreshInterval, func(t time.Time) tea.Msg { return chartsTickMsg{t: t} }),
@@ -78,13 +129,28 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.Type {
-		case tea.KeyLeft:
+		switch msg.String() {
+		case "k":
+			m.cursorDayIndex--
+			if m.cursorDayIndex < 0 {
+				m.cursorDayIndex = 0
+			}
+			return m, nil
+		case "l":
+			m.cursorDayIndex++
+			// Clamp to days in month.
+			if m.cursorDayIndex >= daysInMonth(m.monthStart) {
+				m.cursorDayIndex = daysInMonth(m.monthStart) - 1
+			}
+			return m, nil
+		case "left":
 			m.monthStart = m.monthStart.AddDate(0, -1, 0)
+			m.cursorDayIndex = 0
 			m.loading = true
 			return m, m.fetchDailyCost()
-		case tea.KeyRight:
+		case "right":
 			m.monthStart = m.monthStart.AddDate(0, 1, 0)
+			m.cursorDayIndex = 0
 			m.loading = true
 			return m, m.fetchDailyCost()
 		}
@@ -304,7 +370,8 @@ func (m ChartsModel) View() string {
 
 		logMin := math.Log10(minPositive)
 		logMax := math.Log10(maxTotal)
-		if logMax-logMin < 1e-9 {
+		uniformPositive := logMax-logMin < 1e-9
+		if uniformPositive {
 			logMax = logMin + 1
 		}
 
@@ -312,12 +379,8 @@ func (m ChartsModel) View() string {
 			if cost <= 0 || len(segmentModels) == 0 {
 				return 0
 			}
-			// If all positive totals are equal, avoid log-ratio collapsing to 0.
-			if maxTotal > 0 && math.Abs(maxTotal-minPositive)/maxTotal < 1e-12 {
-				if cost > 0 {
-					return barHeight
-				}
-				return 0
+			if uniformPositive {
+				return barHeight
 			}
 			lg := math.Log10(cost)
 			r := (lg - logMin) / (logMax - logMin)
@@ -460,6 +523,59 @@ func (m ChartsModel) View() string {
 		if chunkEnd < len(days) {
 			lines = append(lines, "")
 		}
+	}
+
+	// Tooltip (keyboard/mouse cursor) above the legend.
+	if len(days) > 0 {
+		idx := m.cursorDayIndex
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(days) {
+			idx = len(days) - 1
+		}
+		cursorDay := days[idx]
+		dayKey := cursorDay.Format("2006-01-02")
+		rowCosts := costs[dayKey]
+
+		total := 0.0
+		for _, model := range segmentModels {
+			if rowCosts != nil {
+				total += rowCosts[model]
+			}
+		}
+
+		tooltipLines := []string{}
+		tooltipLines = append(tooltipLines, fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total))
+		if total <= 0 || rowCosts == nil {
+			tooltipLines = append(tooltipLines, "(sin consumo en este dia)")
+		} else {
+			// Build entries sorted by cost desc.
+			type ent struct {
+				model string
+				cost  float64
+			}
+			ents := make([]ent, 0, len(segmentModels))
+			for _, model := range segmentModels {
+				c := rowCosts[model]
+				ents = append(ents, ent{model: model, cost: c})
+			}
+			sort.SliceStable(ents, func(i, j int) bool { return ents[i].cost > ents[j].cost })
+			limit := 6
+			if len(ents) < limit {
+				limit = len(ents)
+			}
+			for i := 0; i < limit; i++ {
+				if ents[i].cost <= 0 {
+					continue
+				}
+				block := blocks[ents[i].model]
+				tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", block, ents[i].model, ents[i].cost))
+			}
+		}
+
+		lines = append(lines, "")
+		lines = append(lines, tooltipLines...)
 	}
 
 	// Legend below the chart.

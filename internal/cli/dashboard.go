@@ -101,7 +101,7 @@ func runDashboard(dataDir, configPath string) error {
 	workDir, _ := os.Getwd()
 	version := version.Version
 	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir, version)
-	p := tea.NewProgram(&model, tea.WithAltScreen())
+	p := tea.NewProgram(&model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("dashboard error: %w", err)
