@@ -1105,6 +1105,18 @@ func (m ChartsModel) View() string {
 
 	legendLine := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Render("Legend: R = Responsibility score, H = Health score")
 	lines := []string{title + "\n" + sub, legendLine}
+
+	if m.totalsByCost != nil {
+		totalSpent := 0.0
+		for _, v := range m.totalsByCost {
+			totalSpent += v
+		}
+		if totalSpent > 0 {
+			lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render(
+				fmt.Sprintf("Total Spent of the Month: $%.2f", totalSpent),
+			))
+		}
+	}
 	if m.loading {
 		lines = append(lines, "Loading…")
 	}
