@@ -50,6 +50,10 @@ func (m *mockStore) GetAgentSummary(_ context.Context, _ string) (store.AgentSum
 	return store.AgentSummary{}, nil
 }
 
+func (m *mockStore) QueryDailyCostByModel(_ context.Context, _, _ time.Time) ([]store.DailyCostByModelRow, error) {
+	return nil, nil
+}
+
 func (m *mockStore) Close() error { return nil }
 
 func (m *mockStore) CountEvents(_ context.Context, _ store.EventQuery) (int, error) {

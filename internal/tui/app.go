@@ -36,21 +36,23 @@ const (
 	TabTracking          Tab = iota // 0 — real-time event stream
 	TabBenchmarkSummary             // 1 — aggregated benchmark summary
 	TabBenchmarkDetailed            // 2 — per-run benchmark history
-	TabConfig                       // 3 — threshold editor
+	TabCharts                       // 3 — cost charts
+	TabConfig                       // 4 — threshold editor
 )
 
 // TabBenchmark is an alias for TabBenchmarkDetailed kept for backwards compat
 // in any code that still references the old name.
 const TabBenchmark = TabBenchmarkDetailed
 
-const numTabs = 4
+const numTabs = 5
 
 // tabNames are the display labels for each tab (1-indexed for humans).
 var tabNames = [numTabs]string{
 	"[1] Tracking",
 	"[2] Benchmark Summary",
 	"[3] Benchmark Detailed",
-	"[4] Config",
+	"[4] Charts",
+	"[5] Config",
 }
 
 // Styles are shared across all views.
@@ -92,6 +94,7 @@ type AppModel struct {
 	benchmarkSummary BenchmarkSummaryModel
 	benchmark        BenchmarkModel
 	config           ConfigModel
+	charts           ChartsModel
 
 	// StatusMsg is a transient message shown at the bottom of the screen.
 	StatusMsg string
@@ -135,6 +138,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		benchmarkSummary: NewBenchmarkSummaryModel(bs),
 		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
 		config:           NewConfigModel(configPath),
+		charts:           NewChartsModel(es),
 		CurrentVersion:   version,
 		needsClear:       true,
 		UpdateAvailable:  false,
@@ -149,6 +153,7 @@ func (m AppModel) Init() tea.Cmd {
 		m.benchmarkSummary.Init(),
 		m.benchmark.Init(),
 		m.config.Init(),
+		m.charts.Init(),
 		checkForUpdate,
 	)
 }
@@ -309,6 +314,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "4":
+			m.CurrentTab = TabCharts
+			m.needsClear = true
+			return m, nil
+
+		case "5":
 			m.CurrentTab = TabConfig
 			m.needsClear = true
 			return m, nil
@@ -355,6 +365,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.benchmark, cmd = m.benchmark.Update(msg)
 		case TabConfig:
 			m.config, cmd = m.config.Update(msg)
+		case TabCharts:
+			m.charts, cmd = m.charts.Update(msg)
 		}
 		return m, cmd
 	}
@@ -366,12 +378,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = ws.Height
 	}
 
-	var tCmd, sCmd, bCmd, cCmd tea.Cmd
+	var tCmd, sCmd, bCmd, cCmd, chCmd tea.Cmd
 	m.tracking, tCmd = m.tracking.Update(msg)
 	m.benchmarkSummary, sCmd = m.benchmarkSummary.Update(msg)
 	m.benchmark, bCmd = m.benchmark.Update(msg)
 	m.config, cCmd = m.config.Update(msg)
-	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd)
+	m.charts, chCmd = m.charts.Update(msg)
+	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd, chCmd)
 }
 
 // View renders the full dashboard.
@@ -403,6 +416,8 @@ func (m *AppModel) View() string {
 		content = m.benchmark.View()
 	case TabConfig:
 		content = m.config.View()
+	case TabCharts:
+		content = m.charts.View()
 	}
 
 	// Update banner
@@ -417,9 +432,9 @@ func (m *AppModel) View() string {
 	}
 
 	// Status bar - show "u: update" only if update is available
-	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
+	hint := statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload")
 	if m.UpdateAvailable {
-		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
+		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
 	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)

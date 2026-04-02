@@ -434,6 +434,58 @@ func (es *EventStore) GetAgentSummary(ctx context.Context, agentID string) (stor
 	return summary, nil
 }
 
+// QueryDailyCostByModel aggregates total cost (USD) per model per local-day
+// for events where event_type='complete'.
+//
+// The window is treated as [since, until) in UTC instants, while the resulting
+// Day buckets are computed in the database using SQLite localtime.
+func (es *EventStore) QueryDailyCostByModel(ctx context.Context, since, until time.Time) ([]store.DailyCostByModelRow, error) {
+	const q = `
+		SELECT
+			strftime('%Y-%m-%d', datetime(timestamp/1000, 'unixepoch', 'localtime')) AS day,
+			model,
+			COALESCE(SUM(cost_usd), 0) AS total_cost_usd
+		FROM events
+		WHERE event_type = 'complete'
+			AND timestamp >= ?
+			AND timestamp < ?
+			AND cost_usd IS NOT NULL
+		GROUP BY day, model
+		ORDER BY day ASC, model ASC
+	`
+
+	rows, err := es.readDB.QueryContext(ctx, q, since.UTC().UnixMilli(), until.UTC().UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("query daily cost by model: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.DailyCostByModelRow
+	for rows.Next() {
+		var (
+			dayStr string
+			model  string
+			total  float64
+		)
+		if err := rows.Scan(&dayStr, &model, &total); err != nil {
+			return nil, fmt.Errorf("scan daily cost row: %w", err)
+		}
+		d, err := time.ParseInLocation("2006-01-02", dayStr, time.Local)
+		if err != nil {
+			return nil, fmt.Errorf("parse day %q: %w", dayStr, err)
+		}
+		out = append(out, store.DailyCostByModelRow{
+			Day:          d,
+			Model:        model,
+			TotalCostUSD: total,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate daily cost rows: %w", err)
+	}
+	return out, nil
+}
+
 // Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.
 // This should be called before Close during graceful shutdown.
 func (es *EventStore) Checkpoint() error {

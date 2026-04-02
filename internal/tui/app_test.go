@@ -70,11 +70,18 @@ func TestAppTabSwitchingByNumber(t *testing.T) {
 		t.Errorf("expected TabBenchmarkDetailed after pressing 3, got %d", m.CurrentTab)
 	}
 
-	// 4 → Config
+	// 4 → Charts
 	updated, _ = sendKey(m, "4")
 	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabCharts {
+		t.Errorf("expected TabCharts after pressing 4, got %d", m.CurrentTab)
+	}
+
+	// 5 → Config
+	updated, _ = sendKey(m, "5")
+	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
-		t.Errorf("expected TabConfig after pressing 4, got %d", m.CurrentTab)
+		t.Errorf("expected TabConfig after pressing 5, got %d", m.CurrentTab)
 	}
 
 	// Back to 1 → Tracking
@@ -102,6 +109,13 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 		t.Errorf("expected TabBenchmarkDetailed after right arrow, got %d", m.CurrentTab)
 	}
 
+	// right → TabCharts
+	updated, _ = sendSpecialKey(m, tea.KeyRight)
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabCharts {
+		t.Errorf("expected TabCharts after right arrow, got %d", m.CurrentTab)
+	}
+
 	// right → TabConfig
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
@@ -109,18 +123,18 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 		t.Errorf("expected TabConfig after right arrow, got %d", m.CurrentTab)
 	}
 
+	// left → TabCharts
+	updated, _ = sendSpecialKey(m, tea.KeyLeft)
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabCharts {
+		t.Errorf("expected TabCharts after left arrow, got %d", m.CurrentTab)
+	}
+
 	// left → TabBenchmarkDetailed
 	updated, _ = sendSpecialKey(m, tea.KeyLeft)
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmarkDetailed {
 		t.Errorf("expected TabBenchmarkDetailed after left arrow, got %d", m.CurrentTab)
-	}
-
-	// left → TabBenchmarkSummary
-	updated, _ = sendSpecialKey(m, tea.KeyLeft)
-	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmarkSummary {
-		t.Errorf("expected TabBenchmarkSummary after left arrow, got %d", m.CurrentTab)
 	}
 }
 
@@ -134,8 +148,8 @@ func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 		t.Errorf("expected tab to stay at TabTracking, got %d", m.CurrentTab)
 	}
 
-	// Jump to last tab (4 = Config) then press right → stays at TabConfig.
-	updated, _ = sendKey(m, "4")
+	// Jump to last tab (5 = Config) then press right → stays at TabConfig.
+	updated, _ = sendKey(m, "5")
 	m = updated.(*tui.AppModel)
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
@@ -1157,8 +1171,8 @@ func TestTrackingRefreshWithNewSessionsDoesNotClosePopup(t *testing.T) {
 
 // ----- Benchmark Summary tab tests -------------------------------------------
 
-// TestAppTabSwitchingFourTabs verifies all four tabs are reachable via 1/2/3/4.
-func TestAppTabSwitchingFourTabs(t *testing.T) {
+// TestAppTabSwitchingFiveTabs verifies all tabs are reachable via 1/2/3/4/5.
+func TestAppTabSwitchingFiveTabs(t *testing.T) {
 	m := newTestApp(t)
 
 	cases := []struct {
@@ -1169,7 +1183,8 @@ func TestAppTabSwitchingFourTabs(t *testing.T) {
 		{"1", tui.TabTracking, "TabTracking"},
 		{"2", tui.TabBenchmarkSummary, "TabBenchmarkSummary"},
 		{"3", tui.TabBenchmarkDetailed, "TabBenchmarkDetailed"},
-		{"4", tui.TabConfig, "TabConfig"},
+		{"4", tui.TabCharts, "TabCharts"},
+		{"5", tui.TabConfig, "TabConfig"},
 	}
 	for _, tc := range cases {
 		updated, _ := sendKey(m, tc.key)

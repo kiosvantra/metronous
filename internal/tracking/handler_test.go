@@ -450,6 +450,10 @@ func (f *failingStore) GetAgentSummary(_ context.Context, _ string) (store.Agent
 	return store.AgentSummary{}, nil
 }
 
+func (f *failingStore) QueryDailyCostByModel(_ context.Context, _, _ time.Time) ([]store.DailyCostByModelRow, error) {
+	return nil, nil
+}
+
 func (f *failingStore) CountEvents(_ context.Context, _ store.EventQuery) (int, error) {
 	return 0, nil
 }
