@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -211,24 +212,31 @@ func (m ChartsModel) View() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: "+m.err.Error()))
 	}
 
-	// Vertical stacked bar chart (one column per day).
-	maxCols := m.width - 2
+	// Vertical stacked bar chart (one column per day), with spacing and
+	// logarithmic Y axis.
+	cellWidth := 4
+	leftGutter := 10 // includes y-axis labels
+
+	maxCols := (m.width - leftGutter - 1)
 	if maxCols <= 0 {
-		maxCols = 31
+		maxCols = 1
 	}
-	if maxCols < 6 {
-		maxCols = 6
+	chunkSize := maxCols / cellWidth
+	if chunkSize <= 0 {
+		chunkSize = 5
 	}
-	chunkSize := maxCols
+	if chunkSize < 5 {
+		chunkSize = 5
+	}
 	if chunkSize > len(days) {
 		chunkSize = len(days)
 	}
 
-	barHeight := 10
+	barHeight := 12
 	if m.height > 0 {
-		barHeight = m.height - 10
-		if barHeight < 6 {
-			barHeight = 6
+		barHeight = m.height - 15
+		if barHeight < 8 {
+			barHeight = 8
 		}
 		if barHeight > 18 {
 			barHeight = 18
@@ -252,11 +260,7 @@ func (m ChartsModel) View() string {
 		dayTotals = append(dayTotals, total)
 	}
 
-	if len(days) == 0 {
-		lines = append(lines, "No data")
-		return strings.Join(lines, "\n")
-	}
-
+	// Split chart in chunks if terminal is narrow.
 	for chunkStart := 0; chunkStart < len(days); chunkStart += chunkSize {
 		chunkEnd := chunkStart + chunkSize
 		if chunkEnd > len(days) {
@@ -265,11 +269,83 @@ func (m ChartsModel) View() string {
 		chunkDays := days[chunkStart:chunkEnd]
 		chunkTotals := dayTotals[chunkStart:chunkEnd]
 
+		// Compute log scale bounds for this chunk.
+		maxTotal := 0.0
+		minPositive := 0.0
+		for _, v := range chunkTotals {
+			if v > maxTotal {
+				maxTotal = v
+			}
+			if v > 0 && (minPositive == 0 || v < minPositive) {
+				minPositive = v
+			}
+		}
+		if maxTotal <= 0 {
+			maxTotal = 1
+		}
+		if minPositive <= 0 {
+			minPositive = maxTotal
+		}
+
+		logMin := math.Log10(minPositive)
+		logMax := math.Log10(maxTotal)
+		if logMax-logMin < 1e-9 {
+			logMax = logMin + 1
+		}
+
+		costToBlocks := func(cost float64) int {
+			if cost <= 0 || len(segmentModels) == 0 {
+				return 0
+			}
+			lg := math.Log10(cost)
+			r := (lg - logMin) / (logMax - logMin)
+			if r < 0 {
+				r = 0
+			}
+			if r > 1 {
+				r = 1
+			}
+			return int(math.Round(r * float64(barHeight)))
+		}
+
+		formatY := func(v float64) string {
+			if v >= 100 {
+				return fmt.Sprintf("$%.0f", v)
+			}
+			if v >= 10 {
+				return fmt.Sprintf("$%.1f", v)
+			}
+			return fmt.Sprintf("$%.2f", v)
+		}
+
+		// Build Y ticks (logarithmic).
+		tickCount := 5
+		yTicks := make([]float64, 0, tickCount)
+		for i := 0; i < tickCount; i++ {
+			r := float64(i) / float64(tickCount-1)
+			val := math.Pow(10, logMax-(r*(logMax-logMin)))
+			yTicks = append(yTicks, val)
+		}
+
+		tickRowLabels := make(map[int]string) // rowBlocks -> label
+		for _, v := range yTicks {
+			b := costToBlocks(v)
+			if b < 1 {
+				continue
+			}
+			if b > barHeight {
+				b = barHeight
+			}
+			tickRowLabels[b] = formatY(v)
+		}
+
+		// Precompute stacked segment blocks per day.
 		heightsPerDay := make([][]int, len(chunkDays))
 		for i, d := range chunkDays {
 			rowCosts := costs[d.Format("2006-01-02")]
-			total := chunkTotals[i]
-			if total <= 0 || len(segmentModels) == 0 {
+			totalCost := chunkTotals[i]
+			totalBlocks := costToBlocks(totalCost)
+			if totalBlocks <= 0 || rowCosts == nil {
 				heightsPerDay[i] = make([]int, len(segmentModels))
 				continue
 			}
@@ -278,18 +354,15 @@ func (m ChartsModel) View() string {
 			fracs := make([]float64, len(segmentModels))
 			sumFloors := 0
 			for j, model := range segmentModels {
-				c := 0.0
-				if rowCosts != nil {
-					c = rowCosts[model]
-				}
-				e := (float64(barHeight) * c) / total
-				f := int(e)
+				c := rowCosts[model]
+				segExact := (float64(totalBlocks) * c) / totalCost
+				f := int(segExact)
 				floors[j] = f
-				fracs[j] = e - float64(f)
+				fracs[j] = segExact - float64(f)
 				sumFloors += f
 			}
 
-			rem := barHeight - sumFloors
+			rem := totalBlocks - sumFloors
 			heights := make([]int, len(segmentModels))
 			copy(heights, floors)
 			if rem > 0 {
@@ -307,16 +380,16 @@ func (m ChartsModel) View() string {
 			heightsPerDay[i] = heights
 		}
 
-		// Render bar area.
+		// Render chart rows.
 		for y := barHeight; y >= 1; y-- {
-			var row strings.Builder
-			for i := range chunkDays {
-				total := chunkTotals[i]
-				if total <= 0 || len(segmentModels) == 0 {
-					row.WriteByte(' ')
-					continue
-				}
+			label := tickRowLabels[y]
+			pad := leftGutter - len(label)
+			if pad < 1 {
+				pad = 1
+			}
+			row := strings.Repeat(" ", pad) + label + "|"
 
+			for i := range chunkDays {
 				seg := -1
 				cum := 0
 				heights := heightsPerDay[i]
@@ -328,20 +401,39 @@ func (m ChartsModel) View() string {
 					}
 				}
 				if seg < 0 {
-					row.WriteByte(' ')
+					row += strings.Repeat(" ", cellWidth)
 					continue
 				}
-				row.WriteString(blocks[segmentModels[seg]])
+				// Center bar in the cell.
+				row += " " + blocks[segmentModels[seg]] + " " + " "
 			}
-			lines = append(lines, row.String())
+			lines = append(lines, row)
 		}
 
-		// X-axis labels (last digit) to keep width tight.
-		var xlabels strings.Builder
-		for _, d := range chunkDays {
-			xlabels.WriteString(fmt.Sprintf("%d", d.Day()%10))
+		// X axis baseline.
+		base := strings.Repeat(" ", leftGutter) + "+"
+		for range chunkDays {
+			base += strings.Repeat("-", cellWidth)
 		}
-		lines = append(lines, xlabels.String())
+		lines = append(lines, base)
+
+		// X axis labels (day number, spaced by column width).
+		labelRow := strings.Repeat(" ", leftGutter) + " "
+		for _, d := range chunkDays {
+			lab := fmt.Sprintf("%2d", d.Day())
+			if cellWidth > 2 {
+				lab = " " + lab + strings.Repeat(" ", cellWidth-3)
+			}
+			// Ensure exact width.
+			if len(lab) < cellWidth {
+				lab += strings.Repeat(" ", cellWidth-len(lab))
+			}
+			if len(lab) > cellWidth {
+				lab = lab[:cellWidth]
+			}
+			labelRow += lab
+		}
+		lines = append(lines, labelRow)
 
 		if chunkEnd < len(days) {
 			lines = append(lines, "")
