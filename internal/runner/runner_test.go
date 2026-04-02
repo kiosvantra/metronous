@@ -35,6 +35,12 @@ func setupStores(t *testing.T) (store.EventStore, store.BenchmarkStore) {
 // insertEvents inserts n events for the given agent in the last windowDays.
 func insertEvents(t *testing.T, ctx context.Context, es store.EventStore, agentID string, n int, eventType string) {
 	t.Helper()
+	insertEventsWithModel(t, ctx, es, agentID, n, eventType, "claude-sonnet")
+}
+
+// insertEventsWithModel inserts n events for the given agent and model.
+func insertEventsWithModel(t *testing.T, ctx context.Context, es store.EventStore, agentID string, n int, eventType, model string) {
+	t.Helper()
 	dur := 1000
 	cost := 0.01
 	quality := 0.9
@@ -44,9 +50,9 @@ func insertEvents(t *testing.T, ctx context.Context, es store.EventStore, agentI
 	for i := 0; i < n; i++ {
 		e := store.Event{
 			AgentID:      agentID,
-			SessionID:    "session-x",
+			SessionID:    "session-" + model,
 			EventType:    eventType,
-			Model:        "claude-sonnet",
+			Model:        model,
 			Timestamp:    time.Now().Add(-time.Duration(i) * time.Hour).UTC(),
 			DurationMs:   &dur,
 			CostUSD:      &cost,
@@ -316,6 +322,79 @@ func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
 	}
 	if iwRun.WindowEnd.After(afterIntraweek.Add(time.Second)) {
 		t.Errorf("WindowEnd %v is after the intraweek run completed %v", iwRun.WindowEnd, afterIntraweek)
+	}
+}
+
+// TestRunnerGeneratesOneRunPerModelPerAgent verifies that when an agent uses
+// multiple models in the window, a separate BenchmarkRun is created for each.
+func TestRunnerGeneratesOneRunPerModelPerAgent(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	// Insert 60 events with model-A and 60 with model-B for the same agent.
+	insertEventsWithModel(t, ctx, es, "multi-model-agent", 60, "complete", "model-a")
+	insertEventsWithModel(t, ctx, es, "multi-model-agent", 60, "complete", "model-b")
+
+	if err := r.RunWeekly(ctx, 7); err != nil {
+		t.Fatalf("RunWeekly: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "multi-model-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs (one per model), got %d", len(runs))
+	}
+
+	models := make(map[string]bool)
+	for _, run := range runs {
+		models[run.Model] = true
+	}
+	if !models["model-a"] {
+		t.Error("expected run for model-a")
+	}
+	if !models["model-b"] {
+		t.Error("expected run for model-b")
+	}
+}
+
+// TestRunnerNormalizesModelPrefixes verifies that provider prefixes are stripped
+// so opencode/claude-sonnet and claude-sonnet produce a single merged run.
+func TestRunnerNormalizesModelPrefixes(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	// Same model, different prefixes — should be merged into one run.
+	insertEventsWithModel(t, ctx, es, "prefix-agent", 40, "complete", "opencode/claude-sonnet")
+	insertEventsWithModel(t, ctx, es, "prefix-agent", 30, "complete", "claude-sonnet")
+
+	if err := r.RunWeekly(ctx, 7); err != nil {
+		t.Fatalf("RunWeekly: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "prefix-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 merged run, got %d: %v", len(runs), runs)
+	}
+	if runs[0].Model != "claude-sonnet" {
+		t.Errorf("expected normalized model claude-sonnet, got %q", runs[0].Model)
+	}
+	if runs[0].SampleSize != 70 {
+		t.Errorf("expected 70 samples (merged), got %d", runs[0].SampleSize)
 	}
 }
 
