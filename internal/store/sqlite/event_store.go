@@ -136,20 +136,6 @@ func (es *EventStore) InsertEvent(ctx context.Context, event store.Event) (strin
 	return event.ID, nil
 }
 
-// upsertAgentSummary maintains the materialized summary cache for an agent.
-// Deprecated: Use upsertAgentSummaryTx for transactional consistency.
-func (es *EventStore) upsertAgentSummary(ctx context.Context, event store.Event) error {
-	tx, err := es.writeDB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if err := es.upsertAgentSummaryTx(ctx, tx, event); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
-
 // upsertAgentSummaryTx maintains the materialized summary cache for an agent using the provided transaction.
 func (es *EventStore) upsertAgentSummaryTx(ctx context.Context, tx *sql.Tx, event store.Event) error {
 	// The running average formula uses the OLD total_events value (before +1).

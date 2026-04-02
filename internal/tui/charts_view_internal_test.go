@@ -134,3 +134,22 @@ func TestChartsMonthCursorDoesNotChangeWithModeToggleKey(t *testing.T) {
 		t.Fatalf("expected month to stay unchanged after pressing m")
 	}
 }
+
+func TestChartsMouseCursorSelectsExpectedDay(t *testing.T) {
+	monthStart := time.Date(2026, 4, 1, 0, 0, 0, 0, time.Local) // 30 days
+	m := NewChartsModel(nil, nil)
+	m.monthStart = monthStart
+	m.width = 160
+	// Height is not used by handleMouse.
+
+	const leftGutter = 10
+	const cellWidth = 4
+	chartStartX := leftGutter + 2
+	wantDay := 5
+
+	msg := tea.MouseMsg{X: chartStartX + cellWidth*wantDay + 1, Y: 0, Type: tea.MouseMotion}
+	m.handleMouse(msg)
+	if m.cursorDayIndex != wantDay {
+		t.Fatalf("expected cursorDayIndex %d, got %d", wantDay, m.cursorDayIndex)
+	}
+}

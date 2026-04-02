@@ -934,8 +934,10 @@ func (m *ChartsModel) handleMouse(msg tea.MouseMsg) {
 		return
 	}
 
-	// Approximate chart origin.
-	chartStartX := leftGutter + 1
+	// Chart origin: renderChartPanel builds each bar row as:
+	//   <yLabelPadding><label>| <cell><cell>...
+	// There is a single leading space before the first cell block.
+	chartStartX := leftGutter + 2
 	idx := (msg.X - chartStartX) / cellWidth
 	if idx < 0 || idx >= monthDays {
 		return

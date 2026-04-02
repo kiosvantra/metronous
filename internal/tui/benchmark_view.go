@@ -812,7 +812,11 @@ func computeSavings(currentModel, recommendedModel string, verdict store.Verdict
 	}
 	currentPrice, ok1 := pricing[currentModel]
 	recommendedPrice, ok2 := pricing[recommendedModel]
-	if !ok1 || !ok2 || currentPrice <= 0 || recommendedPrice <= 0 {
+	if !ok1 || !ok2 {
+		return 0, "?"
+	}
+	if currentPrice <= 0 || recommendedPrice <= 0 {
+		// Free models or invalid prices do not produce savings.
 		return 0, "-"
 	}
 	savings := (1 - recommendedPrice/currentPrice) * 100
