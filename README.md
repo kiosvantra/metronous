@@ -170,7 +170,8 @@ metronous dashboard
 - **[1] Tracking** — Real-time event stream with tokens and cost per tool call
 - **[2] Benchmark Summary** — Aggregated benchmark table with verdicts and recommendations
 - **[3] Benchmark Detailed** — Per-agent run history grouped into Sunday-bounded cycles (freeze detail with Enter)
-- **[4] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
+- **[4] Charts** — Daily cost by model (stacked bars) with month and day navigation (tooltips supported)
+- **[5] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
 
 For TUI navigation keys, see [docs/tui-controls.md](docs/tui-controls.md).
 
