@@ -429,7 +429,20 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 func (m BenchmarkModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Run Cycle") + "\n\n")
+	sb.WriteString(titleStyle.Render("Run Cycle") + "\n")
+
+	// F5 indicator — always visible below the title, same as Benchmark Summary.
+	f5TopStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
+	dimTop := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	if m.running {
+		runningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
+		sb.WriteString(runningStyle.Render("  ⏳ Running intraweek benchmark...") + "\n\n")
+	} else if m.runErr != nil {
+		errRunStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		sb.WriteString(errRunStyle.Render(fmt.Sprintf("  ✗ Intraweek run failed: %v", m.runErr)) + "\n\n")
+	} else {
+		sb.WriteString(dimTop.Render("  Press") + " " + f5TopStyle.Render("F5") + dimTop.Render(" to run an intraweek benchmark now") + "\n\n")
+	}
 
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
@@ -503,22 +516,10 @@ func (m BenchmarkModel) View() string {
 	} else {
 		cycleLabel = "cycle 1/1"
 	}
-	footerPrefix := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail,",
+	footerText := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail)",
 		len(m.runs), cycleLabel)
-	footerSuffix := " to run intraweek)"
-	sb.WriteString(dimStyle.Render(footerPrefix) + f5KeyStyle.Render(" F5") + dimStyle.Render(footerSuffix))
+	sb.WriteString(dimStyle.Render(footerText))
 	sb.WriteString("\n")
-
-	// Running status indicator — shown only while an F5 run is in progress.
-	if m.running {
-		runningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
-		sb.WriteString(runningStyle.Render("  ⏳ Running intraweek benchmark..."))
-		sb.WriteString("\n")
-	} else if m.runErr != nil {
-		errRunStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-		sb.WriteString(errRunStyle.Render(fmt.Sprintf("  ✗ Intraweek run failed: %v", m.runErr)))
-		sb.WriteString("\n")
-	}
 
 	// Detail panel for the selected run.
 	// When detailFrozen, show the frozen snapshot — it won't change on background refresh.
