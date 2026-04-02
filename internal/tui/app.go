@@ -118,6 +118,16 @@ type AppModel struct {
 	CurrentVersion string
 }
 
+func (m *AppModel) closeTrackingPopup() {
+	// Reset popup state so returning to Tracking does not show stale/frozen UI.
+	m.tracking.popupOpen = false
+	m.tracking.popupSessionID = ""
+	m.tracking.popupEvents = nil
+	m.tracking.popupLoading = false
+	m.tracking.popupCursor = 0
+	m.tracking.popupOffset = 0
+}
+
 // NewAppModel creates an AppModel wired to the given stores/config path.
 // dataDir is the Metronous data directory (e.g. ~/.metronous/data); it is used
 // by the benchmark view to load model pricing from dataDir/../thresholds.json.
@@ -294,6 +304,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// ESC returns to landing.
 			m.showLanding = true
 			m.needsClear = true
+			m.closeTrackingPopup()
 			m.landingCursor = int(m.CurrentTab)
 			return m, nil
 
@@ -324,24 +335,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "2":
+			if m.CurrentTab == TabTracking {
+				m.closeTrackingPopup()
+			}
 			m.CurrentTab = TabBenchmarkSummary
 			m.landingCursor = 1
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "3":
+			if m.CurrentTab == TabTracking {
+				m.closeTrackingPopup()
+			}
 			m.CurrentTab = TabBenchmarkDetailed
 			m.landingCursor = 2
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "4":
+			if m.CurrentTab == TabTracking {
+				m.closeTrackingPopup()
+			}
 			m.CurrentTab = TabCharts
 			m.landingCursor = 3
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "5":
+			if m.CurrentTab == TabTracking {
+				m.closeTrackingPopup()
+			}
 			m.CurrentTab = TabConfig
 			m.landingCursor = 4
 			m.showLanding = false
@@ -362,8 +385,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.CurrentTab == TabCharts {
 				break
 			}
+			oldTab := m.CurrentTab
 			if m.CurrentTab > 0 {
 				m.CurrentTab--
+			}
+			if oldTab == TabTracking && m.CurrentTab != TabTracking {
+				m.closeTrackingPopup()
 			}
 			m.landingCursor = int(m.CurrentTab)
 			m.needsClear = true
@@ -384,8 +411,12 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.CurrentTab == TabCharts {
 				break
 			}
+			oldTab := m.CurrentTab
 			if int(m.CurrentTab) < numTabs-1 {
 				m.CurrentTab++
+			}
+			if oldTab == TabTracking && m.CurrentTab != TabTracking {
+				m.closeTrackingPopup()
 			}
 			m.landingCursor = int(m.CurrentTab)
 			m.needsClear = true
