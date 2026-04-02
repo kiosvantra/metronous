@@ -281,6 +281,9 @@ func (m *mockBenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string
 func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
 	return nil, nil
 }
+func (m *mockBenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.BenchmarkModelSummary, error) {
+	return nil, nil
+}
 func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
 	return nil, nil
 }

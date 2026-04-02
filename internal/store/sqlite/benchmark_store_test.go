@@ -204,6 +204,70 @@ func TestListAgents(t *testing.T) {
 	}
 }
 
+// TestQueryModelSummaries verifies that model-level benchmark summaries aggregate
+// runs across agents and preserve the most recent verdict.
+func TestQueryModelSummaries(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	older := sampleRun("agent-a", store.VerdictSwitch)
+	older.Model = "model-a"
+	older.RunAt = time.Now().Add(-48 * time.Hour).UTC().Truncate(time.Millisecond)
+	older.SampleSize = 100
+	older.Accuracy = 0.80
+	older.P95LatencyMs = 3000
+	older.TotalCostUSD = 1.00
+
+	newer := sampleRun("agent-b", store.VerdictKeep)
+	newer.Model = "model-a"
+	newer.RunAt = time.Now().UTC().Truncate(time.Millisecond)
+	newer.SampleSize = 100
+	newer.Accuracy = 0.95
+	newer.P95LatencyMs = 1000
+	newer.TotalCostUSD = 2.00
+
+	other := sampleRun("agent-c", store.VerdictUrgentSwitch)
+	other.Model = "model-b"
+	other.RunAt = time.Now().UTC().Truncate(time.Millisecond)
+	other.SampleSize = 50
+	other.Accuracy = 0.50
+	other.P95LatencyMs = 5000
+	other.TotalCostUSD = 3.00
+
+	for _, run := range []store.BenchmarkRun{older, newer, other} {
+		if err := bs.SaveRun(ctx, run); err != nil {
+			t.Fatalf("SaveRun: %v", err)
+		}
+	}
+
+	rows, err := bs.QueryModelSummaries(ctx)
+	if err != nil {
+		t.Fatalf("QueryModelSummaries: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 model summaries, got %d", len(rows))
+	}
+
+	var modelA store.BenchmarkModelSummary
+	for _, row := range rows {
+		if row.Model == "model-a" {
+			modelA = row
+		}
+	}
+	if modelA.Model != "model-a" {
+		t.Fatalf("expected model-a summary, got %+v", rows)
+	}
+	if modelA.Runs != 2 {
+		t.Errorf("model-a runs: got %d, want 2", modelA.Runs)
+	}
+	if modelA.LastVerdict != store.VerdictKeep {
+		t.Errorf("model-a last verdict: got %s, want KEEP", modelA.LastVerdict)
+	}
+	if modelA.TotalCostUSD != 3.00 {
+		t.Errorf("model-a total cost: got %.2f, want 3.00", modelA.TotalCostUSD)
+	}
+}
+
 // TestBenchmarkIndexesApplied verifies the benchmark_runs table and indexes exist via sqlite_master.
 func TestBenchmarkIndexesApplied(t *testing.T) {
 	ctx := context.Background()

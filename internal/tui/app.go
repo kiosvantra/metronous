@@ -138,7 +138,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		benchmarkSummary: NewBenchmarkSummaryModel(bs),
 		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
 		config:           NewConfigModel(configPath),
-		charts:           NewChartsModel(es),
+		charts:           NewChartsModel(es, bs),
 		CurrentVersion:   version,
 		needsClear:       true,
 		UpdateAvailable:  false,

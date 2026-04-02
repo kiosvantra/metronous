@@ -18,24 +18,48 @@ const chartsRefreshInterval = 2 * time.Second
 
 type chartsTickMsg struct{ t time.Time }
 
-type ChartsDataMsg struct {
-	Rows []store.DailyCostByModelRow
-	Err  error
+// ChartMode controls how the selected top 3 models are chosen.
+type ChartMode int
+
+const (
+	ChartModePerformance ChartMode = iota
+	ChartModeResponsibility
+)
+
+func (m ChartMode) String() string {
+	switch m {
+	case ChartModeResponsibility:
+		return "Responsibility"
+	default:
+		return "Performance"
+	}
 }
 
-// ChartsModel renders daily cost charts per model for a selected month.
+type ChartsDataMsg struct {
+	Mode           ChartMode
+	MonthStart     time.Time
+	Rows           []store.DailyCostByModelRow
+	SelectedModels []string
+	Err            error
+}
+
+// ChartsModel renders daily cost charts for the selected month.
 type ChartsModel struct {
 	es store.EventStore
+	bs store.BenchmarkStore
 
 	width  int
 	height int
 
 	monthStart time.Time // local midnight of the 1st day of selected month
+	mode       ChartMode
 
 	loading bool
 	err     error
 
 	dailyRows []store.DailyCostByModelRow
+
+	selectedModels []string
 
 	cursorDayIndex int // 0-based within the selected month
 }
@@ -47,6 +71,93 @@ func daysInMonth(monthStart time.Time) int {
 		count++
 	}
 	return count
+}
+
+func sameChartMonth(a, b time.Time) bool {
+	return a.Year() == b.Year() && a.Month() == b.Month()
+}
+
+func rankModelsByCost(rows []store.DailyCostByModelRow, limit int) []string {
+	totals := make(map[string]float64)
+	for _, r := range rows {
+		totals[r.Model] += r.TotalCostUSD
+	}
+
+	type item struct {
+		model string
+		cost  float64
+	}
+	items := make([]item, 0, len(totals))
+	for model, cost := range totals {
+		items = append(items, item{model: model, cost: cost})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].cost != items[j].cost {
+			return items[i].cost > items[j].cost
+		}
+		return items[i].model < items[j].model
+	})
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, items[i].model)
+	}
+	return out
+}
+
+func rankModelsByPerformance(summaries []store.BenchmarkModelSummary, active map[string]struct{}, limit int) []string {
+	type item struct {
+		model string
+		score float64
+		cost  float64
+	}
+	items := make([]item, 0, len(active))
+	for _, s := range summaries {
+		if _, ok := active[s.Model]; !ok {
+			continue
+		}
+		items = append(items, item{
+			model: s.Model,
+			score: computeHealthScore(s.AvgAccuracy, s.AvgP95Ms, s.LastVerdict),
+			cost:  s.TotalCostUSD,
+		})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].score != items[j].score {
+			return items[i].score > items[j].score
+		}
+		if items[i].cost != items[j].cost {
+			return items[i].cost > items[j].cost
+		}
+		return items[i].model < items[j].model
+	})
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, items[i].model)
+	}
+	return out
+}
+
+func filterCostRows(rows []store.DailyCostByModelRow, selected []string) []store.DailyCostByModelRow {
+	if len(selected) == 0 {
+		return nil
+	}
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, model := range selected {
+		selectedSet[model] = struct{}{}
+	}
+	out := make([]store.DailyCostByModelRow, 0, len(rows))
+	for _, r := range rows {
+		if _, ok := selectedSet[r.Model]; ok {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func (m *ChartsModel) handleMouse(msg tea.MouseMsg) {
@@ -84,12 +195,14 @@ func (m *ChartsModel) handleMouse(msg tea.MouseMsg) {
 }
 
 // NewChartsModel creates a ChartsModel wired to the given EventStore.
-func NewChartsModel(es store.EventStore) ChartsModel {
+func NewChartsModel(es store.EventStore, bs store.BenchmarkStore) ChartsModel {
 	now := time.Now()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
 	return ChartsModel{
 		es:             es,
+		bs:             bs,
 		monthStart:     monthStart,
+		mode:           ChartModePerformance,
 		loading:        true,
 		cursorDayIndex: 0,
 	}
@@ -97,7 +210,7 @@ func NewChartsModel(es store.EventStore) ChartsModel {
 
 func (m ChartsModel) Init() tea.Cmd {
 	return tea.Batch(
-		m.fetchDailyCost(),
+		m.fetchChartData(),
 		tea.Tick(chartsRefreshInterval, func(t time.Time) tea.Msg { return chartsTickMsg{t: t} }),
 	)
 }
@@ -117,14 +230,18 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 	case chartsTickMsg:
 		return m, tea.Batch(
 			tea.Tick(chartsRefreshInterval, func(t time.Time) tea.Msg { return chartsTickMsg{t: t} }),
-			m.fetchDailyCost(),
+			m.fetchChartData(),
 		)
 
 	case ChartsDataMsg:
+		if !sameChartMonth(msg.MonthStart, m.monthStart) || msg.Mode != m.mode {
+			return m, nil
+		}
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.dailyRows = msg.Rows
+			m.selectedModels = msg.SelectedModels
 		}
 		return m, nil
 
@@ -143,148 +260,80 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 				m.cursorDayIndex = daysInMonth(m.monthStart) - 1
 			}
 			return m, nil
+		case "m", "M":
+			if m.mode == ChartModePerformance {
+				m.mode = ChartModeResponsibility
+			} else {
+				m.mode = ChartModePerformance
+			}
+			m.loading = true
+			return m, m.fetchChartData()
 		case "left":
 			m.monthStart = m.monthStart.AddDate(0, -1, 0)
 			m.cursorDayIndex = 0
 			m.loading = true
-			return m, m.fetchDailyCost()
+			return m, m.fetchChartData()
 		case "right":
 			m.monthStart = m.monthStart.AddDate(0, 1, 0)
 			m.cursorDayIndex = 0
 			m.loading = true
-			return m, m.fetchDailyCost()
+			return m, m.fetchChartData()
 		}
 	}
 
 	return m, nil
 }
 
-func (m ChartsModel) fetchDailyCost() tea.Cmd {
+func (m ChartsModel) fetchChartData() tea.Cmd {
+	monthStart := m.monthStart
+	mode := m.mode
+	es := m.es
+	bs := m.bs
 	return func() tea.Msg {
-		if m.es == nil {
-			return ChartsDataMsg{Rows: nil, Err: nil}
+		if es == nil {
+			return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Rows: nil, SelectedModels: nil, Err: nil}
 		}
-		startLocal := m.monthStart
+		startLocal := monthStart
 		endLocal := startLocal.AddDate(0, 1, 0)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		rows, err := m.es.QueryDailyCostByModel(ctx, startLocal.UTC(), endLocal.UTC())
-		return ChartsDataMsg{Rows: rows, Err: err}
+		rows, err := es.QueryDailyCostByModel(ctx, startLocal.UTC(), endLocal.UTC())
+		if err != nil {
+			return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Err: err}
+		}
+
+		selected := []string{}
+		switch mode {
+		case ChartModeResponsibility:
+			selected = rankModelsByCost(rows, 3)
+		case ChartModePerformance:
+			active := make(map[string]struct{})
+			for _, r := range rows {
+				active[r.Model] = struct{}{}
+			}
+			if bs != nil {
+				summaries, err := bs.QueryModelSummaries(ctx)
+				if err != nil {
+					return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Err: err}
+				}
+				selected = rankModelsByPerformance(summaries, active, 3)
+			}
+			if len(selected) == 0 {
+				selected = rankModelsByCost(rows, 3)
+			}
+		}
+
+		filtered := filterCostRows(rows, selected)
+		return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Rows: filtered, SelectedModels: selected, Err: nil}
 	}
 }
 
 func (m ChartsModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render("Charts")
+	sub := fmt.Sprintf("%s mode — daily stacked cost for the top 3 models — %s  (m toggle, ←/→ month, k/l day)",
+		m.mode.String(), m.monthStart.Format("January 2006"))
 
-	sub := fmt.Sprintf("Daily cost by model (stacked) — %s  (use ←/→)", m.monthStart.Format("January 2006"))
-
-	palette := []lipgloss.Color{
-		lipgloss.Color("82"),  // green
-		lipgloss.Color("226"), // yellow/orange
-		lipgloss.Color("196"), // red
-		lipgloss.Color("33"),  // blue
-		lipgloss.Color("93"),  // purple
-		lipgloss.Color("214"), // pink
-		lipgloss.Color("118"), // teal
-		lipgloss.Color("45"),  // violet
-	}
-
-	// Build totals per model for legend ordering and segment capping.
-	totals := make(map[string]float64)
-	for _, r := range m.dailyRows {
-		totals[r.Model] += r.TotalCostUSD
-	}
-
-	modelsByTotal := make([]struct {
-		Model string
-		Total float64
-	}, 0, len(totals))
-	for model, total := range totals {
-		modelsByTotal = append(modelsByTotal, struct {
-			Model string
-			Total float64
-		}{Model: model, Total: total})
-	}
-	sort.SliceStable(modelsByTotal, func(i, j int) bool {
-		return modelsByTotal[i].Total > modelsByTotal[j].Total
-	})
-
-	maxSegments := len(palette)
-	segmentModels := []string{}
-	otherTotal := 0.0
-	for i, mrow := range modelsByTotal {
-		if i < maxSegments-1 {
-			segmentModels = append(segmentModels, mrow.Model)
-		} else {
-			otherTotal += mrow.Total
-		}
-	}
-	if len(modelsByTotal) > maxSegments-1 {
-		segmentModels = append(segmentModels, "Other")
-	} else if len(modelsByTotal) == 0 {
-		segmentModels = []string{}
-	}
-
-	colors := make(map[string]lipgloss.Color)
-	for i, model := range segmentModels {
-		colors[model] = palette[i%len(palette)]
-	}
-
-	legendLines := []string{}
-	if len(segmentModels) > 0 {
-		maxLegendWidth := m.width - 2
-		if maxLegendWidth < 40 {
-			maxLegendWidth = 80
-		}
-		line := "Legend: "
-		for i, model := range segmentModels {
-			c := colors[model]
-			block := lipgloss.NewStyle().Foreground(c).Render("█")
-			entry := fmt.Sprintf("%s %s", block, model)
-			sep := "  "
-			if i == 0 {
-				sep = ""
-			}
-			candidate := line + sep + entry
-			if lipgloss.Width(candidate) > maxLegendWidth && line != "Legend: " {
-				legendLines = append(legendLines, line)
-				line = "          " + entry
-			} else {
-				line = candidate
-			}
-		}
-		legendLines = append(legendLines, line)
-	} else {
-		legendLines = []string{"Legend: (no data for selected month)"}
-	}
-
-	// Prepare day buckets for the selected month.
-	start := time.Date(m.monthStart.Year(), m.monthStart.Month(), 1, 0, 0, 0, 0, time.Local)
-	end := start.AddDate(0, 1, 0)
-
-	days := make([]time.Time, 0, 32)
-	for d := start; d.Before(end); d = d.AddDate(0, 0, 1) {
-		days = append(days, d)
-	}
-
-	costs := make(map[string]map[string]float64) // dayKey -> model -> cost
-	for _, r := range m.dailyRows {
-		dayKey := r.Day.Format("2006-01-02")
-		bucket := costs[dayKey]
-		if bucket == nil {
-			bucket = make(map[string]float64)
-			costs[dayKey] = bucket
-		}
-		// If model is not in segmentModels, route it into Other.
-		if _, ok := colors[r.Model]; ok {
-			bucket[r.Model] += r.TotalCostUSD
-		} else {
-			bucket["Other"] += r.TotalCostUSD
-		}
-	}
-
-	lines := []string{}
-	lines = append(lines, title+"\n"+sub)
+	lines := []string{title + "\n" + sub}
 	if m.loading {
 		lines = append(lines, "Loading…")
 	}
@@ -292,12 +341,71 @@ func (m ChartsModel) View() string {
 		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: "+m.err.Error()))
 	}
 
-	// Vertical stacked bar chart (one column per day), with spacing and
-	// logarithmic Y axis.
-	cellWidth := 4
-	leftGutter := 10 // includes y-axis labels
+	start := time.Date(m.monthStart.Year(), m.monthStart.Month(), 1, 0, 0, 0, 0, time.Local)
+	end := start.AddDate(0, 1, 0)
+	days := make([]time.Time, 0, 32)
+	for d := start; d.Before(end); d = d.AddDate(0, 0, 1) {
+		days = append(days, d)
+	}
 
-	maxCols := (m.width - leftGutter - 1)
+	if len(m.dailyRows) == 0 || len(m.selectedModels) == 0 {
+		lines = append(lines, "No chart data for the selected month.")
+		return strings.Join(lines, "\n")
+	}
+
+	palette := []lipgloss.Color{lipgloss.Color("82"), lipgloss.Color("226"), lipgloss.Color("196")}
+	colors := make(map[string]lipgloss.Color, len(m.selectedModels))
+	blocks := make(map[string]string, len(m.selectedModels))
+	for i, model := range m.selectedModels {
+		c := palette[i%len(palette)]
+		colors[model] = c
+		blocks[model] = lipgloss.NewStyle().Foreground(c).Render("█")
+	}
+
+	selectedSet := make(map[string]struct{}, len(m.selectedModels))
+	for _, model := range m.selectedModels {
+		selectedSet[model] = struct{}{}
+	}
+
+	costs := make(map[string]map[string]float64) // dayKey -> model -> cost
+	totals := make(map[string]float64, len(m.selectedModels))
+	for _, r := range m.dailyRows {
+		if _, ok := selectedSet[r.Model]; !ok {
+			continue
+		}
+		dayKey := r.Day.Format("2006-01-02")
+		bucket := costs[dayKey]
+		if bucket == nil {
+			bucket = make(map[string]float64)
+			costs[dayKey] = bucket
+		}
+		bucket[r.Model] += r.TotalCostUSD
+		totals[r.Model] += r.TotalCostUSD
+	}
+
+	legendLines := []string{}
+	line := "Legend: "
+	for i, model := range m.selectedModels {
+		entry := fmt.Sprintf("%s %s ($%.2f)", lipgloss.NewStyle().Foreground(colors[model]).Render("█"), model, totals[model])
+		sep := "  "
+		if i == 0 {
+			sep = ""
+		}
+		candidate := line + sep + entry
+		if m.width > 0 && lipgloss.Width(candidate) > maxInt(40, m.width-2) && line != "Legend: " {
+			legendLines = append(legendLines, line)
+			line = "          " + entry
+		} else {
+			line = candidate
+		}
+	}
+	if line != "Legend: " {
+		legendLines = append(legendLines, line)
+	}
+
+	cellWidth := 4
+	leftGutter := 10
+	maxCols := m.width - leftGutter - 1
 	if maxCols <= 0 {
 		maxCols = 1
 	}
@@ -323,16 +431,11 @@ func (m ChartsModel) View() string {
 		}
 	}
 
-	blocks := make(map[string]string)
-	for _, model := range segmentModels {
-		blocks[model] = lipgloss.NewStyle().Foreground(colors[model]).Render("█")
-	}
-
 	dayTotals := make([]float64, 0, len(days))
 	for _, d := range days {
 		rowCosts := costs[d.Format("2006-01-02")]
 		total := 0.0
-		for _, model := range segmentModels {
+		for _, model := range m.selectedModels {
 			if rowCosts != nil {
 				total += rowCosts[model]
 			}
@@ -340,7 +443,6 @@ func (m ChartsModel) View() string {
 		dayTotals = append(dayTotals, total)
 	}
 
-	// Split chart in chunks if terminal is narrow.
 	chartLinesStart := len(lines)
 	for chunkStart := 0; chunkStart < len(days); chunkStart += chunkSize {
 		chunkEnd := chunkStart + chunkSize
@@ -350,7 +452,6 @@ func (m ChartsModel) View() string {
 		chunkDays := days[chunkStart:chunkEnd]
 		chunkTotals := dayTotals[chunkStart:chunkEnd]
 
-		// Compute log scale bounds for this chunk.
 		maxTotal := 0.0
 		minPositive := 0.0
 		for _, v := range chunkTotals {
@@ -376,7 +477,7 @@ func (m ChartsModel) View() string {
 		}
 
 		costToBlocks := func(cost float64) int {
-			if cost <= 0 || len(segmentModels) == 0 {
+			if cost <= 0 || len(m.selectedModels) == 0 {
 				return 0
 			}
 			if uniformPositive {
@@ -403,7 +504,6 @@ func (m ChartsModel) View() string {
 			return fmt.Sprintf("$%.2f", v)
 		}
 
-		// Build Y ticks (logarithmic).
 		tickCount := 5
 		yTicks := make([]float64, 0, tickCount)
 		for i := 0; i < tickCount; i++ {
@@ -412,7 +512,7 @@ func (m ChartsModel) View() string {
 			yTicks = append(yTicks, val)
 		}
 
-		tickRowLabels := make(map[int]string) // rowBlocks -> label
+		tickRowLabels := make(map[int]string)
 		for _, v := range yTicks {
 			b := costToBlocks(v)
 			if b < 1 {
@@ -424,21 +524,20 @@ func (m ChartsModel) View() string {
 			tickRowLabels[b] = formatY(v)
 		}
 
-		// Precompute stacked segment blocks per day.
 		heightsPerDay := make([][]int, len(chunkDays))
 		for i, d := range chunkDays {
 			rowCosts := costs[d.Format("2006-01-02")]
 			totalCost := chunkTotals[i]
 			totalBlocks := costToBlocks(totalCost)
 			if totalBlocks <= 0 || rowCosts == nil {
-				heightsPerDay[i] = make([]int, len(segmentModels))
+				heightsPerDay[i] = make([]int, len(m.selectedModels))
 				continue
 			}
 
-			floors := make([]int, len(segmentModels))
-			fracs := make([]float64, len(segmentModels))
+			floors := make([]int, len(m.selectedModels))
+			fracs := make([]float64, len(m.selectedModels))
 			sumFloors := 0
-			for j, model := range segmentModels {
+			for j, model := range m.selectedModels {
 				c := rowCosts[model]
 				segExact := (float64(totalBlocks) * c) / totalCost
 				f := int(segExact)
@@ -448,10 +547,10 @@ func (m ChartsModel) View() string {
 			}
 
 			rem := totalBlocks - sumFloors
-			heights := make([]int, len(segmentModels))
+			heights := make([]int, len(m.selectedModels))
 			copy(heights, floors)
 			if rem > 0 {
-				idx := make([]int, len(segmentModels))
+				idx := make([]int, len(m.selectedModels))
 				for k := range idx {
 					idx[k] = k
 				}
@@ -465,7 +564,6 @@ func (m ChartsModel) View() string {
 			heightsPerDay[i] = heights
 		}
 
-		// Render chart rows.
 		for y := barHeight; y >= 1; y-- {
 			label := tickRowLabels[y]
 			pad := leftGutter - len(label)
@@ -478,7 +576,7 @@ func (m ChartsModel) View() string {
 				seg := -1
 				cum := 0
 				heights := heightsPerDay[i]
-				for j := range segmentModels {
+				for j := range m.selectedModels {
 					cum += heights[j]
 					if y <= cum {
 						seg = j
@@ -489,12 +587,10 @@ func (m ChartsModel) View() string {
 					row += strings.Repeat(" ", cellWidth)
 					continue
 				}
-				// Center bar in the cell.
-				model := segmentModels[seg]
+				model := m.selectedModels[seg]
 				cell := blocks[model]
 				globalIdx := chunkStart + i
 				if globalIdx == m.cursorDayIndex {
-					// Highlight selected column.
 					cell = lipgloss.NewStyle().Foreground(colors[model]).Background(lipgloss.Color("240")).Render("█")
 				}
 				row += " " + cell + " " + " "
@@ -502,21 +598,18 @@ func (m ChartsModel) View() string {
 			lines = append(lines, row)
 		}
 
-		// X axis baseline.
 		base := strings.Repeat(" ", leftGutter) + "+"
 		for range chunkDays {
 			base += strings.Repeat("-", cellWidth)
 		}
 		lines = append(lines, base)
 
-		// X axis labels (day number, spaced by column width).
 		labelRow := strings.Repeat(" ", leftGutter) + " "
 		for _, d := range chunkDays {
 			lab := fmt.Sprintf("%2d", d.Day())
 			if cellWidth > 2 {
 				lab = " " + lab + strings.Repeat(" ", cellWidth-3)
 			}
-			// Ensure exact width.
 			if len(lab) < cellWidth {
 				lab += strings.Repeat(" ", cellWidth-len(lab))
 			}
@@ -532,7 +625,6 @@ func (m ChartsModel) View() string {
 		}
 	}
 
-	// Tooltip (keyboard/mouse cursor) above the legend.
 	if len(days) > 0 {
 		idx := m.cursorDayIndex
 		if idx < 0 {
@@ -542,51 +634,38 @@ func (m ChartsModel) View() string {
 			idx = len(days) - 1
 		}
 		cursorDay := days[idx]
-		dayKey := cursorDay.Format("2006-01-02")
-		rowCosts := costs[dayKey]
-
+		rowCosts := costs[cursorDay.Format("2006-01-02")]
 		total := 0.0
-		for _, model := range segmentModels {
+		for _, model := range m.selectedModels {
 			if rowCosts != nil {
 				total += rowCosts[model]
 			}
 		}
-
-		tooltipLines := []string{}
-		tooltipLines = append(tooltipLines, fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total))
+		tooltipLines := []string{fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total)}
 		if total <= 0 || rowCosts == nil {
-			tooltipLines = append(tooltipLines, "(sin consumo en este dia)")
+			tooltipLines = append(tooltipLines, "(no spend on selected models)")
 		} else {
-			// Build entries sorted by cost desc.
 			type ent struct {
 				model string
 				cost  float64
 			}
-			ents := make([]ent, 0, len(segmentModels))
-			for _, model := range segmentModels {
-				c := rowCosts[model]
-				ents = append(ents, ent{model: model, cost: c})
+			ents := make([]ent, 0, len(m.selectedModels))
+			for _, model := range m.selectedModels {
+				ents = append(ents, ent{model: model, cost: rowCosts[model]})
 			}
 			sort.SliceStable(ents, func(i, j int) bool { return ents[i].cost > ents[j].cost })
-			limit := 6
-			if len(ents) < limit {
-				limit = len(ents)
-			}
-			for i := 0; i < limit; i++ {
-				if ents[i].cost <= 0 {
+			for _, ent := range ents {
+				if ent.cost <= 0 {
 					continue
 				}
-				block := blocks[ents[i].model]
-				tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", block, ents[i].model, ents[i].cost))
+				tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", blocks[ent.model], ent.model, ent.cost))
 			}
 		}
-
 		lines = append(lines, "")
 		lines = append(lines, tooltipLines...)
 	}
 
-	// Legend below the chart.
-	if len(days) > 0 {
+	if len(legendLines) > 0 {
 		if len(lines) > chartLinesStart {
 			lines = append(lines, "")
 		}

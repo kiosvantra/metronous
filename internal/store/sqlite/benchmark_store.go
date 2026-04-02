@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -352,6 +353,89 @@ func (bs *BenchmarkStore) ListAgents(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("iterate agent rows: %w", err)
 	}
 	return agents, nil
+}
+
+// QueryModelSummaries returns one aggregated row per model across all benchmark runs.
+// It reuses the existing benchmark run query path and applies the same weighting
+// and verdict selection rules used by the benchmark summary view.
+func (bs *BenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.BenchmarkModelSummary, error) {
+	runs, err := bs.QueryRuns(ctx, store.BenchmarkQuery{Limit: MaxQueryLimit})
+	if err != nil {
+		return nil, fmt.Errorf("query benchmark model summaries: %w", err)
+	}
+
+	type agg struct {
+		runs         int
+		totalSamples int
+		sumAccuracy  float64
+		sumP95       float64
+		totalCost    float64
+		lastVerdict  store.VerdictType
+		lastRunAt    time.Time
+	}
+	aggMap := make(map[string]*agg)
+
+	for _, r := range runs {
+		if r.RunAt.IsZero() {
+			continue
+		}
+		a := aggMap[r.Model]
+		if a == nil {
+			a = &agg{}
+			aggMap[r.Model] = a
+		}
+
+		isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
+		if !isInsufficient {
+			samples := r.SampleSize
+			if samples <= 0 {
+				samples = 1
+			}
+			a.totalSamples += samples
+			a.sumAccuracy += r.Accuracy * float64(samples)
+			a.sumP95 += r.P95LatencyMs * float64(samples)
+		}
+		a.runs++
+		a.totalCost += r.TotalCostUSD
+
+		if r.RunAt.After(a.lastRunAt) {
+			if !isInsufficient {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+			} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+			}
+		}
+	}
+
+	rows := make([]store.BenchmarkModelSummary, 0, len(aggMap))
+	for model, a := range aggMap {
+		avgAcc := 0.0
+		avgP95 := 0.0
+		if a.totalSamples > 0 {
+			avgAcc = a.sumAccuracy / float64(a.totalSamples)
+			avgP95 = a.sumP95 / float64(a.totalSamples)
+		}
+		rows = append(rows, store.BenchmarkModelSummary{
+			Model:        model,
+			Runs:         a.runs,
+			AvgAccuracy:  avgAcc,
+			AvgP95Ms:     avgP95,
+			TotalCostUSD: a.totalCost,
+			LastVerdict:  a.lastVerdict,
+			LastRunAt:    a.lastRunAt,
+		})
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Model != rows[j].Model {
+			return rows[i].Model < rows[j].Model
+		}
+		return rows[i].LastRunAt.After(rows[j].LastRunAt)
+	})
+
+	return rows, nil
 }
 
 // Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.
