@@ -1145,7 +1145,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 		}
 
 		totals := totalsByCost(rows)
-		costSelected := rankModelsByCost(rows, 5)
+		costSelected := rankModelsByCost(rows, 0) // 0 = no limit, show all models
 		performanceSelected := costSelected
 		responsibilitySelected := costSelected
 		stats := map[string]*chartModelStats{}
