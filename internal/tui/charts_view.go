@@ -96,6 +96,14 @@ func rankModelsByCost(rows []store.DailyCostByModelRow, limit int) []string {
 	return out
 }
 
+func totalsByCost(rows []store.DailyCostByModelRow) map[string]float64 {
+	totals := make(map[string]float64)
+	for _, r := range rows {
+		totals[r.Model] += r.TotalCostUSD
+	}
+	return totals
+}
+
 func rankModelsByPerformance(summaries []store.BenchmarkModelSummary, active map[string]struct{}, limit int) []string {
 	type item struct {
 		model string
@@ -356,6 +364,39 @@ func rankChartsByScore(stats map[string]*chartModelStats, scoreFn func(*chartMod
 	items := make([]item, 0, len(stats))
 	for _, s := range stats {
 		items = append(items, item{model: s.Model, score: scoreFn(s), cost: s.TotalCostUSD})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].score != items[j].score {
+			return items[i].score > items[j].score
+		}
+		if items[i].cost != items[j].cost {
+			return items[i].cost > items[j].cost
+		}
+		return items[i].model < items[j].model
+	})
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, items[i].model)
+	}
+	return out
+}
+
+func rankChartsByScoreForMonth(stats map[string]*chartModelStats, totals map[string]float64, scoreFn func(*chartModelStats) float64, limit int) []string {
+	type item struct {
+		model string
+		score float64
+		cost  float64
+	}
+	items := make([]item, 0, len(stats))
+	for _, s := range stats {
+		cost := totals[s.Model]
+		if cost <= 0 {
+			continue
+		}
+		items = append(items, item{model: s.Model, score: scoreFn(s), cost: cost})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].score != items[j].score {
@@ -1018,6 +1059,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 			return ChartsDataMsg{MonthStart: monthStart, Err: err}
 		}
 
+		totals := totalsByCost(rows)
 		costSelected := rankModelsByCost(rows, 3)
 		performanceSelected := costSelected
 		responsibilitySelected := costSelected
@@ -1028,8 +1070,8 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 				return ChartsDataMsg{MonthStart: monthStart, Err: err}
 			}
 			stats = aggregateChartsModelStats(runs)
-			performanceSelected = rankChartsByScore(stats, func(s *chartModelStats) float64 { return s.HealthScore }, 3)
-			responsibilitySelected = rankChartsByScore(stats, func(s *chartModelStats) float64 { return s.ResponsibilityScore }, 3)
+			performanceSelected = rankChartsByScoreForMonth(stats, totals, func(s *chartModelStats) float64 { return s.HealthScore }, 3)
+			responsibilitySelected = rankChartsByScoreForMonth(stats, totals, func(s *chartModelStats) float64 { return s.ResponsibilityScore }, 3)
 			if len(performanceSelected) == 0 {
 				performanceSelected = costSelected
 			}
