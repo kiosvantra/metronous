@@ -1,6 +1,23 @@
 // Package scheduler provides a cron-based job scheduler for Metronous.
 // It wraps robfig/cron/v3 and exposes a simple API for registering
 // the weekly benchmark job.
+//
+// # Scheduling Architecture
+//
+// The weekly benchmark (schedule "0 0 2 * * 0", Sunday 02:00 local time) is
+// embedded directly in the Metronous daemon runtime via [NewSchedulerWithContext].
+// This means the schedule runs as long as the daemon process is alive — no
+// separate OS timer (systemd.timer, launchd calendar interval, Windows Task
+// Scheduler) is required.
+//
+// The daemon is managed as a long-lived system service on each platform:
+//   - Linux   : systemd user service (~/.config/systemd/user/metronous.service)
+//   - macOS   : launchd user agent   (~~/Library/LaunchAgents/com.metronous.daemon.plist)
+//   - Windows : Windows Service Control Manager (SCM) via kardianos/service
+//
+// On daemon shutdown the context passed to [NewSchedulerWithContext] is
+// cancelled, which stops any in-progress job cleanly and prevents new jobs
+// from starting.
 package scheduler
 
 import (
@@ -33,6 +50,8 @@ type Scheduler struct {
 
 // NewScheduler creates a Scheduler with the given runner and logger.
 // The cron instance uses the second-precision parser required by DefaultWeeklySchedule.
+// The Scheduler manages its own internal context; use [NewSchedulerWithContext]
+// when the caller needs to propagate cancellation (e.g. daemon shutdown).
 func NewScheduler(r *runner.Runner, windowDays int, logger *zap.Logger) *Scheduler {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -41,6 +60,32 @@ func NewScheduler(r *runner.Runner, windowDays int, logger *zap.Logger) *Schedul
 		windowDays = DefaultWindowDays
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	return &Scheduler{
+		cron:       cron.New(cron.WithSeconds()),
+		runner:     r,
+		logger:     logger,
+		windowDays: windowDays,
+		ctx:        ctx,
+		cancel:     cancel,
+	}
+}
+
+// NewSchedulerWithContext creates a Scheduler whose job context is derived from
+// the provided parent context. When parent is cancelled (e.g. on daemon
+// shutdown), any in-progress weekly benchmark job will observe the
+// cancellation and exit cleanly. Calling [Stop] also cancels the derived
+// context and halts the underlying cron instance.
+//
+// Pass the same context that the daemon uses for its lifecycle so that
+// benchmark jobs are cancelled when the daemon shuts down.
+func NewSchedulerWithContext(parent context.Context, r *runner.Runner, windowDays int, logger *zap.Logger) *Scheduler {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if windowDays <= 0 {
+		windowDays = DefaultWindowDays
+	}
+	ctx, cancel := context.WithCancel(parent)
 	return &Scheduler{
 		cron:       cron.New(cron.WithSeconds()),
 		runner:     r,
