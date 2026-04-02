@@ -196,20 +196,29 @@ async function waitForServer(agentId: string): Promise<void> {
   logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session (tried ${attempt} times)`)
 }
 
+// MAX_RECONNECT_ATTEMPTS is how many times httpPost will try to re-read the
+// port file and retry after an ECONNREFUSED before giving up on this payload.
+const MAX_RECONNECT_ATTEMPTS = 3
+const RECONNECT_DELAY_MS = 500
+
 // httpPost sends a JSON payload to POST /ingest on the server.
+// On ECONNREFUSED it re-reads mcp.port (the daemon may have restarted and
+// changed ports) and retries up to MAX_RECONNECT_ATTEMPTS times.
 async function httpPost(payload: object): Promise<void> {
   if (!serverPort) {
     log("httpPost: serverPort is null, dropping event")
     return
   }
-  try {
-    const http = require("http") as typeof import("http")
-    const body = JSON.stringify(payload)
-    await new Promise<void>((resolve) => {
+  const http = require("http") as typeof import("http")
+  const body = JSON.stringify(payload)
+
+  for (let attempt = 0; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+    const port = serverPort!
+    const success = await new Promise<boolean>((resolve) => {
       const req = http.request(
         {
           hostname: "127.0.0.1",
-          port: serverPort,
+          port,
           path: "/ingest",
           method: "POST",
           headers: {
@@ -220,21 +229,43 @@ async function httpPost(payload: object): Promise<void> {
         (res) => {
           // Drain the response body so Node.js doesn't leak the socket.
           res.resume()
-          res.on("end", resolve)
+          res.on("end", () => resolve(true))
         }
       )
       req.setTimeout(5000, () => {
         req.destroy()
-        resolve()
+        resolve(false)
       })
-      req.on("error", (err) => {
-        logError("HTTP ingest error:", err.message)
-        resolve()
+      req.on("error", (err: Error & { code?: string }) => {
+        if (err.code === "ECONNREFUSED") {
+          // Daemon restarted — invalidate cached port so we re-read the file.
+          log(`httpPost: ECONNREFUSED on port ${port} — will re-read mcp.port (attempt ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS})`)
+          serverPort = null
+          serverReady = false
+        } else {
+          logError("HTTP ingest error:", err.message)
+        }
+        resolve(false)
       })
       req.end(body)
     })
-  } catch (err) {
-    logError("httpPost error:", (err as Error).message)
+
+    if (success) return
+
+    if (attempt < MAX_RECONNECT_ATTEMPTS) {
+      // Wait briefly then re-read the port file.
+      await sleep(RECONNECT_DELAY_MS)
+      const newPort = readPortFile()
+      if (newPort !== null) {
+        serverPort = newPort
+        serverReady = true
+        log(`httpPost: reconnected to daemon on new port ${newPort}`)
+      } else {
+        log("httpPost: mcp.port not available yet, will retry")
+      }
+    } else {
+      logError(`httpPost: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`)
+    }
   }
 }
 
