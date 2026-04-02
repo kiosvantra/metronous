@@ -22,6 +22,7 @@ type ChartsDataMsg struct {
 	MonthStart                   time.Time
 	Rows                         []store.DailyCostByModelRow
 	ModelStats                   map[string]*chartModelStats
+	TotalsByCost                 map[string]float64
 	SelectedModels               []string
 	CostSelectedModels           []string
 	PerformanceSelectedModels    []string
@@ -49,6 +50,7 @@ type ChartsModel struct {
 	performanceSelectedModels    []string
 	responsibilitySelectedModels []string
 	modelStats                   map[string]*chartModelStats
+	totalsByCost                 map[string]float64
 
 	cursorDayIndex int // 0-based within the selected month
 }
@@ -988,6 +990,7 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 		if msg.Err == nil {
 			m.dailyRows = msg.Rows
 			m.modelStats = msg.ModelStats
+			m.totalsByCost = msg.TotalsByCost
 			if len(msg.CostSelectedModels) > 0 {
 				m.selectedModels = msg.CostSelectedModels
 			} else {
@@ -1084,6 +1087,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 			MonthStart:                   monthStart,
 			Rows:                         rows,
 			ModelStats:                   stats,
+			TotalsByCost:                 totals,
 			SelectedModels:               costSelected,
 			CostSelectedModels:           costSelected,
 			PerformanceSelectedModels:    performanceSelected,
@@ -1130,10 +1134,14 @@ func (m ChartsModel) View() string {
 	if stats == nil {
 		stats = map[string]*chartModelStats{}
 	}
-	performanceEntries := buildChartSummaryEntries(m.performanceSelectedModels, stats, costPanel.totals)
-	responsibilityEntries := buildChartSummaryEntries(m.responsibilitySelectedModels, stats, costPanel.totals)
+	monthTotals := m.totalsByCost
+	if monthTotals == nil {
+		monthTotals = costPanel.totals
+	}
+	performanceEntries := buildChartSummaryEntries(m.performanceSelectedModels, stats, monthTotals)
+	responsibilityEntries := buildChartSummaryEntries(m.responsibilitySelectedModels, stats, monthTotals)
 	if len(performanceEntries) == 0 && len(responsibilityEntries) == 0 {
-		performanceEntries = buildChartSummaryEntries(m.selectedModels, stats, costPanel.totals)
+		performanceEntries = buildChartSummaryEntries(m.selectedModels, stats, monthTotals)
 		responsibilityEntries = performanceEntries
 	}
 
