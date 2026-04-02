@@ -66,16 +66,16 @@ var detailLabelStyle = lipgloss.NewStyle().
 var f5KeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("19")).Bold(true) // dark blue
 
 // benchColWidths / benchColNames describe the benchmark history table.
-// Columns: Time | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
+// Columns: Time | Agent | Type | Score | Accuracy | P95 Latency | Verdict | → Model | Savings
 // "Time" shows full date+time (YYYY-MM-DD HH:MM) so width is 17 to avoid truncation.
 var (
-	benchColWidths = []int{17, 16, 9, 10, 12, 18, 16, 8}
-	benchColNames  = []string{"Time", "Agent", "Type", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
+	benchColWidths = []int{17, 16, 9, 6, 10, 12, 18, 16, 8}
+	benchColNames  = []string{"Time", "Agent", "Type", "Score", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
 )
 
 // verdictColIdx is the index of the Verdict column in benchColNames/benchColWidths.
 // Defined as a constant so the rendering code stays in sync with the column layout.
-const verdictColIdx = 5
+const verdictColIdx = 6
 
 // modelPricingSection mirrors the JSON structure of the "model_pricing" key in thresholds.json.
 type modelPricingSection struct {
@@ -130,6 +130,12 @@ type BenchmarkModel struct {
 	frozenTrend []string
 	pricing     map[string]float64
 	workDir     string
+	// comparing is true when the comparison panel is active.
+	comparing bool
+	// comparisonRuns holds the ranked runs for the active comparison panel.
+	comparisonRuns []store.BenchmarkRun
+	// statusMsg is a transient message shown in the view.
+	statusMsg string
 	// runner is an optional IntraweekRunner used to trigger manual F5 runs.
 	// When nil, F5 is a no-op.
 	runner IntraweekRunner
@@ -146,7 +152,12 @@ type BenchmarkModel struct {
 // loaded from dataDir/../thresholds.json. Pass an empty string to disable pricing.
 // workDir is used for project-level agent discovery; pass os.Getwd() from the caller.
 // r is an optional IntraweekRunner; pass nil to disable F5 manual runs.
-func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string, r IntraweekRunner) BenchmarkModel {
+
+func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string, runners ...IntraweekRunner) BenchmarkModel {
+	var r IntraweekRunner
+	if len(runners) > 0 {
+		r = runners[0]
+	}
 	return BenchmarkModel{
 		bs:      bs,
 		loading: true,
@@ -256,7 +267,15 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 				m.frozenRun = m.runs[m.cursor]
 				m.frozenTrend = m.trendByID[m.frozenRun.AgentID]
 			}
+		case "c":
+			m = m.beginComparison()
 		case "esc", "escape":
+			if m.comparing {
+				m.comparing = false
+				m.comparisonRuns = nil
+				m.statusMsg = ""
+				return m, nil
+			}
 			// Unfreeze the detail panel.
 			m.detailFrozen = false
 		case "f5":
@@ -276,6 +295,38 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m BenchmarkModel) beginComparison() BenchmarkModel {
+	if len(m.runs) == 0 || m.cursor < 0 || m.cursor >= len(m.runs) {
+		m.comparing = false
+		m.comparisonRuns = nil
+		m.statusMsg = ""
+		return m
+	}
+	selectedAgent := m.runs[m.cursor].AgentID
+	var runs []store.BenchmarkRun
+	for _, run := range m.runs {
+		if run.AgentID == selectedAgent {
+			runs = append(runs, run)
+		}
+	}
+	if len(runs) < 2 {
+		m.comparing = false
+		m.comparisonRuns = nil
+		m.statusMsg = "Comparison requires 2+ models"
+		return m
+	}
+	sort.SliceStable(runs, func(i, j int) bool {
+		if runs[i].CompositeScore == runs[j].CompositeScore {
+			return runs[i].Model < runs[j].Model
+		}
+		return runs[i].CompositeScore > runs[j].CompositeScore
+	})
+	m.comparing = true
+	m.comparisonRuns = runs
+	m.statusMsg = ""
+	return m
 }
 
 // agentTypeOrder returns a sort priority for the given agent type.
@@ -471,7 +522,7 @@ func (m BenchmarkModel) View() string {
 			baseStyle = cursorStyle
 		}
 		// Render columns before Verdict without special colour.
-		// verdictColIdx = 5 (Time, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
+		// verdictColIdx = 6 (Time, Agent, Type, Score, Accuracy, P95 Latency, Verdict, → Model, Savings)
 		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
 		// Verdict column: remove cursor background from this specific column.
 		var verdictCell string
@@ -483,9 +534,9 @@ func (m BenchmarkModel) View() string {
 		}
 		rendered += verdictCell
 		// → Model column (index 6).
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
-		// Savings column (index 7).
 		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[7], row[7]))
+		// Savings column (index 8).
+		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[8], row[8]))
 		// Write the row directly — do NOT re-wrap with baseStyle.Render() as that
 		// would strip the inner ANSI colour codes (verdict colour, etc.).
 		sb.WriteString(rendered)
@@ -508,6 +559,17 @@ func (m BenchmarkModel) View() string {
 	footerSuffix := " to run intraweek)"
 	sb.WriteString(dimStyle.Render(footerPrefix) + f5KeyStyle.Render(" F5") + dimStyle.Render(footerSuffix))
 	sb.WriteString("\n")
+
+	if m.statusMsg != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("  " + m.statusMsg))
+		sb.WriteString("\n")
+	}
+
+	if m.comparing {
+		sb.WriteString("\n")
+		sb.WriteString(renderComparisonPanel(m.comparisonRuns))
+		return sb.String()
+	}
 
 	// Running status indicator — shown only while an F5 run is in progress.
 	if m.running {
@@ -537,6 +599,28 @@ func (m BenchmarkModel) View() string {
 		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend))
 	}
 
+	return sb.String()
+}
+
+func renderComparisonPanel(runs []store.BenchmarkRun) string {
+	var sb strings.Builder
+	sb.WriteString(detailLabelStyle.Render("Model Ranking:") + "\n")
+	for i, run := range runs {
+		rank := i + 1
+		best := ""
+		if rank == 1 {
+			best = " BEST"
+		}
+		barLen := int(run.CompositeScore * 10)
+		if barLen < 1 {
+			barLen = 1
+		}
+		if barLen > 10 {
+			barLen = 10
+		}
+		bars := strings.Repeat("█", barLen)
+		sb.WriteString(fmt.Sprintf("  #%d%s %s  %.2f  %s\n", rank, best, run.Model, run.CompositeScore, bars))
+	}
 	return sb.String()
 }
 
@@ -771,7 +855,7 @@ func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[st
 
 	// Handle placeholder rows (agent discovered but no runs yet).
 	if isNoData(run) {
-		return []string{"-", run.AgentID, agentType, "-", "-", "NO DATA", "-", "-"}
+		return []string{"-", run.AgentID, agentType, "-", "-", "-", "NO DATA", "-", "-"}
 	}
 
 	date := run.RunAt.Local().Format("2006-01-02 15:04")
@@ -781,6 +865,10 @@ func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[st
 		date += " (IW)"
 	}
 
+	score := "—"
+	if run.CompositeScore > 0 {
+		score = fmt.Sprintf("%.2f", run.CompositeScore)
+	}
 	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
 	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
 
@@ -794,7 +882,7 @@ func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[st
 	// Savings column.
 	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
 
-	return []string{date, run.AgentID, agentType, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
+	return []string{date, run.AgentID, agentType, score, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
 }
 
 // computeSavings returns the savings ratio (0.0–1.0) and a formatted string

@@ -245,6 +245,19 @@ func TestBenchmarkRunFieldMapping(t *testing.T) {
 	}
 }
 
+// TestBenchmarkRun_HasCompositeScoreField verifies that BenchmarkRun has a CompositeScore field
+// that can be assigned and read back correctly (compile-time + runtime check).
+func TestBenchmarkRun_HasCompositeScoreField(t *testing.T) {
+	run := store.BenchmarkRun{CompositeScore: 0.87}
+	if run.CompositeScore != 0.87 {
+		t.Errorf("CompositeScore: got %v, want 0.87", run.CompositeScore)
+	}
+	run.CompositeScore = 0.0
+	if run.CompositeScore != 0.0 {
+		t.Errorf("CompositeScore after reset: got %v, want 0.0", run.CompositeScore)
+	}
+}
+
 // TestBenchmarkStoreInterface verifies BenchmarkStore interface is definable (compile check).
 func TestBenchmarkStoreInterface(t *testing.T) {
 	var _ store.BenchmarkStore = (*mockBenchmarkStore)(nil)
@@ -271,13 +284,22 @@ func (m *mockBenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (
 func (m *mockBenchmarkStore) ListAgents(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
+func (m *mockBenchmarkStore) ListAgentModels(ctx context.Context) ([][2]string, error) {
+	return nil, nil
+}
+func (m *mockBenchmarkStore) GetLatestRunByAgentModel(ctx context.Context, agentID, model string) (*store.BenchmarkRun, error) {
+	return nil, nil
+}
 func (m *mockBenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
+func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, _ *time.Location, _ int, _ int) ([]time.Time, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
+func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, _, _ time.Time) ([]store.BenchmarkRun, error) {
+	return nil, nil
+}
+func (m *mockBenchmarkStore) GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error) {
 	return nil, nil
 }
 func (m *mockBenchmarkStore) Close() error { return nil }

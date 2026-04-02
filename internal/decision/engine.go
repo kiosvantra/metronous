@@ -115,6 +115,24 @@ func (e *DecisionEngine) EvaluateAll(ctx context.Context, metrics []benchmark.Wi
 	return verdicts
 }
 
+// ScoreWeights returns the configured ScoreWeights from the thresholds.
+// Falls back to config.DefaultScoreWeights() when the weights are zero-valued
+// (i.e., not configured in thresholds.json or initialized to zero).
+func (e *DecisionEngine) ScoreWeights() config.ScoreWeights {
+	w := e.thresholds.ScoreWeights
+	// If all weights are zero (unconfigured), fall back to defaults.
+	if w.Accuracy == 0 && w.Latency == 0 && w.ToolSuccessRate == 0 && w.ROIScore == 0 {
+		return config.DefaultScoreWeights()
+	}
+	return w
+}
+
+// EffectiveMaxLatencyP95 returns the effective MaxLatencyP95Ms threshold for the given agent.
+// It applies per-agent overrides if present, otherwise returns the global default.
+func (e *DecisionEngine) EffectiveMaxLatencyP95(agentID string) int {
+	return e.thresholds.EffectiveThresholds(agentID).MaxLatencyP95Ms
+}
+
 // IsPendingSwitch returns true if the verdict requires a model change.
 func IsPendingSwitch(v store.VerdictType) bool {
 	return v == store.VerdictSwitch || v == store.VerdictUrgentSwitch

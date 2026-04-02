@@ -15,7 +15,7 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 - **Tracks** agent sessions, tool calls, tokens, and cost in real-time
 - **Benchmarks** each agent with a defined mission against its performance criteria
 - **Recommends** model switches with estimated cost savings
-- **Visualizes** everything in a terminal dashboard (TUI)
+- **Visualizes** everything in a terminal dashboard (TUI) or browser dashboard (web)
 
 ## Architecture
 
@@ -25,7 +25,8 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 ```
 OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service) → SQLite
                                                                         ↓
-                                                              ./metronous dashboard
+                                                              ./metronous dashboard  (TUI)
+                                                              ./metronous web        (Browser → localhost:9100)
 ```
 
 - **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
@@ -35,127 +36,89 @@ OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service)
 
 ## Prerequisites
 
-1. **[OpenCode](https://opencode.ai) installed** — `curl -fsSL https://opencode.ai/install | bash`
-
-Metronous works with OpenCode's built-in agents out of the box — no custom `opencode.json` required. If you have one, Metronous will patch it automatically. If not, it will create one with the MCP shim configured and you can add providers and agents to it later.
-
-Go 1.22+ is only required for source builds and `go install`.
+- [OpenCode](https://opencode.ai) installed and configured
+- Go 1.22+
+- OpenCode agents configured (e.g., from Gentle AI's SDD suite)
 
 ## Installation
 
-### Support matrix
-
-- **Linux**: official install flow
-- **Windows**: experimental/manual
-- **macOS**: manual CLI only
-
-### Linux (recommended — one command)
-
-```bash
-curl -fsSL https://github.com/kiosvantra/metronous/releases/latest/download/install.sh | bash
-```
-
-This script downloads the latest release, verifies the checksum, installs the binary to `~/.local/bin`, and runs `metronous install` to set up the systemd service and configure OpenCode automatically.
-
-> Do not run with `sudo`. Must run as the same normal user that runs OpenCode.
-
-### Linux (manual)
-
-```bash
-VERSION=$(curl -sSL https://api.github.com/repos/kiosvantra/metronous/releases/latest | grep '"tag_name"' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-TARBALL="metronous_${VERSION#v}_linux_${ARCH}.tar.gz"
-curl -fsSLO "https://github.com/kiosvantra/metronous/releases/download/${VERSION}/${TARBALL}"
-curl -fsSLO "https://github.com/kiosvantra/metronous/releases/download/${VERSION}/checksums.txt"
-sha256sum -c --ignore-missing checksums.txt
-tar -xzf "${TARBALL}"
-mkdir -p ~/.local/bin
-install -m 0755 ./metronous ~/.local/bin/metronous
-rm -f "${TARBALL}" checksums.txt
-~/.local/bin/metronous install
-```
-
-### Via Go (Linux, with systemd user services)
+### Zero-friction (recommended)
 
 ```bash
 go install github.com/kiosvantra/metronous/cmd/metronous@latest
-# Ensure the installed binary is on your PATH, then run:
 metronous install
+# Done — daemon running as systemd user service, OpenCode configured to use ["metronous", "mcp"]
 ```
 
-If you use `GOBIN`, run the binary from that directory instead of `GOPATH/bin`.
-
-### Manual/source build
+### Manual installation (alternative)
 
 ```bash
 git clone https://github.com/kiosvantra/metronous
 cd metronous
 go build -o metronous ./cmd/metronous
+# Add the binary to your PATH or use the full path below
+
+# Install as a systemd user service and patch opencode.json automatically
+./metronous install
+
+# Manual steps if you prefer:
+# 1. Initialize Metronous (creates ~/.metronous/ and databases)
+# ./metronous init
+# 2. Start the daemon manually (for testing):
+# ./metronous server --data-dir ~/.metronous/data --daemon-mode
+# 3. Or install the systemd service yourself:
+# ./metronous install   # does steps 1-4 below
+#   a) writes ~/.config/systemd/user/metronous.service
+#   b) systemctl --user daemon-reload
+#   c) systemctl --user enable metronous
+#   d) systemctl --user start metronous
+#   e) patches ~/.config/opencode/opencode.json to use ["metronous", "mcp"]
 ```
 
-Linux:
-
-```bash
-mkdir -p ~/.local/bin
-install -m 0755 ./metronous ~/.local/bin/metronous
-~/.local/bin/metronous install
-```
-
-### Windows manual testing flow (experimental)
+### Windows installation
 
 ```powershell
-# Download the matching Windows archive from GitHub Releases,
-# for example: metronous_<version>_windows_amd64.zip
-# Run PowerShell as Administrator before continuing.
-$archive = "metronous_<version>_windows_amd64.zip"
-Expand-Archive -Path $archive -DestinationPath .\metronous-release -Force
-$exe = Get-ChildItem .\metronous-release -Recurse -Filter metronous.exe | Select-Object -First 1
-$dest = "$env:LOCALAPPDATA\Programs\Metronous"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Move-Item $exe.FullName "$dest\metronous.exe" -Force
-& "$dest\metronous.exe" install
+go install github.com/kiosvantra/metronous/cmd/metronous@latest
+metronous install
+# Done — service registered via Windows SCM, OpenCode configured
 ```
 
-Optionally verify the archive before extracting it by comparing its SHA-256 hash with `checksums.txt` from the same release.
+> **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service. Use `metronous service status` or `sc query metronous` to verify.
 
-Run the elevated PowerShell session as the same Windows user account that runs OpenCode.
-
-Windows support is currently experimental. The native service/install flow is still being hardened, so Linux is the only officially supported installer path.
-
-### macOS status
-
-```bash
-go build -o metronous ./cmd/metronous
-./metronous init
-./metronous server --data-dir ~/.metronous/data --daemon-mode
-```
-
-macOS currently supports the CLI only. `metronous install`, automatic OpenCode patching, and automatic plugin installation are not supported on macOS.
-
-### Windows service notes
-
-```powershell
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" install
-```
-
-> **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service. Use `& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service status` or `sc query metronous` to verify.
+The service is configured with automatic recovery — if it crashes or the binary is replaced during an update, Windows will restart it automatically within seconds.
 
 For manual control:
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service start     # Start the service
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service stop      # Stop the service
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service status    # Check service status
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service uninstall # Remove the service
+metronous service start    # Start the service
+metronous service stop     # Stop the service
+metronous service status   # Check service status
+metronous service uninstall # Remove the service
 ```
 
-### Configure OpenCode (automatically done by `metronous install` on Linux)
+### Updating on Windows
 
-After running `metronous install` on Linux, your OpenCode will be configured with:
+```powershell
+go install github.com/kiosvantra/metronous/cmd/metronous@latest
+metronous install    # Re-registers the service with the new binary
+```
 
-1. **MCP shim**: the installed executable path plus `mcp` for telemetry ingestion
-2. **OpenCode plugin**: `metronous.ts` copied to `~/.config/opencode/plugins/`
+> **Note:** Always run `metronous install` after updating the binary. The service will auto-recover from the binary replacement, but re-installing ensures a clean state.
 
-The plugin captures agent sessions and forwards events to the daemon via HTTP.
+### Configure OpenCode (automatically done by `metronous install`)
+
+After running `metronous install`, your `~/.config/opencode/opencode.json` will contain:
+
+```json
+{
+  "mcp": {
+    "metronous": {
+      "command": ["metronous", "mcp"],
+      "type": "local"
+    }
+  },
+  "plugins": ["metronous-opencode"]
+}
+```
 
 Then restart OpenCode and it will show **"Metronous Connected"**.
 
@@ -173,6 +136,28 @@ metronous dashboard
 - **[4] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
 
 For TUI navigation keys, see [docs/tui-controls.md](docs/tui-controls.md).
+
+### Web Dashboard (browser-based)
+
+```bash
+metronous web
+# Dashboard available at http://localhost:9100
+```
+
+Opens a browser-based dashboard at `http://localhost:9100` with:
+
+- **Benchmark** — Agent performance with per-model scores, verdicts, and model comparison
+- **Tracking** — Real-time session stream with expandable event details
+
+Options:
+```bash
+metronous web --port 8080          # Custom port
+metronous web --data-dir /path/to  # Custom data directory
+```
+
+> The web dashboard is an alternative to the terminal dashboard (`metronous dashboard`). It works better on Windows where terminal rendering can be inconsistent.
+
+Language: Switch between English and Spanish using the EN/ES toggle in the header.
 
 ### Manual benchmark
 

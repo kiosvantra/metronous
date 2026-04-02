@@ -129,7 +129,6 @@ type SessionSummary struct {
 	CostUSD *float64
 
 	// DurationMs is the duration of the session in milliseconds (nullable).
-	// It is populated from the session's `complete` event when present.
 	DurationMs *int
 }
 
@@ -208,7 +207,7 @@ const (
 	RunKindIntraweek RunKindType = "intraweek"
 )
 
-// BenchmarkRun holds all metrics and the verdict for a single benchmark run.
+// BenchmarkRun holds all metrics and the verdict for a single weekly benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
 	ID string
@@ -216,18 +215,7 @@ type BenchmarkRun struct {
 	// RunAt is when this benchmark was computed (UTC).
 	RunAt time.Time
 
-	// RunKind distinguishes a scheduled weekly run from a manual intraweek run.
-	// Defaults to RunKindWeekly for backward compatibility.
-	RunKind RunKindType
-
-	// WindowStart is the inclusive start of the event window used for this run (UTC).
-	WindowStart time.Time
-
-	// WindowEnd is the exclusive end of the event window used for this run (UTC).
-	WindowEnd time.Time
-
 	// WindowDays is the number of days in the evaluation window (default 7).
-	// For intraweek runs this is approximate; prefer WindowStart/WindowEnd for auditing.
 	WindowDays int
 
 	// AgentID identifies the agent that was benchmarked.
@@ -277,6 +265,18 @@ type BenchmarkRun struct {
 
 	// AvgQualityScore is the mean quality_score across all rated events in the window.
 	AvgQualityScore float64
+
+	// CompositeScore is the normalized 0-1 composite score combining all metrics.
+	CompositeScore float64
+
+	// RunKind distinguishes scheduled weekly runs from manual intraweek runs.
+	RunKind RunKindType
+
+	// WindowStart is the inclusive start timestamp of the benchmark window.
+	WindowStart time.Time
+
+	// WindowEnd is the exclusive end timestamp of the benchmark window.
+	WindowEnd time.Time
 }
 
 // BenchmarkQuery defines filter criteria for querying benchmark runs.
@@ -318,6 +318,13 @@ type BenchmarkStore interface {
 	// ListAgents returns the distinct agent IDs that have at least one run.
 	ListAgents(ctx context.Context) ([]string, error)
 
+	// ListAgentModels returns the distinct (agent_id, model) pairs that have runs.
+	ListAgentModels(ctx context.Context) ([][2]string, error)
+
+	// GetLatestRunByAgentModel returns the most recent run for a specific
+	// (agent_id, model) combination, or nil if none exists.
+	GetLatestRunByAgentModel(ctx context.Context, agentID, model string) (*BenchmarkRun, error)
+
 	// GetVerdictTrend returns the last N weekly verdicts for the given agent,
 	// ordered oldest first. Returns an empty slice if no runs exist.
 	GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error)
@@ -332,6 +339,10 @@ type BenchmarkStore interface {
 	// QueryRunsInWindow returns all benchmark runs whose run_at falls within
 	// [since, until) (inclusive start, exclusive end), ordered by run_at DESC.
 	QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]BenchmarkRun, error)
+
+	// GetVerdictTrendByModel returns the last N weekly verdicts for a specific
+	// (agent_id, model) combination, ordered oldest first.
+	GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error)
 
 	// Close releases all resources held by the store.
 	Close() error

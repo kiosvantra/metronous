@@ -14,7 +14,7 @@ import (
 
 // benchmarkSchema defines the DDL for benchmark.db.
 const benchmarkSchema = `
--- Core benchmark run table (one row per run per agent)
+-- Core benchmark run table (one row per weekly run per agent)
 CREATE TABLE IF NOT EXISTS benchmark_runs (
     id                TEXT PRIMARY KEY,
     run_at            INTEGER NOT NULL,
@@ -33,27 +33,29 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     verdict           TEXT NOT NULL,
     recommended_model TEXT NOT NULL DEFAULT '',
     decision_reason   TEXT NOT NULL DEFAULT '',
-    artifact_path     TEXT NOT NULL DEFAULT '',
-    avg_quality_score REAL NOT NULL DEFAULT 0.0
+	artifact_path     TEXT NOT NULL DEFAULT '',
+	avg_quality_score REAL NOT NULL DEFAULT 0.0,
+	composite_score   REAL NOT NULL DEFAULT 0.0
 );
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_benchmark_agent_ts ON benchmark_runs(agent_id, run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_run_at ON benchmark_runs(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_verdict ON benchmark_runs(verdict, run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_benchmark_agent_model ON benchmark_runs(agent_id, model, run_at DESC);
 `
 
-// addAvgQualityScoreColumn migrates existing databases that predate avg_quality_score.
+// benchmarkMigrations contains ALTER TABLE statements to apply to existing databases.
+// Each migration is guarded by checking for the column's existence first (SQLite
+// returns an error on duplicate column add, which we ignore).
 const addAvgQualityScoreColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_quality_score REAL NOT NULL DEFAULT 0.0`
 
-// addRunKindColumn migrates existing databases to add the run_kind discriminator.
-// Default 'weekly' preserves backward compatibility for all pre-existing rows.
+const addCompositeScoreColumn = `ALTER TABLE benchmark_runs ADD COLUMN composite_score REAL NOT NULL DEFAULT 0.0`
+
 const addRunKindColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_kind TEXT NOT NULL DEFAULT 'weekly'`
 
-// addWindowStartColumn migrates existing databases to add the window start timestamp (ms UTC).
 const addWindowStartColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_start INTEGER NOT NULL DEFAULT 0`
 
-// addWindowEndColumn migrates existing databases to add the window end timestamp (ms UTC).
 const addWindowEndColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_end INTEGER NOT NULL DEFAULT 0`
 
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
@@ -100,19 +102,6 @@ func NewBenchmarkStore(path string) (*BenchmarkStore, error) {
 	}, nil
 }
 
-// applyAddColumnMigration executes a single ALTER TABLE ADD COLUMN statement and
-// silently ignores "duplicate column name" errors (idempotent — safe on fresh DBs
-// where the CREATE TABLE already includes the column, and on re-runs).
-func applyAddColumnMigration(ctx context.Context, db *sql.DB, stmt, colName string) error {
-	if _, err := db.ExecContext(ctx, stmt); err != nil {
-		if strings.Contains(err.Error(), "duplicate column name") {
-			return nil // column already exists — idempotent
-		}
-		return fmt.Errorf("apply %s migration: %w", colName, err)
-	}
-	return nil
-}
-
 // ApplyBenchmarkMigrations creates all tables and indexes for benchmark.db,
 // then applies any additive column migrations for existing databases.
 // It is idempotent and safe to call at startup.
@@ -120,32 +109,42 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, benchmarkSchema); err != nil {
 		return fmt.Errorf("apply benchmark schema: %w", err)
 	}
-
-	migrations := []struct {
-		stmt    string
-		colName string
-	}{
-		{addAvgQualityScoreColumn, "avg_quality_score"},
-		{addRunKindColumn, "run_kind"},
-		{addWindowStartColumn, "window_start"},
-		{addWindowEndColumn, "window_end"},
+	// Apply additive column migration — ignore "duplicate column name" errors from
+	// databases that already have the column (e.g. newly created with the full schema).
+	if _, err := db.ExecContext(ctx, addAvgQualityScoreColumn); err != nil {
+		// SQLite returns "duplicate column name" as an error; this is expected for
+		// fresh databases where the CREATE TABLE already includes the column.
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply avg_quality_score migration: %w", err)
+		}
 	}
-	for _, m := range migrations {
-		if err := applyAddColumnMigration(ctx, db, m.stmt, m.colName); err != nil {
-			return err
+	if _, err := db.ExecContext(ctx, addCompositeScoreColumn); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply composite_score migration: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, addRunKindColumn); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply run_kind migration: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, addWindowStartColumn); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply window_start migration: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, addWindowEndColumn); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("apply window_end migration: %w", err)
 		}
 	}
 	return nil
 }
 
 // SaveRun persists a benchmark run. If run.ID is empty, a UUID is generated.
-// If RunKind is empty it defaults to RunKindWeekly for backward compatibility.
 func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) error {
 	if run.ID == "" {
 		run.ID = uuid.New().String()
-	}
-	if run.RunKind == "" {
-		run.RunKind = store.RunKindWeekly
 	}
 
 	const q = `
@@ -154,13 +153,13 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
 			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-			run_kind, window_start, window_end
+			composite_score, run_kind, window_start, window_end
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -183,6 +182,7 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		run.DecisionReason,
 		run.ArtifactPath,
 		run.AvgQualityScore,
+		run.CompositeScore,
 		string(run.RunKind),
 		run.WindowStart.UTC().UnixMilli(),
 		run.WindowEnd.UTC().UnixMilli(),
@@ -219,7 +219,7 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		composite_score, run_kind, window_start, window_end
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -260,7 +260,7 @@ func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQu
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		composite_score, run_kind, window_start, window_end
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -313,7 +313,7 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		composite_score, run_kind, window_start, window_end
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -415,6 +415,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&run.DecisionReason,
 			&run.ArtifactPath,
 			&run.AvgQualityScore,
+			&run.CompositeScore,
 			&runKind,
 			&windowStartMs,
 			&windowEndMs,
@@ -473,6 +474,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&run.DecisionReason,
 		&run.ArtifactPath,
 		&run.AvgQualityScore,
+		&run.CompositeScore,
 		&runKind,
 		&windowStartMs,
 		&windowEndMs,
@@ -491,17 +493,96 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	return &run, nil
 }
 
-// ListRunCycles returns the distinct week-start timestamps (Sunday 00:00 in loc, stored as UTC)
-// for all benchmark runs, ordered newest first.
-// limit=0 returns all; offset skips the first N cycle rows.
+// ListAgentModels returns the distinct (agent_id, model) pairs that have at least one benchmark run.
+func (bs *BenchmarkStore) ListAgentModels(ctx context.Context) ([][2]string, error) {
+	const q = `SELECT DISTINCT agent_id, model FROM benchmark_runs ORDER BY agent_id, model`
+
+	rows, err := bs.readDB.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list agent-model pairs: %w", err)
+	}
+	defer rows.Close()
+
+	var pairs [][2]string
+	for rows.Next() {
+		var agentID, model string
+		if err := rows.Scan(&agentID, &model); err != nil {
+			return nil, fmt.Errorf("scan agent-model pair: %w", err)
+		}
+		pairs = append(pairs, [2]string{agentID, model})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent-model rows: %w", err)
+	}
+	return pairs, nil
+}
+
+// GetLatestRunByAgentModel returns the most recent benchmark run for a specific
+// (agent_id, model) combination, or nil if none exists.
+func (bs *BenchmarkStore) GetLatestRunByAgentModel(ctx context.Context, agentID, model string) (*store.BenchmarkRun, error) {
+	const q = `SELECT id, run_at, window_days, agent_id, model,
+		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
+		tool_success_rate, roi_score, total_cost_usd, sample_size,
+		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
+		composite_score, run_kind, window_start, window_end
+		FROM benchmark_runs
+		WHERE agent_id = ? AND model = ?
+		ORDER BY run_at DESC
+		LIMIT 1`
+
+	row := bs.readDB.QueryRowContext(ctx, q, agentID, model)
+	run, err := scanBenchmarkRun(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest benchmark run for %q/%q: %w", agentID, model, err)
+	}
+	return run, nil
+}
+
+// GetVerdictTrendByModel returns the last N weekly verdicts for a specific
+// (agent_id, model) combination, ordered oldest first.
+func (bs *BenchmarkStore) GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error) {
+	if weeks <= 0 {
+		return nil, nil
+	}
+	const q = `SELECT verdict FROM benchmark_runs
+		WHERE agent_id = ? AND model = ?
+		ORDER BY run_at DESC
+		LIMIT ?`
+
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, model, weeks)
+	if err != nil {
+		return nil, fmt.Errorf("get verdict trend for %q/%q: %w", agentID, model, err)
+	}
+	defer rows.Close()
+
+	var verdicts []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan verdict: %w", err)
+		}
+		verdicts = append(verdicts, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate verdict rows: %w", err)
+	}
+
+	// Reverse to get oldest-first order.
+	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
+		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
+	}
+	return verdicts, nil
+}
+
+// ListRunCycles returns the distinct week-start timestamps for all benchmark runs.
 func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
 	if loc == nil {
 		loc = time.Local
 	}
 
-	// Pull all distinct run_at values (milliseconds UTC).
-	// We compute week-start grouping in Go so we can use the caller's local timezone
-	// (SQLite has no timezone support, and strftime('%w') is UTC-only).
 	const q = `SELECT DISTINCT run_at FROM benchmark_runs ORDER BY run_at DESC`
 	rows, err := bs.readDB.QueryContext(ctx, q)
 	if err != nil {
@@ -509,9 +590,8 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 	}
 	defer rows.Close()
 
-	// Collect unique week-start times in loc.
 	seen := make(map[time.Time]struct{})
-	var ordered []time.Time // insertion order = newest first (since query is DESC)
+	var ordered []time.Time
 	for rows.Next() {
 		var ms int64
 		if err := rows.Scan(&ms); err != nil {
@@ -528,7 +608,6 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 		return nil, fmt.Errorf("iterate run_at rows: %w", err)
 	}
 
-	// Apply offset and limit.
 	if offset >= len(ordered) {
 		return nil, nil
 	}
@@ -540,22 +619,19 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 }
 
 // weekStartInLoc returns midnight Sunday of the week containing t, in the same location as t.
-// Sunday is weekday 0 in Go's time.Weekday().
 func weekStartInLoc(t time.Time) time.Time {
-	// Shift back to Sunday.
-	daysBack := int(t.Weekday()) // Sunday=0, Monday=1, … Saturday=6
+	daysBack := int(t.Weekday())
 	d := t.AddDate(0, 0, -daysBack)
 	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, d.Location())
 }
 
-// QueryRunsInWindow returns all benchmark runs whose run_at falls within [since, until),
-// ordered by run_at DESC.
+// QueryRunsInWindow returns all benchmark runs whose run_at falls within [since, until).
 func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
 	const q = `SELECT id, run_at, window_days, agent_id, model,
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		composite_score, run_kind, window_start, window_end
 		FROM benchmark_runs
 		WHERE run_at >= ? AND run_at < ?
 		ORDER BY run_at DESC`

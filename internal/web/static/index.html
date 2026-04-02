@@ -1,0 +1,1716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Metronous — AI Agent Benchmark Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --card: #141414;
+      --border: #1a1a1a;
+      --text-primary: #e5e5e5;
+      --text-secondary: #737373;
+      --emerald: #34d399;
+      --amber: #fbbf24;
+      --red: #f87171;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text-primary);
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      min-height: 100vh;
+    }
+
+    .mono {
+      font-family: 'Geist Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    /* ── Pulse dot ── */
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0 rgba(52,211,153,.5); }
+      70%  { box-shadow: 0 0 0 6px rgba(52,211,153,0); }
+      100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); }
+    }
+    .pulse-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #34d399;
+      animation: pulse-ring 2s infinite;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* ── Skeleton ── */
+    @keyframes shimmer {
+      0%   { background-position: -400px 0; }
+      100% { background-position:  400px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 4px;
+    }
+
+    /* ── Table rows ── */
+    .agent-row { cursor: pointer; transition: background-color .15s; }
+    .agent-row:hover  { background-color: #1a1a1a; }
+    .agent-row.selected { background-color: #0f1f0f; }
+
+    /* ── Score bar ── */
+    .score-bar-track {
+      background: #262626; border-radius: 4px;
+      height: 3px; overflow: hidden;
+    }
+    .score-bar-fill { height: 100%; border-radius: 4px; transition: width .4s; }
+
+    /* ── Panels ── */
+    .slide-panel {
+      transition: opacity .2s ease, transform .2s ease;
+      overflow: hidden;
+    }
+    .slide-panel.hidden-panel {
+      opacity: 0;
+      transform: translateY(-8px);
+      pointer-events: none;
+      max-height: 0;
+    }
+    .slide-panel.visible-panel {
+      opacity: 1;
+      transform: translateY(0);
+      max-height: 9999px;
+    }
+
+    /* ── Group header ── */
+    .group-header {
+      background: #0f0f0f;
+      color: #555;
+      font-size: .65rem;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      font-weight: 600;
+      padding: 5px 16px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track  { background: var(--bg); }
+    ::-webkit-scrollbar-thumb  { background: #333; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+    /* ── Verdict dots row ── */
+    .trend-dots { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+    .v-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* ── Detail grid ── */
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1px;
+      background: #1a1a1a;
+    }
+    .detail-cell {
+      background: #141414;
+      padding: 14px 18px;
+    }
+    .detail-label {
+      font-size: .65rem;
+      text-transform: uppercase;
+      letter-spacing: .1em;
+      color: #555;
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+    .detail-value {
+      font-size: .85rem;
+      color: #e5e5e5;
+      line-height: 1.4;
+    }
+
+    /* ── Compare ranking row ── */
+    .rank-row { cursor: pointer; transition: background-color .12s; }
+    .rank-row:hover { background: #1a1a1a; }
+
+    /* ── Tab navigation ── */
+    .tab {
+      padding: 6px 14px;
+      border-radius: 7px;
+      font-size: .78rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .15s;
+      letter-spacing: .02em;
+    }
+    .tab.active {
+      background: rgba(6,78,46,0.3);
+      color: #34d399;
+      border: 1px solid rgba(52,211,153,0.3);
+    }
+    .tab:not(.active) {
+      background: #141414;
+      color: #737373;
+      border: 1px solid #1a1a1a;
+    }
+    .tab:not(.active):hover {
+      border-color: #333;
+      color: #aaa;
+    }
+
+    /* ── Tracking table ── */
+    .tracking-session-row {
+      cursor: pointer;
+      transition: background-color .15s;
+      border-bottom: 1px solid #181818;
+    }
+    .tracking-session-row:hover { background-color: #1a1a1a; }
+
+    .tracking-event-row {
+      border-bottom: 1px solid #141414;
+      border-left: 2px solid #1f3328;
+      opacity: 0.75;
+    }
+
+    .event-badge {
+      font-size: .6rem;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     HEADER
+     ═══════════════════════════════════════════ -->
+<header style="background:#111111;border-bottom:1px solid #1a1a1a;position:sticky;top:0;z-index:50;box-shadow:0 2px 12px rgba(0,0,0,.4);">
+  <div style="max-width:1440px;margin:0 auto;padding:13px 24px;display:flex;align-items:center;justify-content:space-between;">
+    <!-- Left: brand -->
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span style="font-size:1.05rem;font-weight:700;letter-spacing:-.025em;color:#e5e5e5;">Metronous</span>
+      <span class="mono" style="font-size:.6rem;padding:2px 6px;border-radius:4px;background:#0a2a1a;border:1px solid #064e2e;color:#34d399;font-weight:600;">v2</span>
+    </div>
+
+    <!-- Right: lang selector + refresh status -->
+    <div style="display:flex;align-items:center;gap:14px;">
+      <!-- Language selector -->
+      <div style="display:flex;align-items:center;gap:4px;padding:3px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;">
+        <button onclick="setLang('en')" id="lang-en" style="padding:2px 8px;border-radius:4px;font-size:.7rem;border:none;cursor:pointer;transition:all .15s;">EN</button>
+        <button onclick="setLang('es')" id="lang-es" style="padding:2px 8px;border-radius:4px;font-size:.7rem;border:none;cursor:pointer;transition:all .15s;">ES</button>
+      </div>
+      <div id="refresh-indicator" style="display:flex;align-items:center;gap:7px;font-size:.75rem;color:#555;">
+        <span class="pulse-dot"></span>
+        <span id="refresh-countdown">Refreshing in 30s</span>
+      </div>
+      <div id="last-updated" class="mono" style="font-size:.72rem;color:#444;">—</div>
+      <button id="refresh-btn" onclick="window.loadAll()" title="Refresh now"
+        style="padding:4px 11px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#999;font-size:.73rem;cursor:pointer;transition:all .15s;">
+        <span data-i18n="refresh">Refresh</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════
+     MAIN
+     ═══════════════════════════════════════════ -->
+<main style="max-width:1440px;margin:0 auto;padding:24px 24px 48px;">
+
+  <!-- ── Tab Navigation ──────────────────────────────────────── -->
+  <div style="display:flex;gap:6px;margin-bottom:20px;">
+    <button class="tab active" data-tab="benchmark" onclick="switchTab('benchmark')" data-i18n="tab_benchmark">Benchmark</button>
+    <button class="tab" data-tab="tracking" onclick="switchTab('tracking')" data-i18n="tab_tracking">Tracking</button>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       BENCHMARK SECTION
+       ═══════════════════════════════════════════ -->
+  <div id="benchmark-section">
+
+    <!-- ── Section 1: Agent Overview Table ──────────────────── -->
+    <section style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <h2 style="margin:0;font-size:.75rem;font-weight:700;color:#555;letter-spacing:.08em;text-transform:uppercase;" data-i18n="agent_overview">Agent Overview</h2>
+        <div id="overview-meta" class="mono" style="font-size:.72rem;color:#444;"></div>
+      </div>
+
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.2);">
+       <div style="overflow-x:auto;">
+        <!-- Table header -->
+        <div id="table-header" style="display:grid;grid-template-columns:var(--col-tpl);padding:0 16px;border-bottom:1px solid #1e1e1e;min-width:1060px;">
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;" data-i18n="col_agent">Agent</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;" data-i18n="col_model">Model</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_score">Score</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_accuracy">Accuracy</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_p95">P95 Lat.</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:center;" data-i18n="col_verdict">Verdict</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:center;" data-i18n="col_trend">Trend</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_roi">ROI</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_cost">Cost</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_samples">Samples</div>
+        </div>
+        <!-- Table body -->
+        <div id="overview-table-body" style="min-width:1060px;">
+          <!-- skeleton -->
+          <div style="padding:32px 24px;">
+            <div class="skeleton" style="height:14px;width:60%;margin-bottom:10px;"></div>
+            <div class="skeleton" style="height:14px;width:45%;margin-bottom:10px;"></div>
+            <div class="skeleton" style="height:14px;width:52%;"></div>
+          </div>
+        </div>
+       </div><!-- /overflow-x scroll wrapper -->
+      </div>
+    </section>
+
+    <!-- ── Section 2: Detail Panel ──────────────────────────── -->
+    <section id="detail-section" class="slide-panel hidden-panel" style="margin-bottom:20px;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.2);">
+
+        <!-- Panel header -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid #1e1e1e;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            <h2 style="margin:0;font-size:.85rem;font-weight:700;color:#e5e5e5;letter-spacing:-.01em;" data-i18n="agent_detail">Agent Detail</h2>
+            <span id="detail-verdict-badge" style="font-size:.65rem;font-weight:700;padding:2px 8px;border-radius:5px;letter-spacing:.05em;"></span>
+          </div>
+          <button onclick="closeDetail()"
+            style="width:26px;height:26px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;transition:all .15s;">
+            ×
+          </button>
+        </div>
+
+        <!-- Detail grid -->
+        <div id="detail-grid" class="detail-grid"></div>
+
+        <!-- Actions row -->
+        <div style="padding:12px 20px;border-top:1px solid #1a1a1a;display:flex;align-items:center;gap:10px;">
+          <button id="compare-btn" onclick="loadCompare()"
+            style="padding:6px 14px;border-radius:7px;background:#0a2a1a;border:1px solid #064e2e;color:#34d399;font-size:.78rem;font-weight:600;cursor:pointer;transition:all .15s;display:none;"
+            data-i18n="compare_models">
+            Compare Models
+          </button>
+          <span id="compare-hint" style="font-size:.72rem;color:#444;"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Section 3: Comparison Panel ──────────────────────── -->
+    <section id="comparison-section" class="slide-panel hidden-panel" style="margin-bottom:20px;">
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.2);">
+
+        <!-- Panel header -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid #1e1e1e;">
+          <div>
+            <h2 id="comparison-title" style="margin:0;font-size:.85rem;font-weight:700;color:#e5e5e5;"></h2>
+            <p id="comparison-subtitle" style="margin:3px 0 0;font-size:.75rem;color:#555;"></p>
+          </div>
+          <button onclick="closeComparison()"
+            style="width:26px;height:26px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#888;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:1rem;transition:all .15s;">
+            ×
+          </button>
+        </div>
+
+        <!-- Chart + ranking -->
+        <div style="padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+          <div>
+            <p style="margin:0 0 12px;font-size:.7rem;color:#555;text-transform:uppercase;letter-spacing:.08em;font-weight:700;" data-i18n="composite_score">Composite Score</p>
+            <div style="position:relative;height:200px;">
+              <canvas id="comparison-chart"></canvas>
+            </div>
+          </div>
+          <div>
+            <p style="margin:0 0 12px;font-size:.7rem;color:#555;text-transform:uppercase;letter-spacing:.08em;font-weight:700;" data-i18n="model_ranking">Model Ranking</p>
+            <div id="ranking-table"></div>
+          </div>
+        </div>
+
+        <!-- Recommendation strip -->
+        <div id="comparison-recommendation" style="display:none;padding:12px 20px;border-top:1px solid #1a1a1a;background:#0f0f0f;">
+          <span style="font-size:.65rem;color:#444;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-right:10px;" data-i18n="recommendation">Recommendation</span>
+          <span id="comparison-recommendation-text" style="font-size:.78rem;color:#999;"></span>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- end #benchmark-section -->
+
+  <!-- ═══════════════════════════════════════════
+       TRACKING SECTION
+       ═══════════════════════════════════════════ -->
+  <div id="tracking-section" style="display:none;">
+
+    <section style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <h2 style="margin:0;font-size:.75rem;font-weight:700;color:#555;letter-spacing:.08em;text-transform:uppercase;" data-i18n="session_tracking">Session Tracking</h2>
+        <div id="tracking-meta" class="mono" style="font-size:.72rem;color:#444;"></div>
+      </div>
+
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.2);">
+       <div style="overflow-x:auto;">
+        <!-- Tracking table header -->
+        <div style="display:grid;grid-template-columns:160px 160px 1fr 90px 90px 90px 32px;padding:0 16px;border-bottom:1px solid #1e1e1e;min-width:780px;">
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;" data-i18n="col_time">Time</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;" data-i18n="col_agent">Agent</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;" data-i18n="col_model">Model</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_in">In</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_out">Out</div>
+          <div style="padding:9px 8px;font-size:.65rem;color:#444;letter-spacing:.08em;text-transform:uppercase;font-weight:700;text-align:right;" data-i18n="col_cost">Cost</div>
+          <div style="padding:9px 8px;"></div>
+        </div>
+
+        <!-- Tracking table body -->
+        <div id="tracking-table-body" style="min-width:780px;">
+          <div style="padding:32px 24px;">
+            <div class="skeleton" style="height:14px;width:60%;margin-bottom:10px;"></div>
+            <div class="skeleton" style="height:14px;width:45%;margin-bottom:10px;"></div>
+            <div class="skeleton" style="height:14px;width:52%;"></div>
+          </div>
+        </div>
+       </div><!-- /overflow-x scroll wrapper -->
+
+        <!-- Pagination -->
+        <div style="padding:12px 20px;border-top:1px solid #1a1a1a;display:flex;align-items:center;justify-content:space-between;">
+          <span id="tracking-pagination-info" class="mono" style="font-size:.72rem;color:#444;">—</span>
+          <div style="display:flex;gap:8px;">
+            <button id="tracking-prev-btn" onclick="trackingPrevPage()"
+              style="padding:4px 12px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#999;font-size:.73rem;cursor:pointer;transition:all .15s;"
+              disabled>
+              <span data-i18n="previous">Previous</span>
+            </button>
+            <button id="tracking-next-btn" onclick="trackingNextPage()"
+              style="padding:4px 12px;border-radius:6px;background:#1a1a1a;border:1px solid #2a2a2a;color:#999;font-size:.73rem;cursor:pointer;transition:all .15s;"
+              disabled>
+              <span data-i18n="next">Next</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div><!-- end #tracking-section -->
+
+</main>
+
+<!-- ═══════════════════════════════════════════
+     FOOTER
+     ═══════════════════════════════════════════ -->
+<footer style="border-top:1px solid #1a1a1a;padding:16px 24px;text-align:center;">
+  <p class="mono" style="margin:0;font-size:.68rem;color:#333;">
+    <span data-i18n="footer_text">Metronous v2 — AI Agent Benchmark Dashboard</span>
+    &nbsp;·&nbsp;
+    <span data-i18n="footer_refresh">Data refreshes every 30s</span>
+  </p>
+</footer>
+
+<!-- ═══════════════════════════════════════════
+     JAVASCRIPT
+     ═══════════════════════════════════════════ -->
+<script>
+// ─── Column template ─────────────────────────────────────────
+// Agent | Model | Score | Accuracy | P95 Lat | Verdict | Trend | ROI | Cost | Samples
+const COL_TPL = '180px 155px 90px 80px 90px 110px 130px 72px 78px 72px';
+
+// Apply to header
+document.getElementById('table-header').style.setProperty('--col-tpl', COL_TPL);
+document.getElementById('table-header').style.gridTemplateColumns = COL_TPL;
+
+// ─── State ───────────────────────────────────────────────────
+let state = {
+  // Benchmark
+  data: [],
+  selectedRow: null,
+  compareAgent: null,
+  compareData: null,
+  comparisonChart: null,
+  refreshTimer: null,
+  loading: false,
+
+  // Tracking
+  trackingSessions: [],
+  trackingTotal: 0,
+  trackingOffset: 0,
+  expandedSessions: new Set(),
+  sessionEvents: {},
+  activeTab: 'benchmark',
+  trackingRefreshTimer: null,
+  trackingLoading: false,
+};
+
+const TRACKING_LIMIT = 20;
+
+// ─── i18n ─────────────────────────────────────────────────────
+const i18n = {
+  en: {
+    // Header
+    'refreshing_in': 'Refreshing in {n}s',
+    'refresh': 'Refresh',
+    'running_benchmark': 'Running benchmark...',
+    'benchmark_done': 'Benchmark done!',
+    'benchmark_failed': 'Benchmark failed',
+
+    // Tabs
+    'tab_benchmark': 'Benchmark',
+    'tab_tracking': 'Tracking',
+
+    // Benchmark section
+    'agent_overview': 'Agent Overview',
+    'col_agent': 'Agent',
+    'col_model': 'Model',
+    'col_score': 'Score',
+    'col_accuracy': 'Accuracy',
+    'col_p95': 'P95 Lat.',
+    'col_verdict': 'Verdict',
+    'col_trend': 'Trend',
+    'col_roi': 'ROI',
+    'col_cost': 'Cost',
+    'col_samples': 'Samples',
+    'no_benchmark_data': 'No benchmark data yet',
+    'no_benchmark_hint': 'Run metronous benchmark run to generate data.',
+    'primary_agents': 'Primary Agents',
+    'subagents': 'Subagents',
+    'builtin_agents': 'Built-in',
+    'other_agents': 'Other',
+    'events': 'events',
+
+    // Detail panel
+    'agent_detail': 'Agent Detail',
+    'compare_models': 'Compare Models',
+    'detail_agent': 'Agent',
+    'detail_model': 'Model',
+    'detail_score': 'Score',
+    'detail_verdict': 'Verdict',
+    'detail_recommendation': 'Recommendation',
+    'detail_roi': 'ROI Score',
+    'detail_cost': 'Cost (Total)',
+    'detail_samples': 'Samples',
+    'detail_accuracy': 'Accuracy',
+    'detail_p95': 'P95 Latency',
+    'detail_reason': 'Decision Reason',
+    'detail_context': 'Context',
+    'detail_trend': 'Trend',
+
+    // Comparison panel
+    'composite_score': 'Composite Score',
+    'model_ranking': 'Model Ranking',
+    'recommendation': 'Recommendation',
+    'model_comparison': 'Model Comparison',
+    'models_evaluated': 'models evaluated',
+
+    // Tracking section
+    'session_tracking': 'Session Tracking',
+    'col_time': 'Time',
+    'col_in': 'In',
+    'col_out': 'Out',
+    'col_type': 'Type',
+    'col_duration': 'Dur.',
+    'col_tool': 'Tool',
+    'showing_sessions': 'Showing {from}–{to} of {total} sessions',
+    'previous': 'Previous',
+    'next': 'Next',
+    'no_tracking_data': 'No tracking data yet',
+    'no_tracking_hint': 'Events will appear as you use OpenCode.',
+    'loading_events': 'Loading events...',
+
+    // Trend directions
+    'improving': 'improving',
+    'stable': 'stable',
+    'degrading': 'degrading',
+
+    // Footer
+    'footer_text': 'Metronous v2 — AI Agent Benchmark Dashboard',
+    'footer_refresh': 'Data refreshes every 30s',
+  },
+  es: {
+    'refreshing_in': 'Actualizando en {n}s',
+    'refresh': 'Actualizar',
+    'running_benchmark': 'Ejecutando benchmark...',
+    'benchmark_done': 'Benchmark completado!',
+    'benchmark_failed': 'Benchmark falló',
+
+    'tab_benchmark': 'Benchmark',
+    'tab_tracking': 'Seguimiento',
+
+    'agent_overview': 'Vista General de Agentes',
+    'col_agent': 'Agente',
+    'col_model': 'Modelo',
+    'col_score': 'Puntuación',
+    'col_accuracy': 'Precisión',
+    'col_p95': 'Lat P95',
+    'col_verdict': 'Veredicto',
+    'col_trend': 'Tendencia',
+    'col_roi': 'ROI',
+    'col_cost': 'Costo',
+    'col_samples': 'Muestras',
+    'no_benchmark_data': 'Sin datos de benchmark aún',
+    'no_benchmark_hint': 'Ejecuta metronous benchmark run para generar datos.',
+    'primary_agents': 'Agentes Primarios',
+    'subagents': 'Subagentes',
+    'builtin_agents': 'Integrados',
+    'other_agents': 'Otros',
+    'events': 'eventos',
+
+    'agent_detail': 'Detalle del Agente',
+    'compare_models': 'Comparar Modelos',
+    'detail_agent': 'Agente',
+    'detail_model': 'Modelo',
+    'detail_score': 'Puntuación',
+    'detail_verdict': 'Veredicto',
+    'detail_recommendation': 'Recomendación',
+    'detail_roi': 'Puntuación ROI',
+    'detail_cost': 'Costo (Total)',
+    'detail_samples': 'Muestras',
+    'detail_accuracy': 'Precisión',
+    'detail_p95': 'Latencia P95',
+    'detail_reason': 'Motivo de Decisión',
+    'detail_context': 'Contexto',
+    'detail_trend': 'Tendencia',
+
+    'composite_score': 'Puntuación Compuesta',
+    'model_ranking': 'Ranking de Modelos',
+    'recommendation': 'Recomendación',
+    'model_comparison': 'Comparación de Modelos',
+    'models_evaluated': 'modelos evaluados',
+
+    'session_tracking': 'Seguimiento de Sesiones',
+    'col_time': 'Hora',
+    'col_in': 'Ent',
+    'col_out': 'Sal',
+    'col_type': 'Tipo',
+    'col_duration': 'Dur.',
+    'col_tool': 'Herramienta',
+    'showing_sessions': 'Mostrando {from}–{to} de {total} sesiones',
+    'previous': 'Anterior',
+    'next': 'Siguiente',
+    'no_tracking_data': 'Sin datos de seguimiento aún',
+    'no_tracking_hint': 'Los eventos aparecerán cuando uses OpenCode.',
+    'loading_events': 'Cargando eventos...',
+
+    'improving': 'mejorando',
+    'stable': 'estable',
+    'degrading': 'degradando',
+
+    'footer_text': 'Metronous v2 — Panel de Benchmark de Agentes IA',
+    'footer_refresh': 'Los datos se actualizan cada 30s',
+  }
+};
+
+// Backend string translations (context, recommendation, trend direction).
+// These come from Go handlers in English. We translate them client-side for es.
+const backendStrings = {
+  es: {
+    // verdictRecommendation
+    'This agent+model combination is performing well. No action needed.':
+      'Esta combinación agente+modelo funciona bien. No se requiere acción.',
+    'Performance degradation detected. Consider evaluating alternative models.':
+      'Degradación de rendimiento detectada. Considera evaluar modelos alternativos.',
+    'Urgent: critical performance thresholds breached. Immediate action required.':
+      'Urgente: umbrales críticos superados. Se requiere acción inmediata.',
+    // evaluateAgentContext
+    'Coordinating effectively — delegations succeeding at expected rate':
+      'Coordinando efectivamente — delegaciones exitosas a la tasa esperada',
+    'Some delegation failures detected — may be attempting inline work':
+      'Algunas delegaciones fallidas — puede estar intentando trabajo inline',
+    'High failure rate — orchestrator may be bypassing delegation pattern':
+      'Alta tasa de fallos — el orquestador puede estar saltando el patrón de delegación',
+    'Implementations landing correctly — code changes applied successfully':
+      'Implementaciones correctas — cambios de código aplicados exitosamente',
+    'Some implementation failures — review task definitions for clarity':
+      'Algunas implementaciones fallidas — revisar definiciones de tareas',
+    'High implementation failure rate — task definitions may be incomplete':
+      'Alta tasa de fallos en implementación — las definiciones de tareas pueden estar incompletas',
+    'Deep exploration with high read success — investigations thorough':
+      'Exploración profunda con alta tasa de lectura — investigaciones exhaustivas',
+    'Adequate exploration — consider deeper codebase analysis':
+      'Exploración adecuada — considera un análisis más profundo del código',
+    'Shallow exploration detected — may be missing critical context':
+      'Exploración superficial detectada — puede estar faltando contexto crítico',
+    'Validation passing — spec compliance checks executing correctly':
+      'Validación exitosa — verificaciones de especificaciones ejecutándose correctamente',
+    'Some validation failures — specs may need clarification':
+      'Algunas validaciones fallidas — las especificaciones pueden necesitar clarificación',
+    'Validation failing frequently — implementation may not match specs':
+      'Validaciones fallando frecuentemente — la implementación puede no coincidir con las specs',
+    'Spec writing succeeding — requirements captured correctly':
+      'Escritura de specs exitosa — requisitos capturados correctamente',
+    'Spec generation issues — proposal inputs may be incomplete':
+      'Problemas en generación de specs — las entradas de propuesta pueden estar incompletas',
+    'Design artifacts generated successfully':
+      'Artefactos de diseño generados exitosamente',
+    'Design generation issues — proposal may need more detail':
+      'Problemas en generación de diseño — la propuesta puede necesitar más detalle',
+    'Proposals being created from explorations correctly':
+      'Propuestas creadas correctamente a partir de exploraciones',
+    'Proposal failures — exploration output may be insufficient':
+      'Fallos en propuestas — el resultado de exploración puede ser insuficiente',
+    'Task breakdown succeeding — specs and designs well-structured':
+      'Desglose de tareas exitoso — specs y diseños bien estructurados',
+    'Task breakdown failures — specs may be ambiguous':
+      'Fallos en desglose de tareas — las specs pueden ser ambiguas',
+    'Bootstrap executing correctly':
+      'Bootstrap ejecutándose correctamente',
+    'Bootstrap failures — check project configuration':
+      'Fallos en bootstrap — verificar configuración del proyecto',
+    'Archiving completing correctly':
+      'Archivado completándose correctamente',
+    'Archive failures — verify change artifacts are complete':
+      'Fallos en archivado — verificar que los artefactos del cambio estén completos',
+    'Agent performing within normal parameters':
+      'Agente funcionando dentro de parámetros normales',
+    'Performance below expected thresholds for this agent role':
+      'Rendimiento por debajo de los umbrales esperados para este rol de agente',
+    // trendDirection
+    'improving': 'mejorando',
+    'stable': 'estable',
+    'degrading': 'degradando',
+  }
+};
+
+// Translate a backend string to the current language.
+// Handles exact matches and pattern matches for strings with dynamic values.
+function tb(text) {
+  if (!text || currentLang === 'en') return text;
+  const dict = backendStrings[currentLang];
+  if (!dict) return text;
+  // Exact match
+  if (dict[text]) return dict[text];
+  // Pattern: "Consider switching to {model} for better performance."
+  let m = text.match(/^Consider switching to (.+) for better performance\.$/);
+  if (m) return `Considera cambiar a ${m[1]} para mejor rendimiento.`;
+  // Pattern: "Urgent: switch to {model} immediately — critical thresholds breached."
+  m = text.match(/^Urgent: switch to (.+) immediately/);
+  if (m) return `Urgente: cambia a ${m[1]} inmediatamente — umbrales críticos superados.`;
+  // Pattern: "Not enough data yet (N/50 samples). Keep using to gather more."
+  m = text.match(/^Not enough data yet \((\d+)\/(\d+) samples\)/);
+  if (m) return `Datos insuficientes (${m[1]}/${m[2]} muestras). Sigue usando para recopilar más.`;
+  return text;
+}
+
+let currentLang = localStorage.getItem('metronous-lang') || (navigator.language.startsWith('es') ? 'es' : 'en');
+
+function t(key, params) {
+  const dict = i18n[currentLang] || i18n.en;
+  let text = dict[key] || i18n.en[key] || key;
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      text = text.replace(`{${k}}`, v);
+    });
+  }
+  return text;
+}
+
+function setLang(lang) {
+  currentLang = lang;
+  localStorage.setItem('metronous-lang', lang);
+  applyTranslations();
+  renderOverview();
+  if (state.activeTab === 'tracking') renderTrackingTable();
+}
+
+function applyTranslations() {
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    el.textContent = t(el.dataset.i18n);
+  });
+
+  // Update lang button styles
+  const enBtn = document.getElementById('lang-en');
+  const esBtn = document.getElementById('lang-es');
+  if (enBtn) {
+    enBtn.style.background = currentLang === 'en' ? '#064e2e' : 'transparent';
+    enBtn.style.color      = currentLang === 'en' ? '#34d399' : '#666';
+  }
+  if (esBtn) {
+    esBtn.style.background = currentLang === 'es' ? '#064e2e' : 'transparent';
+    esBtn.style.color      = currentLang === 'es' ? '#34d399' : '#666';
+  }
+
+  // Update html lang attribute
+  document.documentElement.lang = currentLang;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────
+function shortenModel(model) {
+  if (!model) return '—';
+  const parts = model.split('/');
+  let name = parts[parts.length - 1];
+  name = name.replace(/^claude-/, '');
+  return name;
+}
+
+function verdictColors(verdict) {
+  switch (verdict) {
+    case 'KEEP':             return { bg:'#052e16', text:'#34d399', border:'#166534' };
+    case 'SWITCH':
+    case 'URGENT_SWITCH':   return { bg:'#450a0a', text:'#f87171', border:'#991b1b' };
+    case 'INSUFFICIENT_DATA': return { bg:'#431407', text:'#fbbf24', border:'#92400e' };
+    default:                return { bg:'#1a1a1a', text:'#737373', border:'#333' };
+  }
+}
+
+function verdictShort(verdict) {
+  switch (verdict) {
+    case 'KEEP':             return 'KEEP';
+    case 'SWITCH':           return 'SWITCH';
+    case 'URGENT_SWITCH':    return 'URGENT';
+    case 'INSUFFICIENT_DATA':return 'INSUFF.';
+    default: return verdict || '—';
+  }
+}
+
+function verdictIcon(verdict) {
+  switch (verdict) {
+    case 'KEEP':             return '✓';
+    case 'SWITCH':
+    case 'URGENT_SWITCH':   return '⚠';
+    case 'INSUFFICIENT_DATA':return '⏳';
+    default: return '';
+  }
+}
+
+function scoreColor(score) {
+  if (score == null || isNaN(score)) return '#555';
+  if (score >= 0.80) return '#34d399';
+  if (score >= 0.50) return '#fbbf24';
+  return '#f87171';
+}
+
+function fmtScore(s) {
+  if (s == null || isNaN(s)) return '—';
+  return s.toFixed(3);
+}
+
+function fmtPct(v) {
+  if (v == null || isNaN(v)) return '—';
+  return (v * 100).toFixed(1) + '%';
+}
+
+function fmtLatency(ms) {
+  if (ms == null || isNaN(ms)) return '—';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+
+function fmtCost(usd) {
+  if (usd == null || isNaN(usd)) return '—';
+  return '$' + usd.toFixed(4);
+}
+
+function fmtROI(roi) {
+  if (roi == null || isNaN(roi)) return '—';
+  return roi.toFixed(2);
+}
+
+function directionArrow(dir) {
+  if (!dir) return '';
+  switch (dir.toLowerCase()) {
+    case 'improving': case 'up': return '<span style="color:#34d399;">↑</span>';
+    case 'declining': case 'down': return '<span style="color:#f87171;">↓</span>';
+    default: return '<span style="color:#555;">→</span>';
+  }
+}
+
+function groupByType(data) {
+  const groups = { primary:[], subagent:[], builtin:[], other:[] };
+  for (const row of data) {
+    const tp = (row.type || 'other').toLowerCase();
+    if (groups[tp]) groups[tp].push(row);
+    else groups.other.push(row);
+  }
+  return groups;
+}
+
+function formatTimestamp(d) {
+  return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+function fmtFullTimestamp(ms) {
+  if (ms == null) return '—';
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function fmtTokens(n) {
+  if (n == null) return '—';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function buildTrendDots(verdicts) {
+  if (!verdicts || verdicts.length === 0) return '<span style="color:#444;font-size:.7rem;">—</span>';
+  return verdicts.map(v => {
+    const c = verdictColors(v);
+    return `<span class="v-dot" style="background:${c.text};" title="${v}"></span>`;
+  }).join('');
+}
+
+function buildTrendText(verdicts) {
+  if (!verdicts || verdicts.length === 0) return '—';
+  return verdicts.map(v => verdictShort(v)).join(' → ');
+}
+
+// ─── API ─────────────────────────────────────────────────────
+async function fetchJSON(url) {
+  const res = await fetch(url, { cache:'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ─── Render overview ─────────────────────────────────────────
+async function loadOverview() {
+  const data = await fetchJSON('/api/overview');
+  state.data = Array.isArray(data) ? data : [];
+  renderOverview();
+}
+
+function renderOverview() {
+  const body   = document.getElementById('overview-table-body');
+  const meta   = document.getElementById('overview-meta');
+
+  const visible = state.data.filter(r => r.verdict && r.verdict !== 'NO DATA' && r.verdict !== '');
+  meta.textContent = `${visible.length} agent${visible.length !== 1 ? 's' : ''}`;
+
+  if (visible.length === 0) {
+    body.innerHTML = `
+      <div style="text-align:center;padding:48px 24px;color:#555;">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto 14px;display:block;opacity:.3;">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <path d="M9 9h6M9 12h6M9 15h4"/>
+        </svg>
+        <p style="margin:0;font-size:.875rem;color:#666;">${t('no_benchmark_data')}</p>
+        <p style="margin:6px 0 0;font-size:.78rem;color:#444;">${t('no_benchmark_hint')}</p>
+      </div>`;
+    return;
+  }
+
+  const groups    = groupByType(visible);
+  const groupDefs = [
+    { key:'primary',  labelKey:'primary_agents' },
+    { key:'subagent', labelKey:'subagents' },
+    { key:'builtin',  labelKey:'builtin_agents' },
+    { key:'other',    labelKey:'other_agents' },
+  ];
+
+  // Build a flat index map: "agent_id\tmodel" → position in state.data
+  // Must use compound key because the same agent_id can have multiple models.
+  const indexMap = {};
+  state.data.forEach((r, i) => { indexMap[r.agent_id + '\t' + r.model] = i; });
+
+  let html = '';
+  for (const { key, labelKey } of groupDefs) {
+    const rows = groups[key];
+    if (!rows || rows.length === 0) continue;
+    html += `<div class="group-header">${t(labelKey)}</div>`;
+
+    for (const row of rows) {
+      const idx       = indexMap[row.agent_id + '\t' + row.model];
+      const isSelected = state.selectedRow === idx;
+      const vc        = verdictColors(row.verdict);
+      const sc        = scoreColor(row.composite_score);
+      const scoreW    = row.composite_score != null ? Math.max(0, Math.min(100, row.composite_score * 100)) : 0;
+      const trendDots = buildTrendDots(row.trend_verdicts);
+      const dirArrow  = directionArrow(row.trend_direction);
+      const roiColor  = row.roi_score != null ? (row.roi_score >= 5 ? '#34d399' : row.roi_score >= 2 ? '#fbbf24' : '#f87171') : '#555';
+
+      html += `
+        <div class="agent-row${isSelected ? ' selected' : ''}"
+          data-idx="${idx}"
+          onclick="selectRow(${idx})"
+          style="display:grid;grid-template-columns:${COL_TPL};padding:0 16px;border-bottom:1px solid #181818;">
+          <!-- Agent -->
+          <div style="padding:10px 8px;font-size:.82rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${row.agent_id}">
+            ${row.agent_id}
+          </div>
+          <!-- Model -->
+          <div class="mono" style="padding:10px 8px;font-size:.75rem;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${row.model || ''}">
+            ${shortenModel(row.model)}
+          </div>
+          <!-- Score -->
+          <div style="padding:10px 8px;text-align:right;">
+            <div class="mono" style="font-size:.82rem;font-weight:600;color:${sc};">${fmtScore(row.composite_score)}</div>
+            <div class="score-bar-track" style="margin-top:4px;">
+              <div class="score-bar-fill" style="width:${scoreW}%;background:${sc};"></div>
+            </div>
+          </div>
+          <!-- Accuracy -->
+          <div class="mono" style="padding:10px 8px;text-align:right;font-size:.8rem;color:#888;">
+            ${fmtPct(row.accuracy)}
+          </div>
+          <!-- P95 Latency -->
+          <div class="mono" style="padding:10px 8px;text-align:right;font-size:.8rem;color:#888;">
+            ${fmtLatency(row.p95_latency_ms)}
+          </div>
+          <!-- Verdict -->
+          <div style="padding:10px 8px;display:flex;justify-content:center;align-items:center;">
+            <span style="font-size:.62rem;font-weight:700;letter-spacing:.05em;padding:2px 8px;border-radius:5px;background:${vc.bg};color:${vc.text};border:1px solid ${vc.border};">
+              ${verdictShort(row.verdict)}
+            </span>
+          </div>
+          <!-- Trend dots + direction -->
+          <div style="padding:10px 8px;display:flex;align-items:center;gap:6px;">
+            <div class="trend-dots">${trendDots}</div>
+            <span style="font-size:.8rem;">${dirArrow}</span>
+          </div>
+          <!-- ROI -->
+          <div class="mono" style="padding:10px 8px;text-align:right;font-size:.8rem;color:${roiColor};font-weight:600;">
+            ${fmtROI(row.roi_score)}
+          </div>
+          <!-- Cost -->
+          <div class="mono" style="padding:10px 8px;text-align:right;font-size:.8rem;color:#888;">
+            ${fmtCost(row.total_cost_usd)}
+          </div>
+          <!-- Samples -->
+          <div class="mono" style="padding:10px 8px;text-align:right;font-size:.8rem;color:#888;">
+            ${row.sample_size ?? '—'}
+          </div>
+        </div>`;
+    }
+  }
+
+  body.innerHTML = html;
+}
+
+// ─── Row selection → detail panel ────────────────────────────
+function selectRow(idx) {
+  if (state.selectedRow === idx) {
+    closeDetail();
+    return;
+  }
+  state.selectedRow = idx;
+  renderOverview();
+  renderDetail();
+  showPanel('detail-section');
+  document.getElementById('detail-section').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+function renderDetail() {
+  const row = state.data[state.selectedRow];
+  if (!row) return;
+
+  const vc      = verdictColors(row.verdict);
+  const sc      = scoreColor(row.composite_score);
+
+  // Badge
+  const badge = document.getElementById('detail-verdict-badge');
+  badge.textContent = verdictShort(row.verdict);
+  badge.style.background = vc.bg;
+  badge.style.color = vc.text;
+  badge.style.border = `1px solid ${vc.border}`;
+
+  // Switch target
+  let verdictDisplay = verdictShort(row.verdict);
+  if ((row.verdict === 'SWITCH' || row.verdict === 'URGENT_SWITCH') && row.switch_to_model) {
+    verdictDisplay += ` → ${shortenModel(row.switch_to_model)}`;
+  }
+
+  // Recommendation line (API-generated text — not translated)
+  const recIcon = verdictIcon(row.verdict);
+  const recText = row.recommendation
+    ? `<span style="margin-right:5px;">${recIcon}</span>${tb(row.recommendation)}`
+    : '<span style="color:#444;">—</span>';
+
+  // Trend text
+  const trendText = buildTrendText(row.trend_verdicts);
+  const dirLabel  = row.trend_direction ? `<span style="margin-left:6px;">${directionArrow(row.trend_direction)} ${tb(row.trend_direction)}</span>` : '';
+
+  // Cells — labels use t(), values from API remain untranslated
+  const cells = [
+    { label: t('detail_agent'),          value:`<span class="mono" style="font-size:.8rem;">${row.agent_id}</span>` },
+    { label: t('detail_model'),          value:`<span class="mono" style="font-size:.8rem;color:#aaa;">${row.model || '—'}</span>` },
+    { label: t('detail_score'),          value:`<span class="mono" style="font-size:.95rem;font-weight:700;color:${sc};">${fmtScore(row.composite_score)}</span>` },
+    { label: t('detail_verdict'),        value:`<span style="font-size:.82rem;color:${vc.text};font-weight:600;">${verdictDisplay}</span>` },
+    { label: t('detail_recommendation'), value:`<span style="font-size:.8rem;color:#aaa;line-height:1.5;">${recText}</span>` },
+    { label: t('detail_roi'),            value:`<span class="mono" style="font-size:.9rem;font-weight:600;color:${row.roi_score != null ? (row.roi_score >= 5 ? '#34d399' : row.roi_score >= 2 ? '#fbbf24' : '#f87171') : '#555'};">${fmtROI(row.roi_score)}</span>` },
+    { label: t('detail_cost'),           value:`<span class="mono" style="color:#aaa;">${fmtCost(row.total_cost_usd)}</span>` },
+    { label: t('detail_samples'),        value:`<span class="mono" style="color:#aaa;">${row.sample_size != null ? row.sample_size + ' ' + t('events') : '—'}</span>` },
+    { label: t('detail_accuracy'),       value:`<span class="mono" style="color:#aaa;">${fmtPct(row.accuracy)}</span>` },
+    { label: t('detail_p95'),            value:`<span class="mono" style="color:#aaa;">${fmtLatency(row.p95_latency_ms)}</span>` },
+    { label: t('detail_reason'),         value:`<span style="font-size:.8rem;color:#aaa;line-height:1.5;">${row.decision_reason || '<span style="color:#444">—</span>'}</span>` },
+    { label: t('detail_context'),        value:`<span style="font-size:.8rem;color:#aaa;line-height:1.5;">${tb(row.context) || '<span style="color:#444">—</span>'}</span>` },
+    { label: t('detail_trend'),          value:`<span style="font-size:.78rem;color:#888;font-family:monospace;">${trendText}${dirLabel}</span>` },
+  ];
+
+  document.getElementById('detail-grid').innerHTML = cells.map(c => `
+    <div class="detail-cell">
+      <div class="detail-label">${c.label}</div>
+      <div class="detail-value">${c.value}</div>
+    </div>
+  `).join('');
+
+  // Compare button — show only if agent has multiple models
+  const agentRows = state.data.filter(r => r.agent_id === row.agent_id);
+  const btn       = document.getElementById('compare-btn');
+  const hint      = document.getElementById('compare-hint');
+
+  // Store which agent for compare
+  state.compareAgent = row.agent_id;
+
+  if (agentRows.length >= 2) {
+    btn.style.display = 'inline-block';
+    hint.textContent  = `${agentRows.length} models available`;
+  } else {
+    btn.style.display = 'none';
+    hint.textContent  = 'Single model — no comparison available';
+    hint.style.color  = '#333';
+  }
+}
+
+// ─── Close detail ─────────────────────────────────────────────
+function closeDetail() {
+  state.selectedRow = null;
+  hidePanel('detail-section');
+  closeComparison();
+  renderOverview();
+}
+
+// ─── Load comparison ─────────────────────────────────────────
+async function loadCompare() {
+  if (!state.compareAgent) return;
+  try {
+    const data = await fetchJSON(`/api/compare?agent=${encodeURIComponent(state.compareAgent)}`);
+    state.compareData = data;
+    renderComparison(data);
+    showPanel('comparison-section');
+    document.getElementById('comparison-section').scrollIntoView({ behavior:'smooth', block:'nearest' });
+  } catch (err) {
+    renderComparisonError(state.compareAgent, err);
+    showPanel('comparison-section');
+  }
+}
+
+function renderComparison(data) {
+  const ranking = data.ranking || [];
+  const modelCount = data.models_count ?? ranking.length;
+
+  document.getElementById('comparison-title').textContent = `${t('model_comparison')}: ${data.agent_id}`;
+  document.getElementById('comparison-subtitle').textContent =
+    `${modelCount} ${t('models_evaluated')}`;
+
+  renderComparisonChart(ranking);
+  renderRankingTable(ranking);
+
+  // Recommendation (API-generated text — not translated)
+  const recEl = document.getElementById('comparison-recommendation');
+  if (data.comparison?.recommendation) {
+    document.getElementById('comparison-recommendation-text').textContent = tb(data.comparison.recommendation);
+    recEl.style.display = 'block';
+  } else {
+    recEl.style.display = 'none';
+  }
+}
+
+function renderComparisonError(agentId, err) {
+  document.getElementById('comparison-title').textContent = `${t('model_comparison')}: ${agentId}`;
+  document.getElementById('comparison-subtitle').textContent = '';
+  document.getElementById('ranking-table').innerHTML = `
+    <div style="padding:24px;text-align:center;color:#f87171;font-size:.82rem;">
+      Failed to load comparison<br>
+      <span style="color:#444;font-size:.72rem;">${err.message}</span>
+    </div>`;
+  document.getElementById('comparison-recommendation').style.display = 'none';
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+}
+
+function renderComparisonChart(ranking) {
+  const canvas = document.getElementById('comparison-chart');
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+  if (!ranking || ranking.length === 0) return;
+
+  const labels = ranking.map(r => shortenModel(r.model));
+  const scores = ranking.map(r => r.score ?? 0);
+  const colors = ranking.map(r => {
+    if (r.label === 'BEST') return '#34d399';
+    if (r.verdict === 'KEEP') return '#38bdf8';
+    if (r.verdict === 'SWITCH' || r.verdict === 'URGENT_SWITCH') return '#f87171';
+    return '#fbbf24';
+  });
+
+  state.comparisonChart = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data: scores,
+        backgroundColor: colors.map(c => c + '33'),
+        borderColor: colors,
+        borderWidth: 1.5,
+        borderRadius: 4,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display:false },
+        tooltip: {
+          callbacks: { label: ctx => ` Score: ${ctx.parsed.x.toFixed(3)}` },
+          backgroundColor: '#1a1a1a',
+          borderColor: '#333',
+          borderWidth: 1,
+          titleColor: '#e5e5e5',
+          bodyColor: '#aaa',
+        },
+      },
+      scales: {
+        x: {
+          min: 0, max: 1,
+          grid: { color:'#1a1a1a' },
+          ticks: { color:'#555', font:{ family:"'Geist Mono',monospace", size:10 }, callback: v => v.toFixed(1) },
+        },
+        y: {
+          grid: { display:false },
+          ticks: { color:'#aaa', font:{ family:"'Geist Mono',monospace", size:11 } },
+        },
+      },
+    },
+  });
+}
+
+function renderRankingTable(ranking) {
+  const container = document.getElementById('ranking-table');
+  if (!ranking || ranking.length === 0) {
+    container.innerHTML = `<p style="color:#444;font-size:.8rem;">No models ranked yet.</p>`;
+    return;
+  }
+
+  const maxScore = Math.max(...ranking.map(r => r.score ?? 0), 0.001);
+  const bestCost = ranking[0]?.cost ?? null;
+
+  let html = '';
+  for (const r of ranking) {
+    const vc       = verdictColors(r.verdict);
+    const sc       = scoreColor(r.score);
+    const barW     = ((r.score ?? 0) / maxScore * 100).toFixed(1);
+    const roiColor = r.roi_score != null ? (r.roi_score >= 5 ? '#34d399' : r.roi_score >= 2 ? '#fbbf24' : '#f87171') : '#555';
+
+    // Cost delta
+    let costDeltaHtml = '';
+    if (bestCost != null && r.cost != null) {
+      if (r.rank === 1) {
+        costDeltaHtml = `<span class="mono" style="font-size:.65rem;color:#444;">baseline</span>`;
+      } else {
+        const delta = ((r.cost - bestCost) / bestCost * 100);
+        const sign  = delta > 0 ? '+' : '';
+        costDeltaHtml = `<span class="mono" style="font-size:.65rem;color:${delta < 0 ? '#34d399' : '#f87171'};">${sign}${delta.toFixed(0)}% cost</span>`;
+      }
+    }
+
+    // ROI
+    const roiHtml = r.roi_score != null
+      ? `<span class="mono" style="font-size:.65rem;color:${roiColor};font-weight:600;">ROI ${fmtROI(r.roi_score)}</span>`
+      : '';
+
+    // Context line (API-generated text — not translated)
+    const ctxHtml = r.context
+      ? `<p style="margin:5px 0 0;font-size:.7rem;color:#555;line-height:1.4;">${tb(r.context)}</p>`
+      : '';
+
+    html += `
+      <div class="rank-row" style="padding:9px 4px;border-bottom:1px solid #1a1a1a;">
+        <div style="display:grid;grid-template-columns:24px 1fr auto;gap:8px;align-items:start;">
+          <span class="mono" style="font-size:.72rem;color:#444;font-weight:700;padding-top:1px;">#${r.rank}</span>
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+              <span class="mono" style="font-size:.78rem;color:#e5e5e5;">${shortenModel(r.model)}</span>
+              <span class="mono" style="font-size:.78rem;color:${sc};font-weight:700;">${fmtScore(r.score)}</span>
+            </div>
+            <div class="score-bar-track"><div class="score-bar-fill" style="width:${barW}%;background:${sc};"></div></div>
+            <div style="margin-top:4px;display:flex;align-items:center;gap:8px;">
+              ${costDeltaHtml}
+              ${roiHtml}
+            </div>
+            ${ctxHtml}
+          </div>
+          <span style="font-size:.6rem;font-weight:700;padding:2px 6px;border-radius:4px;background:${vc.bg};color:${vc.text};border:1px solid ${vc.border};white-space:nowrap;margin-top:1px;">
+            ${verdictShort(r.verdict)}
+          </span>
+        </div>
+      </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+// ─── Close comparison ─────────────────────────────────────────
+function closeComparison() {
+  state.compareData = null;
+  hidePanel('comparison-section');
+  if (state.comparisonChart) { state.comparisonChart.destroy(); state.comparisonChart = null; }
+}
+
+// ─── Panel visibility helpers ─────────────────────────────────
+function showPanel(id) {
+  const el = document.getElementById(id);
+  el.classList.remove('hidden-panel');
+  el.classList.add('visible-panel');
+}
+
+function hidePanel(id) {
+  const el = document.getElementById(id);
+  el.classList.remove('visible-panel');
+  el.classList.add('hidden-panel');
+}
+
+// ─── Error display ────────────────────────────────────────────
+function showError(msg) {
+  document.getElementById('overview-table-body').innerHTML = `
+    <div style="text-align:center;padding:48px 24px;">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="1.5" style="margin:0 auto 14px;display:block;opacity:.6;">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+      </svg>
+      <p style="margin:0;font-size:.875rem;color:#f87171;">Failed to load data</p>
+      <p style="margin:6px 0 0;font-size:.75rem;color:#555;">${msg}</p>
+      <p style="margin:6px 0 0;font-size:.72rem;color:#333;">Will retry automatically in 30s</p>
+    </div>`;
+}
+
+// ─── Auto-refresh (benchmark) ─────────────────────────────────
+let countdown = 30;
+let countdownInterval = null;
+
+function startCountdown() {
+  if (countdownInterval) clearInterval(countdownInterval);
+  countdown = 30;
+  countdownInterval = setInterval(() => {
+    countdown = countdown <= 1 ? 30 : countdown - 1;
+    const el = document.getElementById('refresh-countdown');
+    if (el) el.textContent = t('refreshing_in', { n: countdown });
+  }, 1000);
+}
+
+function startAutoRefresh() {
+  if (state.refreshTimer) clearInterval(state.refreshTimer);
+  state.refreshTimer = setInterval(() => doLoad(), 30_000);
+}
+
+async function doLoad() {
+  if (state.loading) return;
+  state.loading = true;
+
+  const btn = document.getElementById('refresh-btn');
+  if (btn) { btn.querySelector('[data-i18n]').textContent = 'Loading…'; btn.disabled = true; }
+
+  try {
+    await loadOverview();
+
+    // Restore selection if same agent still present
+    if (state.selectedRow != null) {
+      const row = state.data[state.selectedRow];
+      if (row) {
+        renderDetail();
+      } else {
+        closeDetail();
+      }
+    }
+
+    document.getElementById('last-updated').textContent = formatTimestamp(new Date());
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    state.loading = false;
+    if (btn) { btn.querySelector('[data-i18n]').textContent = t('refresh'); btn.disabled = false; }
+  }
+}
+
+window.loadAll = async function() {
+  const btn = document.getElementById('refresh-btn');
+  const label = btn?.querySelector('[data-i18n]');
+
+  // 1. Run benchmark first to generate fresh data.
+  try {
+    if (label) label.textContent = t('running_benchmark');
+    if (btn) btn.disabled = true;
+    const res = await fetch('/api/benchmark/run', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'completed') {
+      if (label) { label.textContent = t('benchmark_done'); }
+    } else if (data.status === 'already_running') {
+      // Another run in progress — just refresh data below.
+    } else {
+      if (label) label.textContent = t('benchmark_failed');
+    }
+  } catch (e) {
+    if (label) label.textContent = t('benchmark_failed');
+  }
+
+  // 2. Refresh dashboard data from DB.
+  await doLoad();
+  startCountdown();
+  startAutoRefresh();
+
+  // 3. Reset button label after a moment.
+  setTimeout(() => {
+    if (label) label.textContent = t('refresh');
+    if (btn) btn.disabled = false;
+  }, 1500);
+};
+
+// ═══════════════════════════════════════════════════
+// TRACKING SECTION
+// ═══════════════════════════════════════════════════
+
+// ─── Tab switching ────────────────────────────────────────────
+function switchTab(tab) {
+  state.activeTab = tab;
+
+  // Update tab button styles
+  document.querySelectorAll('.tab').forEach(btn => {
+    const isActive = btn.dataset.tab === tab;
+    btn.classList.toggle('active', isActive);
+  });
+
+  // Show/hide sections
+  document.getElementById('benchmark-section').style.display = tab === 'benchmark' ? '' : 'none';
+  document.getElementById('tracking-section').style.display  = tab === 'tracking'  ? '' : 'none';
+
+  if (tab === 'tracking') {
+    // Start tracking auto-refresh
+    if (!state.trackingRefreshTimer) {
+      startTrackingAutoRefresh();
+    }
+    // Load immediately if no data yet
+    if (state.trackingSessions.length === 0) {
+      fetchSessions();
+    }
+  } else {
+    // Stop tracking refresh when not visible — it will restart on next switch
+    if (state.trackingRefreshTimer) {
+      clearInterval(state.trackingRefreshTimer);
+      state.trackingRefreshTimer = null;
+    }
+  }
+}
+
+// ─── Tracking auto-refresh ────────────────────────────────────
+function startTrackingAutoRefresh() {
+  if (state.trackingRefreshTimer) clearInterval(state.trackingRefreshTimer);
+  state.trackingRefreshTimer = setInterval(() => {
+    if (state.activeTab === 'tracking') fetchSessions(true);
+  }, 5_000);
+}
+
+// ─── Fetch sessions ───────────────────────────────────────────
+async function fetchSessions(silent = false) {
+  if (state.trackingLoading) return;
+  state.trackingLoading = true;
+
+  try {
+    const url = `/api/sessions?offset=${state.trackingOffset}&limit=${TRACKING_LIMIT}`;
+    const res = await fetchJSON(url);
+    state.trackingSessions = res.sessions || [];
+    state.trackingTotal    = res.total    ?? 0;
+    renderTrackingTable();
+    renderTrackingPagination();
+  } catch (err) {
+    if (!silent) showTrackingError(err.message);
+  } finally {
+    state.trackingLoading = false;
+  }
+}
+
+// ─── Fetch events for one session ────────────────────────────
+async function fetchSessionEvents(sessionId) {
+  try {
+    const events = await fetchJSON(`/api/sessions/events?session_id=${encodeURIComponent(sessionId)}`);
+    state.sessionEvents[sessionId] = Array.isArray(events) ? events : [];
+  } catch {
+    state.sessionEvents[sessionId] = [];
+  }
+  renderTrackingTable();
+}
+
+// ─── Toggle session expand/collapse ──────────────────────────
+function toggleSession(sessionId) {
+  if (state.expandedSessions.has(sessionId)) {
+    state.expandedSessions.delete(sessionId);
+    renderTrackingTable();
+  } else {
+    state.expandedSessions.add(sessionId);
+    if (state.sessionEvents[sessionId] == null) {
+      // Show skeleton then fetch
+      renderTrackingTable();
+      fetchSessionEvents(sessionId);
+    } else {
+      renderTrackingTable();
+    }
+  }
+}
+
+// ─── Event type badge ─────────────────────────────────────────
+function eventTypeBadge(eventType) {
+  if (!eventType) return '<span style="color:#555;">—</span>';
+  const styles = {
+    start:     'background:#172554;color:#60a5fa;border:1px solid #1e3a8a;',
+    tool_call: 'background:#2e1065;color:#c084fc;border:1px solid #581c87;',
+    complete:  'background:#052e16;color:#34d399;border:1px solid #166534;',
+    error:     'background:#450a0a;color:#f87171;border:1px solid #991b1b;',
+    retry:     'background:#431407;color:#fbbf24;border:1px solid #92400e;',
+  };
+  const style = styles[eventType] || 'background:#1a1a1a;color:#737373;border:1px solid #333;';
+  return `<span class="event-badge" style="${style}">${eventType}</span>`;
+}
+
+// ─── Tool success indicator ───────────────────────────────────
+function toolSuccessIcon(toolSuccess) {
+  if (toolSuccess === true)  return '<span style="color:#34d399;font-size:.8rem;">&#x2713;</span>';
+  if (toolSuccess === false) return '<span style="color:#f87171;font-size:.8rem;">&#x2717;</span>';
+  return '';
+}
+
+// ─── Render tracking table ────────────────────────────────────
+function renderTrackingTable() {
+  const body = document.getElementById('tracking-table-body');
+  const meta = document.getElementById('tracking-meta');
+
+  if (state.trackingSessions.length === 0) {
+    body.innerHTML = `
+      <div style="text-align:center;padding:48px 24px;color:#555;">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto 14px;display:block;opacity:.3;">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+        <p style="margin:0;font-size:.875rem;color:#666;">${t('no_tracking_data')}</p>
+        <p style="margin:6px 0 0;font-size:.78rem;color:#444;">${t('no_tracking_hint')}</p>
+      </div>`;
+    meta.textContent = '0 sessions';
+    return;
+  }
+
+  meta.textContent = `${state.trackingTotal} session${state.trackingTotal !== 1 ? 's' : ''}`;
+
+  const SESSION_COLS = '160px 160px 1fr 90px 90px 90px 32px';
+  const EVENT_COLS   = '24px 90px 140px 1fr 80px 80px 80px 80px 80px 90px';
+
+  let html = '';
+
+  for (const session of state.trackingSessions) {
+    const sid      = session.session_id;
+    const expanded = state.expandedSessions.has(sid);
+
+    html += `
+      <div class="tracking-session-row"
+        onclick="toggleSession('${escAttr(sid)}')"
+        style="display:grid;grid-template-columns:${SESSION_COLS};padding:0 16px;align-items:center;">
+        <!-- Time -->
+        <div class="mono" style="padding:10px 8px;font-size:.72rem;color:#888;">
+          ${fmtFullTimestamp(session.timestamp)}
+        </div>
+        <!-- Agent -->
+        <div style="padding:10px 8px;font-size:.8rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escAttr(session.agent_id || '')}">
+          ${esc(session.agent_id) || '<span style="color:#555;">—</span>'}
+        </div>
+        <!-- Model -->
+        <div class="mono" style="padding:10px 8px;font-size:.72rem;color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escAttr(session.model || '')}">
+          ${esc(shortenModel(session.model))}
+        </div>
+        <!-- In tokens -->
+        <div class="mono" style="padding:10px 8px;text-align:right;font-size:.78rem;color:#888;">
+          ${fmtTokens(session.prompt_tokens)}
+        </div>
+        <!-- Out tokens -->
+        <div class="mono" style="padding:10px 8px;text-align:right;font-size:.78rem;color:#888;">
+          ${fmtTokens(session.completion_tokens)}
+        </div>
+        <!-- Cost -->
+        <div class="mono" style="padding:10px 8px;text-align:right;font-size:.78rem;color:#888;">
+          ${fmtCost(session.cost_usd)}
+        </div>
+        <!-- Toggle arrow -->
+        <div style="padding:10px 4px;text-align:center;font-size:.75rem;color:#555;user-select:none;">
+          ${expanded ? '&#9660;' : '&#9654;'}
+        </div>
+      </div>`;
+
+    if (expanded) {
+      const events = state.sessionEvents[sid];
+
+      if (events == null) {
+        // Loading skeletons
+        for (let i = 0; i < 3; i++) {
+          html += `
+            <div class="tracking-event-row" style="padding:8px 24px;display:flex;gap:12px;align-items:center;">
+              <div class="skeleton" style="height:10px;width:80px;flex-shrink:0;"></div>
+              <div class="skeleton" style="height:10px;width:120px;flex-shrink:0;"></div>
+              <div class="skeleton" style="height:10px;flex:1;"></div>
+            </div>`;
+        }
+      } else if (events.length === 0) {
+        html += `
+          <div class="tracking-event-row" style="padding:10px 24px;">
+            <span style="font-size:.75rem;color:#555;">No events found for this session.</span>
+          </div>`;
+      } else {
+        // Event header row
+        html += `
+          <div class="tracking-event-row" style="display:grid;grid-template-columns:${EVENT_COLS};padding:0 24px;background:#0f0f0f;">
+            <div></div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;">${t('col_type')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;">${t('col_time')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;">${t('col_model')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;text-align:right;">${t('col_duration')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;text-align:right;">${t('col_in')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;text-align:right;">${t('col_out')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;text-align:right;">${t('col_cost')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;">${t('col_tool')}</div>
+            <div style="padding:6px 6px;font-size:.58rem;color:#3a3a3a;letter-spacing:.1em;text-transform:uppercase;font-weight:700;">OK</div>
+          </div>`;
+
+        for (const ev of events) {
+          const durText = ev.duration_ms != null ? ev.duration_ms + 'ms' : '—';
+          html += `
+            <div class="tracking-event-row" style="display:grid;grid-template-columns:${EVENT_COLS};padding:0 24px;">
+              <div></div>
+              <!-- Type badge -->
+              <div style="padding:7px 6px;display:flex;align-items:center;">
+                ${eventTypeBadge(ev.event_type)}
+              </div>
+              <!-- Time -->
+              <div class="mono" style="padding:7px 6px;font-size:.68rem;color:#555;">
+                ${fmtFullTimestamp(ev.timestamp)}
+              </div>
+              <!-- Model -->
+              <div class="mono" style="padding:7px 6px;font-size:.68rem;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escAttr(ev.model || '')}">
+                ${esc(shortenModel(ev.model))}
+              </div>
+              <!-- Duration -->
+              <div class="mono" style="padding:7px 6px;text-align:right;font-size:.68rem;color:#555;">
+                ${esc(durText)}
+              </div>
+              <!-- In tokens -->
+              <div class="mono" style="padding:7px 6px;text-align:right;font-size:.68rem;color:#555;">
+                ${fmtTokens(ev.prompt_tokens)}
+              </div>
+              <!-- Out tokens -->
+              <div class="mono" style="padding:7px 6px;text-align:right;font-size:.68rem;color:#555;">
+                ${fmtTokens(ev.completion_tokens)}
+              </div>
+              <!-- Cost -->
+              <div class="mono" style="padding:7px 6px;text-align:right;font-size:.68rem;color:#555;">
+                ${fmtCost(ev.cost_usd)}
+              </div>
+              <!-- Tool name -->
+              <div class="mono" style="padding:7px 6px;font-size:.68rem;color:#555;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                ${ev.tool_name ? esc(ev.tool_name) : '<span style="color:#333;">—</span>'}
+              </div>
+              <!-- Tool success -->
+              <div style="padding:7px 6px;font-size:.8rem;">
+                ${toolSuccessIcon(ev.tool_success)}
+              </div>
+            </div>`;
+        }
+      }
+    }
+  }
+
+  body.innerHTML = html;
+}
+
+// ─── Render pagination ────────────────────────────────────────
+function renderTrackingPagination() {
+  const start = state.trackingOffset + 1;
+  const end   = Math.min(state.trackingOffset + TRACKING_LIMIT, state.trackingTotal);
+  const total = state.trackingTotal;
+
+  const infoEl = document.getElementById('tracking-pagination-info');
+  if (total === 0) {
+    infoEl.textContent = 'No sessions';
+  } else {
+    infoEl.textContent = t('showing_sessions', { from: start, to: end, total });
+  }
+
+  const prevBtn = document.getElementById('tracking-prev-btn');
+  const nextBtn = document.getElementById('tracking-next-btn');
+
+  prevBtn.disabled = state.trackingOffset <= 0;
+  nextBtn.disabled = state.trackingOffset + TRACKING_LIMIT >= total;
+
+  prevBtn.style.opacity = prevBtn.disabled ? '0.4' : '1';
+  nextBtn.style.opacity = nextBtn.disabled ? '0.4' : '1';
+  prevBtn.style.cursor  = prevBtn.disabled ? 'default' : 'pointer';
+  nextBtn.style.cursor  = nextBtn.disabled ? 'default' : 'pointer';
+}
+
+// ─── Pagination actions ───────────────────────────────────────
+function trackingPrevPage() {
+  if (state.trackingOffset <= 0) return;
+  state.trackingOffset = Math.max(0, state.trackingOffset - TRACKING_LIMIT);
+  fetchSessions();
+}
+
+function trackingNextPage() {
+  if (state.trackingOffset + TRACKING_LIMIT >= state.trackingTotal) return;
+  state.trackingOffset += TRACKING_LIMIT;
+  fetchSessions();
+}
+
+// ─── Error display for tracking ───────────────────────────────
+function showTrackingError(msg) {
+  document.getElementById('tracking-table-body').innerHTML = `
+    <div style="text-align:center;padding:48px 24px;">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="1.5" style="margin:0 auto 14px;display:block;opacity:.6;">
+        <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+      </svg>
+      <p style="margin:0;font-size:.875rem;color:#f87171;">Failed to load sessions</p>
+      <p style="margin:6px 0 0;font-size:.75rem;color:#555;">${esc(msg)}</p>
+    </div>`;
+}
+
+// ─── HTML escape utilities ────────────────────────────────────
+function esc(str) {
+  if (str == null) return '—';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function escAttr(str) {
+  if (str == null) return '';
+  return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ─── Visibility: pause/resume when tab is hidden/visible ────
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Pause all timers when the browser tab is not visible.
+    if (state.refreshTimer) { clearInterval(state.refreshTimer); state.refreshTimer = null; }
+    if (state.trackingRefreshTimer) { clearInterval(state.trackingRefreshTimer); state.trackingRefreshTimer = null; }
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+  } else {
+    // Resume immediately when the tab becomes visible again.
+    doLoad();                      // refresh benchmark data now
+    startAutoRefresh();            // restart 30s benchmark timer
+    startCountdown();              // restart countdown display
+    if (state.activeTab === 'tracking') {
+      fetchSessions();             // refresh tracking data now
+      startTrackingAutoRefresh();  // restart 5s tracking timer
+    }
+  }
+});
+
+// ─── Bootstrap ───────────────────────────────────────────────
+applyTranslations();
+window.loadAll();
+startAutoRefresh();
+startCountdown();
+</script>
+</body>
+</html>
