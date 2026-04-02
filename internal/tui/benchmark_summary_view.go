@@ -39,10 +39,10 @@ type summaryRow struct {
 }
 
 // summaryColWidths and summaryColNames describe the summary table columns.
-// Columns: Agent | Model | Runs | Accuracy | Avg Turn | Last Cost | Health | Last Verdict
+// Columns: Agent | Model | Runs | Accuracy | Avg Response | Last Cost | Health | Last Verdict
 var (
-	summaryColWidths = []int{18, 22, 5, 10, 12, 12, 8, 20}
-	summaryColNames  = []string{"Agent", "Model", "Runs", "Accuracy", "Avg Turn", "Last Cost", "Health", "Last Verdict"}
+	summaryColWidths = []int{18, 22, 5, 10, 13, 12, 8, 20}
+	summaryColNames  = []string{"Agent", "Model", "Runs", "Accuracy", "Avg Response", "Last Cost", "Health", "Last Verdict"}
 )
 
 // healthStyle returns a colour for the health score (0-100).
@@ -490,7 +490,7 @@ func (m *BenchmarkSummaryModel) View() string {
 		writeDetailField(&sb, "Model", r.Model)
 		writeDetailField(&sb, "Runs", fmt.Sprintf("%d benchmark run(s)", r.Runs))
 		writeDetailField(&sb, "Accuracy", fmt.Sprintf("%.1f%%  (weighted avg)", r.AvgAccuracy*100))
-		writeDetailField(&sb, "Avg Turn", fmt.Sprintf("%.0fms  (weighted avg)", r.AvgTurnMs))
+		writeDetailField(&sb, "Avg Response", fmt.Sprintf("%.1fs  (weighted avg)", r.AvgTurnMs/1000))
 		writeDetailField(&sb, "Cost", fmt.Sprintf("$%.4f  (from last verdict run)", r.TotalCostUSD))
 		writeDetailField(&sb, "Health", fmt.Sprintf("%.0f / 100", r.HealthScore))
 		writeDetailField(&sb, "Verdict", string(r.LastVerdict))
@@ -514,7 +514,7 @@ func (m *BenchmarkSummaryModel) View() string {
 func formatSummaryRow(r summaryRow) []string {
 	runs := fmt.Sprintf("%d", r.Runs)
 	accuracy := fmt.Sprintf("%.1f%%", r.AvgAccuracy*100)
-	p95 := fmt.Sprintf("%.0fms", r.AvgTurnMs)
+	p95 := fmt.Sprintf("%.1fs", r.AvgTurnMs/1000)
 	cost := fmt.Sprintf("$%.4f", r.TotalCostUSD)
 	health := fmt.Sprintf("%.0f", r.HealthScore)
 	verdict := string(r.LastVerdict)
