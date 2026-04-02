@@ -392,8 +392,9 @@ func rankChartsByScoreForMonth(stats map[string]*chartModelStats, totals map[str
 	}
 	items := make([]item, 0, len(stats))
 	for _, s := range stats {
-		cost := totals[s.Model]
-		if cost <= 0 {
+		cost, ok := totals[s.Model]
+		if !ok {
+			// Only include models that have month spend rows in tracking.
 			continue
 		}
 		items = append(items, item{model: s.Model, score: scoreFn(s), cost: cost})
