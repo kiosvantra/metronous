@@ -722,7 +722,16 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			if r > 1 {
 				r = 1
 			}
-			return int(math.Round(r * float64(barHeight)))
+			b := int(math.Round(r * float64(barHeight)))
+			// If the value is positive but extremely small, rounding can drop it to 0 blocks,
+			// making it invisible. Force at least 1 block so the user can still see it.
+			if b < 1 {
+				b = 1
+			}
+			if b > barHeight {
+				b = barHeight
+			}
+			return b
 		}
 
 		formatY := func(v float64) string {
@@ -754,6 +763,10 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			}
 			tickRowLabels[b] = formatY(v)
 		}
+		// For log-scaled charts, cost=0 cannot be represented in the block mapping,
+		// but users still expect the Y axis to start at 0.
+		// The bottom visible row is y=1 blocks, so pin label for that row to $0.
+		tickRowLabels[1] = formatY(0)
 
 		heightsPerDay := make([][]int, len(chunkDays))
 		for i, d := range chunkDays {
