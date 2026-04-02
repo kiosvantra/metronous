@@ -1,10 +1,10 @@
 # TUI Controls and Navigation
 
-Metronous runs a four-tab terminal dashboard (TUI): Tracking, Benchmark Summary, Benchmark Detailed, and Config.
+Metronous runs a five-tab terminal dashboard (TUI): Tracking, Benchmark Summary, Benchmark Detailed, Charts, and Config.
 
 ## Global keys (app level)
 - `q`: quit
-- `1`/`2`/`3`/`4` or `left`/`right`: switch tabs
+- `1`/`2`/`3`/`4`/`5` or `left`/`right`: switch tabs (note: inside **Charts**, `left`/`right` navigate months instead of switching tabs)
 - `ctrl+s`: save config
 - `ctrl+r`: reload config
 
@@ -25,3 +25,8 @@ Metronous runs a four-tab terminal dashboard (TUI): Tracking, Benchmark Summary,
 - `PgUp`/`PgDn`: change the displayed cycle (Sunday-bounded week; navigation goes newest <-> older)
 - `Enter`: freeze the detail panel for the selected row
 - `Esc`: unfreeze the detail panel
+
+## Charts tab
+- `left`/`right`: change the selected month
+- `k`/`l`: move the day cursor within the month (updates the tooltip)
+- Mouse: hover/click on a day column to show the tooltip (terminal-dependent)
