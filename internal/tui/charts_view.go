@@ -36,11 +36,14 @@ func (m ChartMode) String() string {
 }
 
 type ChartsDataMsg struct {
-	Mode           ChartMode
-	MonthStart     time.Time
-	Rows           []store.DailyCostByModelRow
-	SelectedModels []string
-	Err            error
+	Mode                         ChartMode
+	MonthStart                   time.Time
+	Rows                         []store.DailyCostByModelRow
+	SelectedModels               []string
+	CostSelectedModels           []string
+	PerformanceSelectedModels    []string
+	ResponsibilitySelectedModels []string
+	Err                          error
 }
 
 // ChartsModel renders daily cost charts for the selected month.
@@ -60,6 +63,9 @@ type ChartsModel struct {
 	dailyRows []store.DailyCostByModelRow
 
 	selectedModels []string
+
+	performanceSelectedModels    []string
+	responsibilitySelectedModels []string
 
 	cursorDayIndex int // 0-based within the selected month
 }
@@ -160,6 +166,366 @@ func filterCostRows(rows []store.DailyCostByModelRow, selected []string) []store
 	return out
 }
 
+type chartPanelData struct {
+	selectedModels []string
+	colors         map[string]lipgloss.Color
+	blocks         map[string]string
+	costs          map[string]map[string]float64 // dayKey -> model -> cost
+	totals         map[string]float64
+}
+
+func buildChartPanelData(rows []store.DailyCostByModelRow, selected []string) chartPanelData {
+	data := chartPanelData{
+		selectedModels: selected,
+		colors:         make(map[string]lipgloss.Color, len(selected)),
+		blocks:         make(map[string]string, len(selected)),
+		costs:          make(map[string]map[string]float64),
+		totals:         make(map[string]float64, len(selected)),
+	}
+	if len(selected) == 0 {
+		return data
+	}
+
+	palette := []lipgloss.Color{lipgloss.Color("82"), lipgloss.Color("226"), lipgloss.Color("196")}
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, model := range selected {
+		selectedSet[model] = struct{}{}
+	}
+
+	for _, model := range selected {
+		c := palette[len(data.colors)%len(palette)]
+		data.colors[model] = c
+		data.blocks[model] = lipgloss.NewStyle().Foreground(c).Render("█")
+	}
+
+	for _, r := range rows {
+		if _, ok := selectedSet[r.Model]; !ok {
+			continue
+		}
+		dayKey := r.Day.Format("2006-01-02")
+		bucket := data.costs[dayKey]
+		if bucket == nil {
+			bucket = make(map[string]float64)
+			data.costs[dayKey] = bucket
+		}
+		bucket[r.Model] += r.TotalCostUSD
+		data.totals[r.Model] += r.TotalCostUSD
+	}
+
+	return data
+}
+
+func wrapLegendLines(selected []string, totals map[string]float64, colors map[string]lipgloss.Color, width int) []string {
+	if len(selected) == 0 {
+		return nil
+	}
+	legendLines := []string{}
+	line := "Legend: "
+	for i, model := range selected {
+		entry := fmt.Sprintf("%s %s ($%.2f)", lipgloss.NewStyle().Foreground(colors[model]).Render("█"), model, totals[model])
+		sep := "  "
+		if i == 0 {
+			sep = ""
+		}
+		candidate := line + sep + entry
+		if width > 0 && lipgloss.Width(candidate) > maxInt(40, width-2) && line != "Legend: " {
+			legendLines = append(legendLines, line)
+			line = strings.Repeat(" ", len("Legend: ")) + entry
+		} else {
+			line = candidate
+		}
+	}
+	legendLines = append(legendLines, line)
+	return legendLines
+}
+
+func panelBarHeight(totalHeight int) int {
+	barHeight := 8
+	if totalHeight > 0 {
+		barHeight = (totalHeight - 18) / 3
+		if barHeight < 5 {
+			barHeight = 5
+		}
+		if barHeight > 12 {
+			barHeight = 12
+		}
+	}
+	return barHeight
+}
+
+func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, height int, data chartPanelData) []string {
+	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render(title)}
+	if len(days) == 0 || len(data.selectedModels) == 0 {
+		lines = append(lines, "No chart data for the selected month.")
+		return lines
+	}
+
+	cellWidth := 4
+	leftGutter := 10
+	maxCols := width - leftGutter - 1
+	if maxCols <= 0 {
+		maxCols = 1
+	}
+	chunkSize := maxCols / cellWidth
+	if chunkSize <= 0 {
+		chunkSize = 5
+	}
+	if chunkSize < 5 {
+		chunkSize = 5
+	}
+	if chunkSize > len(days) {
+		chunkSize = len(days)
+	}
+
+	barHeight := panelBarHeight(height)
+
+	dayTotals := make([]float64, 0, len(days))
+	for _, d := range days {
+		rowCosts := data.costs[d.Format("2006-01-02")]
+		total := 0.0
+		for _, model := range data.selectedModels {
+			if rowCosts != nil {
+				total += rowCosts[model]
+			}
+		}
+		dayTotals = append(dayTotals, total)
+	}
+
+	chartLinesStart := len(lines)
+	for chunkStart := 0; chunkStart < len(days); chunkStart += chunkSize {
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > len(days) {
+			chunkEnd = len(days)
+		}
+		chunkDays := days[chunkStart:chunkEnd]
+		chunkTotals := dayTotals[chunkStart:chunkEnd]
+
+		maxTotal := 0.0
+		minPositive := 0.0
+		for _, v := range chunkTotals {
+			if v > maxTotal {
+				maxTotal = v
+			}
+			if v > 0 && (minPositive == 0 || v < minPositive) {
+				minPositive = v
+			}
+		}
+		if maxTotal <= 0 {
+			maxTotal = 1
+		}
+		if minPositive <= 0 {
+			minPositive = maxTotal
+		}
+
+		logMin := math.Log10(minPositive)
+		logMax := math.Log10(maxTotal)
+		uniformPositive := logMax-logMin < 1e-9
+		if uniformPositive {
+			logMax = logMin + 1
+		}
+
+		costToBlocks := func(cost float64) int {
+			if cost <= 0 || len(data.selectedModels) == 0 {
+				return 0
+			}
+			if uniformPositive {
+				return barHeight
+			}
+			lg := math.Log10(cost)
+			r := (lg - logMin) / (logMax - logMin)
+			if r < 0 {
+				r = 0
+			}
+			if r > 1 {
+				r = 1
+			}
+			return int(math.Round(r * float64(barHeight)))
+		}
+
+		formatY := func(v float64) string {
+			if v >= 100 {
+				return fmt.Sprintf("$%.0f", v)
+			}
+			if v >= 10 {
+				return fmt.Sprintf("$%.1f", v)
+			}
+			return fmt.Sprintf("$%.2f", v)
+		}
+
+		tickCount := 5
+		yTicks := make([]float64, 0, tickCount)
+		for i := 0; i < tickCount; i++ {
+			r := float64(i) / float64(tickCount-1)
+			val := math.Pow(10, logMax-(r*(logMax-logMin)))
+			yTicks = append(yTicks, val)
+		}
+
+		tickRowLabels := make(map[int]string)
+		for _, v := range yTicks {
+			b := costToBlocks(v)
+			if b < 1 {
+				continue
+			}
+			if b > barHeight {
+				b = barHeight
+			}
+			tickRowLabels[b] = formatY(v)
+		}
+
+		heightsPerDay := make([][]int, len(chunkDays))
+		for i, d := range chunkDays {
+			rowCosts := data.costs[d.Format("2006-01-02")]
+			totalCost := chunkTotals[i]
+			totalBlocks := costToBlocks(totalCost)
+			if totalBlocks <= 0 || rowCosts == nil {
+				heightsPerDay[i] = make([]int, len(data.selectedModels))
+				continue
+			}
+
+			floors := make([]int, len(data.selectedModels))
+			fracs := make([]float64, len(data.selectedModels))
+			sumFloors := 0
+			for j, model := range data.selectedModels {
+				c := rowCosts[model]
+				segExact := (float64(totalBlocks) * c) / totalCost
+				f := int(segExact)
+				floors[j] = f
+				fracs[j] = segExact - float64(f)
+				sumFloors += f
+			}
+
+			rem := totalBlocks - sumFloors
+			heights := make([]int, len(data.selectedModels))
+			copy(heights, floors)
+			if rem > 0 {
+				idx := make([]int, len(data.selectedModels))
+				for k := range idx {
+					idx[k] = k
+				}
+				sort.SliceStable(idx, func(a, b int) bool {
+					return fracs[idx[a]] > fracs[idx[b]]
+				})
+				for k := 0; k < rem && k < len(idx); k++ {
+					heights[idx[k]]++
+				}
+			}
+			heightsPerDay[i] = heights
+		}
+
+		for y := barHeight; y >= 1; y-- {
+			label := tickRowLabels[y]
+			pad := leftGutter - len(label)
+			if pad < 1 {
+				pad = 1
+			}
+			row := strings.Repeat(" ", pad) + label + "|"
+
+			for i := range chunkDays {
+				seg := -1
+				cum := 0
+				heights := heightsPerDay[i]
+				for j := range data.selectedModels {
+					cum += heights[j]
+					if y <= cum {
+						seg = j
+						break
+					}
+				}
+				if seg < 0 {
+					row += strings.Repeat(" ", cellWidth)
+					continue
+				}
+				model := data.selectedModels[seg]
+				cell := data.blocks[model]
+				globalIdx := chunkStart + i
+				if globalIdx == cursorDayIndex {
+					cell = lipgloss.NewStyle().Foreground(data.colors[model]).Background(lipgloss.Color("240")).Render("█")
+				}
+				row += " " + cell + " " + " "
+			}
+			lines = append(lines, row)
+		}
+
+		base := strings.Repeat(" ", leftGutter) + "+"
+		for range chunkDays {
+			base += strings.Repeat("-", cellWidth)
+		}
+		lines = append(lines, base)
+
+		labelRow := strings.Repeat(" ", leftGutter) + " "
+		for _, d := range chunkDays {
+			lab := fmt.Sprintf("%2d", d.Day())
+			if cellWidth > 2 {
+				lab = " " + lab + strings.Repeat(" ", cellWidth-3)
+			}
+			if len(lab) < cellWidth {
+				lab += strings.Repeat(" ", cellWidth-len(lab))
+			}
+			if len(lab) > cellWidth {
+				lab = lab[:cellWidth]
+			}
+			labelRow += lab
+		}
+		lines = append(lines, labelRow)
+
+		if chunkEnd < len(days) {
+			lines = append(lines, "")
+		}
+	}
+
+	if len(data.selectedModels) > 0 {
+		legendLines := wrapLegendLines(data.selectedModels, data.totals, data.colors, width)
+		if len(lines) > chartLinesStart {
+			lines = append(lines, "")
+		}
+		lines = append(lines, legendLines...)
+	}
+
+	return lines
+}
+
+func renderChartTooltip(days []time.Time, cursorDayIndex int, data chartPanelData) []string {
+	if len(days) == 0 || len(data.selectedModels) == 0 {
+		return nil
+	}
+	idx := cursorDayIndex
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(days) {
+		idx = len(days) - 1
+	}
+	cursorDay := days[idx]
+	rowCosts := data.costs[cursorDay.Format("2006-01-02")]
+	total := 0.0
+	for _, model := range data.selectedModels {
+		if rowCosts != nil {
+			total += rowCosts[model]
+		}
+	}
+	tooltipLines := []string{fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total)}
+	if total <= 0 || rowCosts == nil {
+		tooltipLines = append(tooltipLines, "(no spend on selected models)")
+		return tooltipLines
+	}
+	type ent struct {
+		model string
+		cost  float64
+	}
+	ents := make([]ent, 0, len(data.selectedModels))
+	for _, model := range data.selectedModels {
+		ents = append(ents, ent{model: model, cost: rowCosts[model]})
+	}
+	sort.SliceStable(ents, func(i, j int) bool { return ents[i].cost > ents[j].cost })
+	for _, ent := range ents {
+		if ent.cost <= 0 {
+			continue
+		}
+		tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", data.blocks[ent.model], ent.model, ent.cost))
+	}
+	return tooltipLines
+}
+
 func (m *ChartsModel) handleMouse(msg tea.MouseMsg) {
 	// Only attempt tooltip selection when the chart fits in a single chunk.
 	if m.width <= 0 {
@@ -234,14 +600,34 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 		)
 
 	case ChartsDataMsg:
-		if !sameChartMonth(msg.MonthStart, m.monthStart) || msg.Mode != m.mode {
+		if !sameChartMonth(msg.MonthStart, m.monthStart) {
 			return m, nil
 		}
 		m.loading = false
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.dailyRows = msg.Rows
-			m.selectedModels = msg.SelectedModels
+			if len(msg.CostSelectedModels) > 0 {
+				m.selectedModels = msg.CostSelectedModels
+			} else {
+				m.selectedModels = msg.SelectedModels
+			}
+			if len(msg.PerformanceSelectedModels) > 0 {
+				m.performanceSelectedModels = msg.PerformanceSelectedModels
+			} else {
+				m.performanceSelectedModels = m.selectedModels
+			}
+			if len(msg.ResponsibilitySelectedModels) > 0 {
+				m.responsibilitySelectedModels = msg.ResponsibilitySelectedModels
+			} else {
+				m.responsibilitySelectedModels = m.selectedModels
+			}
+			if len(m.performanceSelectedModels) == 0 {
+				m.performanceSelectedModels = m.selectedModels
+			}
+			if len(m.responsibilitySelectedModels) == 0 {
+				m.responsibilitySelectedModels = m.selectedModels
+			}
 		}
 		return m, nil
 
@@ -260,14 +646,6 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 				m.cursorDayIndex = daysInMonth(m.monthStart) - 1
 			}
 			return m, nil
-		case "m", "M":
-			if m.mode == ChartModePerformance {
-				m.mode = ChartModeResponsibility
-			} else {
-				m.mode = ChartModePerformance
-			}
-			m.loading = true
-			return m, m.fetchChartData()
 		case "left":
 			m.monthStart = m.monthStart.AddDate(0, -1, 0)
 			m.cursorDayIndex = 0
@@ -286,12 +664,11 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 
 func (m ChartsModel) fetchChartData() tea.Cmd {
 	monthStart := m.monthStart
-	mode := m.mode
 	es := m.es
 	bs := m.bs
 	return func() tea.Msg {
 		if es == nil {
-			return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Rows: nil, SelectedModels: nil, Err: nil}
+			return ChartsDataMsg{MonthStart: monthStart, Rows: nil, SelectedModels: nil, Err: nil}
 		}
 		startLocal := monthStart
 		endLocal := startLocal.AddDate(0, 1, 0)
@@ -299,39 +676,41 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 		defer cancel()
 		rows, err := es.QueryDailyCostByModel(ctx, startLocal.UTC(), endLocal.UTC())
 		if err != nil {
-			return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Err: err}
+			return ChartsDataMsg{MonthStart: monthStart, Err: err}
 		}
 
-		selected := []string{}
-		switch mode {
-		case ChartModeResponsibility:
-			selected = rankModelsByCost(rows, 3)
-		case ChartModePerformance:
+		costSelected := rankModelsByCost(rows, 3)
+		performanceSelected := costSelected
+		responsibilitySelected := costSelected
+		if bs != nil {
 			active := make(map[string]struct{})
 			for _, r := range rows {
 				active[r.Model] = struct{}{}
 			}
-			if bs != nil {
-				summaries, err := bs.QueryModelSummaries(ctx)
-				if err != nil {
-					return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Err: err}
-				}
-				selected = rankModelsByPerformance(summaries, active, 3)
+			summaries, err := bs.QueryModelSummaries(ctx)
+			if err != nil {
+				return ChartsDataMsg{MonthStart: monthStart, Err: err}
 			}
-			if len(selected) == 0 {
-				selected = rankModelsByCost(rows, 3)
+			performanceSelected = rankModelsByPerformance(summaries, active, 3)
+			if len(performanceSelected) == 0 {
+				performanceSelected = costSelected
 			}
 		}
-
-		filtered := filterCostRows(rows, selected)
-		return ChartsDataMsg{Mode: mode, MonthStart: monthStart, Rows: filtered, SelectedModels: selected, Err: nil}
+		return ChartsDataMsg{
+			MonthStart:                   monthStart,
+			Rows:                         rows,
+			SelectedModels:               costSelected,
+			CostSelectedModels:           costSelected,
+			PerformanceSelectedModels:    performanceSelected,
+			ResponsibilitySelectedModels: responsibilitySelected,
+			Err:                          nil,
+		}
 	}
 }
 
 func (m ChartsModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render("Charts")
-	sub := fmt.Sprintf("%s mode — daily stacked cost for the top 3 models — %s  (m toggle, ←/→ month, k/l day)",
-		m.mode.String(), m.monthStart.Format("January 2006"))
+	sub := fmt.Sprintf("Daily stacked cost charts for the top 3 models — %s  (←/→ month, k/l day)", m.monthStart.Format("January 2006"))
 
 	lines := []string{title + "\n" + sub}
 	if m.loading {
@@ -348,328 +727,35 @@ func (m ChartsModel) View() string {
 		days = append(days, d)
 	}
 
-	if len(m.dailyRows) == 0 || len(m.selectedModels) == 0 {
+	if len(m.dailyRows) == 0 {
 		lines = append(lines, "No chart data for the selected month.")
 		return strings.Join(lines, "\n")
 	}
 
-	palette := []lipgloss.Color{lipgloss.Color("82"), lipgloss.Color("226"), lipgloss.Color("196")}
-	colors := make(map[string]lipgloss.Color, len(m.selectedModels))
-	blocks := make(map[string]string, len(m.selectedModels))
-	for i, model := range m.selectedModels {
-		c := palette[i%len(palette)]
-		colors[model] = c
-		blocks[model] = lipgloss.NewStyle().Foreground(c).Render("█")
+	costPanel := buildChartPanelData(m.dailyRows, m.selectedModels)
+	performancePanel := buildChartPanelData(m.dailyRows, m.performanceSelectedModels)
+	responsibilityPanel := buildChartPanelData(m.dailyRows, m.responsibilitySelectedModels)
+
+	panels := []struct {
+		title string
+		data  chartPanelData
+	}{
+		{title: "Cost top-3 (spenders)", data: costPanel},
+		{title: "Performance top-3", data: performancePanel},
+		{title: "Responsibility top-3", data: responsibilityPanel},
 	}
 
-	selectedSet := make(map[string]struct{}, len(m.selectedModels))
-	for _, model := range m.selectedModels {
-		selectedSet[model] = struct{}{}
-	}
-
-	costs := make(map[string]map[string]float64) // dayKey -> model -> cost
-	totals := make(map[string]float64, len(m.selectedModels))
-	for _, r := range m.dailyRows {
-		if _, ok := selectedSet[r.Model]; !ok {
-			continue
-		}
-		dayKey := r.Day.Format("2006-01-02")
-		bucket := costs[dayKey]
-		if bucket == nil {
-			bucket = make(map[string]float64)
-			costs[dayKey] = bucket
-		}
-		bucket[r.Model] += r.TotalCostUSD
-		totals[r.Model] += r.TotalCostUSD
-	}
-
-	legendLines := []string{}
-	line := "Legend: "
-	for i, model := range m.selectedModels {
-		entry := fmt.Sprintf("%s %s ($%.2f)", lipgloss.NewStyle().Foreground(colors[model]).Render("█"), model, totals[model])
-		sep := "  "
-		if i == 0 {
-			sep = ""
-		}
-		candidate := line + sep + entry
-		if m.width > 0 && lipgloss.Width(candidate) > maxInt(40, m.width-2) && line != "Legend: " {
-			legendLines = append(legendLines, line)
-			line = "          " + entry
-		} else {
-			line = candidate
-		}
-	}
-	if line != "Legend: " {
-		legendLines = append(legendLines, line)
-	}
-
-	cellWidth := 4
-	leftGutter := 10
-	maxCols := m.width - leftGutter - 1
-	if maxCols <= 0 {
-		maxCols = 1
-	}
-	chunkSize := maxCols / cellWidth
-	if chunkSize <= 0 {
-		chunkSize = 5
-	}
-	if chunkSize < 5 {
-		chunkSize = 5
-	}
-	if chunkSize > len(days) {
-		chunkSize = len(days)
-	}
-
-	barHeight := 12
-	if m.height > 0 {
-		barHeight = m.height - 15
-		if barHeight < 8 {
-			barHeight = 8
-		}
-		if barHeight > 18 {
-			barHeight = 18
-		}
-	}
-
-	dayTotals := make([]float64, 0, len(days))
-	for _, d := range days {
-		rowCosts := costs[d.Format("2006-01-02")]
-		total := 0.0
-		for _, model := range m.selectedModels {
-			if rowCosts != nil {
-				total += rowCosts[model]
-			}
-		}
-		dayTotals = append(dayTotals, total)
-	}
-
-	chartLinesStart := len(lines)
-	for chunkStart := 0; chunkStart < len(days); chunkStart += chunkSize {
-		chunkEnd := chunkStart + chunkSize
-		if chunkEnd > len(days) {
-			chunkEnd = len(days)
-		}
-		chunkDays := days[chunkStart:chunkEnd]
-		chunkTotals := dayTotals[chunkStart:chunkEnd]
-
-		maxTotal := 0.0
-		minPositive := 0.0
-		for _, v := range chunkTotals {
-			if v > maxTotal {
-				maxTotal = v
-			}
-			if v > 0 && (minPositive == 0 || v < minPositive) {
-				minPositive = v
-			}
-		}
-		if maxTotal <= 0 {
-			maxTotal = 1
-		}
-		if minPositive <= 0 {
-			minPositive = maxTotal
-		}
-
-		logMin := math.Log10(minPositive)
-		logMax := math.Log10(maxTotal)
-		uniformPositive := logMax-logMin < 1e-9
-		if uniformPositive {
-			logMax = logMin + 1
-		}
-
-		costToBlocks := func(cost float64) int {
-			if cost <= 0 || len(m.selectedModels) == 0 {
-				return 0
-			}
-			if uniformPositive {
-				return barHeight
-			}
-			lg := math.Log10(cost)
-			r := (lg - logMin) / (logMax - logMin)
-			if r < 0 {
-				r = 0
-			}
-			if r > 1 {
-				r = 1
-			}
-			return int(math.Round(r * float64(barHeight)))
-		}
-
-		formatY := func(v float64) string {
-			if v >= 100 {
-				return fmt.Sprintf("$%.0f", v)
-			}
-			if v >= 10 {
-				return fmt.Sprintf("$%.1f", v)
-			}
-			return fmt.Sprintf("$%.2f", v)
-		}
-
-		tickCount := 5
-		yTicks := make([]float64, 0, tickCount)
-		for i := 0; i < tickCount; i++ {
-			r := float64(i) / float64(tickCount-1)
-			val := math.Pow(10, logMax-(r*(logMax-logMin)))
-			yTicks = append(yTicks, val)
-		}
-
-		tickRowLabels := make(map[int]string)
-		for _, v := range yTicks {
-			b := costToBlocks(v)
-			if b < 1 {
-				continue
-			}
-			if b > barHeight {
-				b = barHeight
-			}
-			tickRowLabels[b] = formatY(v)
-		}
-
-		heightsPerDay := make([][]int, len(chunkDays))
-		for i, d := range chunkDays {
-			rowCosts := costs[d.Format("2006-01-02")]
-			totalCost := chunkTotals[i]
-			totalBlocks := costToBlocks(totalCost)
-			if totalBlocks <= 0 || rowCosts == nil {
-				heightsPerDay[i] = make([]int, len(m.selectedModels))
-				continue
-			}
-
-			floors := make([]int, len(m.selectedModels))
-			fracs := make([]float64, len(m.selectedModels))
-			sumFloors := 0
-			for j, model := range m.selectedModels {
-				c := rowCosts[model]
-				segExact := (float64(totalBlocks) * c) / totalCost
-				f := int(segExact)
-				floors[j] = f
-				fracs[j] = segExact - float64(f)
-				sumFloors += f
-			}
-
-			rem := totalBlocks - sumFloors
-			heights := make([]int, len(m.selectedModels))
-			copy(heights, floors)
-			if rem > 0 {
-				idx := make([]int, len(m.selectedModels))
-				for k := range idx {
-					idx[k] = k
-				}
-				sort.SliceStable(idx, func(a, b int) bool {
-					return fracs[idx[a]] > fracs[idx[b]]
-				})
-				for k := 0; k < rem && k < len(idx); k++ {
-					heights[idx[k]]++
-				}
-			}
-			heightsPerDay[i] = heights
-		}
-
-		for y := barHeight; y >= 1; y-- {
-			label := tickRowLabels[y]
-			pad := leftGutter - len(label)
-			if pad < 1 {
-				pad = 1
-			}
-			row := strings.Repeat(" ", pad) + label + "|"
-
-			for i := range chunkDays {
-				seg := -1
-				cum := 0
-				heights := heightsPerDay[i]
-				for j := range m.selectedModels {
-					cum += heights[j]
-					if y <= cum {
-						seg = j
-						break
-					}
-				}
-				if seg < 0 {
-					row += strings.Repeat(" ", cellWidth)
-					continue
-				}
-				model := m.selectedModels[seg]
-				cell := blocks[model]
-				globalIdx := chunkStart + i
-				if globalIdx == m.cursorDayIndex {
-					cell = lipgloss.NewStyle().Foreground(colors[model]).Background(lipgloss.Color("240")).Render("█")
-				}
-				row += " " + cell + " " + " "
-			}
-			lines = append(lines, row)
-		}
-
-		base := strings.Repeat(" ", leftGutter) + "+"
-		for range chunkDays {
-			base += strings.Repeat("-", cellWidth)
-		}
-		lines = append(lines, base)
-
-		labelRow := strings.Repeat(" ", leftGutter) + " "
-		for _, d := range chunkDays {
-			lab := fmt.Sprintf("%2d", d.Day())
-			if cellWidth > 2 {
-				lab = " " + lab + strings.Repeat(" ", cellWidth-3)
-			}
-			if len(lab) < cellWidth {
-				lab += strings.Repeat(" ", cellWidth-len(lab))
-			}
-			if len(lab) > cellWidth {
-				lab = lab[:cellWidth]
-			}
-			labelRow += lab
-		}
-		lines = append(lines, labelRow)
-
-		if chunkEnd < len(days) {
+	for i, panel := range panels {
+		if i > 0 {
 			lines = append(lines, "")
 		}
+		lines = append(lines, renderChartPanel(panel.title, days, m.cursorDayIndex, m.width, m.height, panel.data)...)
 	}
 
-	if len(days) > 0 {
-		idx := m.cursorDayIndex
-		if idx < 0 {
-			idx = 0
-		}
-		if idx >= len(days) {
-			idx = len(days) - 1
-		}
-		cursorDay := days[idx]
-		rowCosts := costs[cursorDay.Format("2006-01-02")]
-		total := 0.0
-		for _, model := range m.selectedModels {
-			if rowCosts != nil {
-				total += rowCosts[model]
-			}
-		}
-		tooltipLines := []string{fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total)}
-		if total <= 0 || rowCosts == nil {
-			tooltipLines = append(tooltipLines, "(no spend on selected models)")
-		} else {
-			type ent struct {
-				model string
-				cost  float64
-			}
-			ents := make([]ent, 0, len(m.selectedModels))
-			for _, model := range m.selectedModels {
-				ents = append(ents, ent{model: model, cost: rowCosts[model]})
-			}
-			sort.SliceStable(ents, func(i, j int) bool { return ents[i].cost > ents[j].cost })
-			for _, ent := range ents {
-				if ent.cost <= 0 {
-					continue
-				}
-				tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", blocks[ent.model], ent.model, ent.cost))
-			}
-		}
+	tooltipLines := renderChartTooltip(days, m.cursorDayIndex, costPanel)
+	if len(tooltipLines) > 0 {
 		lines = append(lines, "")
 		lines = append(lines, tooltipLines...)
-	}
-
-	if len(legendLines) > 0 {
-		if len(lines) > chartLinesStart {
-			lines = append(lines, "")
-		}
-		lines = append(lines, legendLines...)
 	}
 
 	return strings.Join(lines, "\n")

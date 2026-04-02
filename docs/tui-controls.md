@@ -27,7 +27,7 @@ Metronous runs a five-tab terminal dashboard (TUI): Tracking, Benchmark Summary,
 - `Esc`: unfreeze the detail panel
 
 ## Charts tab
-- `m`: toggle between Performance and Responsibility visualization modes
+- The Charts tab renders three stacked panels: Cost top-3 (spenders), Performance top-3, and Responsibility top-3
 - `left`/`right`: change the selected month
 - `k`/`l`: move the day cursor within the month (updates the tooltip)
 - Mouse: hover/click on a day column to show the tooltip (terminal-dependent)

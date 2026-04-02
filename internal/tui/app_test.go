@@ -1286,25 +1286,26 @@ func TestBenchmarkSummaryViewRendersAgentRows(t *testing.T) {
 	}
 }
 
-// TestChartsModeToggleAndNavigation verifies the Charts tab keeps month/day
-// navigation working while toggling between the two visualization modes.
-func TestChartsModeToggleAndNavigation(t *testing.T) {
+// TestChartsPanelsAndNavigation verifies the Charts tab renders all panels and
+// keeps month/day navigation working.
+func TestChartsPanelsAndNavigation(t *testing.T) {
 	monthStart := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.Local)
 	m := tui.NewChartsModel(nil, nil)
 	m, _ = m.Update(tui.ChartsDataMsg{
-		Mode:           tui.ChartModePerformance,
-		MonthStart:     monthStart,
-		Rows:           []store.DailyCostByModelRow{{Day: monthStart, Model: "alpha", TotalCostUSD: 1}},
-		SelectedModels: []string{"alpha"},
+		MonthStart:                   monthStart,
+		Rows:                         []store.DailyCostByModelRow{{Day: monthStart, Model: "alpha", TotalCostUSD: 1}},
+		SelectedModels:               []string{"alpha"},
+		CostSelectedModels:           []string{"alpha"},
+		PerformanceSelectedModels:    []string{"beta", "gamma", "alpha"},
+		ResponsibilitySelectedModels: []string{"alpha"},
 	})
 
-	if tui.GetChartsMode(m) != tui.ChartModePerformance {
-		t.Fatalf("expected performance mode, got %v", tui.GetChartsMode(m))
+	if got := tui.GetChartsCostSelectedModels(m); len(got) != 1 || got[0] != "alpha" {
+		t.Fatalf("expected cost selection to be alpha, got %v", got)
 	}
 
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
-	if tui.GetChartsMode(m) != tui.ChartModeResponsibility {
-		t.Fatalf("expected responsibility mode after toggle, got %v", tui.GetChartsMode(m))
+	if got := tui.GetChartsPerformanceSelectedModels(m); len(got) != 3 || got[0] != "beta" {
+		t.Fatalf("expected performance selection to be populated, got %v", got)
 	}
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
@@ -1326,6 +1327,11 @@ func TestChartsModeToggleAndNavigation(t *testing.T) {
 	if !sameMonthForTest(tui.GetChartsMonthStart(m), originalMonth) {
 		t.Fatalf("expected month to return after right arrow")
 	}
+
+	view := m.View()
+	if !strings.Contains(view, "Cost top-3 (spenders)") || !strings.Contains(view, "Performance top-3") || !strings.Contains(view, "Responsibility top-3") {
+		t.Fatalf("expected all three panel titles in view, got: %q", view)
+	}
 }
 
 // TestChartsViewRendersTooltipBreakdown verifies the chart view includes the
@@ -1337,7 +1343,6 @@ func TestChartsViewRendersTooltipBreakdown(t *testing.T) {
 
 	m := tui.NewChartsModel(nil, nil)
 	m, _ = m.Update(tui.ChartsDataMsg{
-		Mode:       tui.ChartModePerformance,
 		MonthStart: monthStart,
 		Rows: []store.DailyCostByModelRow{
 			{Day: day1, Model: "alpha", TotalCostUSD: 1},
@@ -1346,25 +1351,22 @@ func TestChartsViewRendersTooltipBreakdown(t *testing.T) {
 			{Day: day2, Model: "alpha", TotalCostUSD: 4},
 			{Day: day2, Model: "beta", TotalCostUSD: 1},
 		},
-		SelectedModels: []string{"gamma", "beta", "alpha"},
+		SelectedModels:               []string{"gamma", "beta", "alpha"},
+		CostSelectedModels:           []string{"gamma", "beta", "alpha"},
+		PerformanceSelectedModels:    []string{"beta", "gamma", "alpha"},
+		ResponsibilitySelectedModels: []string{"gamma", "beta", "alpha"},
 	})
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 
 	view := m.View()
-	if !strings.Contains(view, "Performance mode") {
-		t.Fatalf("expected performance mode label in view, got: %q", view)
+	if !strings.Contains(view, "Cost top-3 (spenders)") || !strings.Contains(view, "Performance top-3") || !strings.Contains(view, "Responsibility top-3") {
+		t.Fatalf("expected all three panel labels in view, got: %q", view)
 	}
 	if !strings.Contains(view, "Tooltip: "+day2.Format("Jan 02")) {
 		t.Fatalf("expected tooltip for selected day, got: %q", view)
 	}
 	if !strings.Contains(view, "alpha: $4.000") || !strings.Contains(view, "beta: $1.000") {
 		t.Fatalf("expected tooltip breakdown in view, got: %q", view)
-	}
-
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("m")})
-	view = m.View()
-	if !strings.Contains(view, "Responsibility mode") {
-		t.Fatalf("expected responsibility mode label after toggle, got: %q", view)
 	}
 }
 
