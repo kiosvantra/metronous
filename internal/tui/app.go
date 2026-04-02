@@ -377,7 +377,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.landingCursor--
 					m.CurrentTab = Tab(m.landingCursor)
 				}
-				m.needsClear = true
 				return m, nil
 			}
 		case "down", "j":
@@ -386,7 +385,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.landingCursor++
 					m.CurrentTab = Tab(m.landingCursor)
 				}
-				m.needsClear = true
 				return m, nil
 			}
 
