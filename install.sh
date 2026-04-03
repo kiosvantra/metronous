@@ -43,17 +43,9 @@ case "$ARCH" in
 esac
 
 case "$OS" in
-    linux) EXT=".tar.gz" ;;
-    darwin)
-        echo "Error: install.sh is not supported on macOS." >&2
-        echo "Use one of these manual flows instead:" >&2
-        echo "  git clone https://github.com/kiosvantra/metronous && cd metronous" >&2
-        echo "  go build -o metronous ./cmd/metronous" >&2
-        echo "  ./metronous init && ./metronous server --data-dir ~/.metronous/data --daemon-mode" >&2
-        exit 1
-        ;;
+    linux|darwin) EXT=".tar.gz" ;;
     mingw*|msys*|cygwin*|windows)
-        echo "Error: install.sh is supported on Linux only." >&2
+        echo "Error: install.sh is supported on Linux and macOS only." >&2
         echo "For Windows, move the extracted metronous.exe to a permanent directory and run it from PowerShell as Administrator." >&2
         exit 1
         ;;
