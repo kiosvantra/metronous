@@ -394,8 +394,8 @@ func (m *TrackingModel) renderPopup() string {
 	} else {
 		// Timeline columns (no metadata).
 		// Spent values here are cumulative snapshots at the time of each event.
-		colW := []int{20, 14, 24, 8, 8, 14}
-		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent(acc)"}
+		colW := []int{20, 14, 24, 8, 8, 12, 12}
+		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent(acc)", "Spent(step)"}
 		sb.WriteString(popupHeaderStyle.Render(renderRow(colH, colW, lipgloss.NewStyle())) + "\n")
 		sb.WriteString(strings.Repeat("─", totalWidth(colW)) + "\n")
 
@@ -408,7 +408,13 @@ func (m *TrackingModel) renderPopup() string {
 		visible := m.popupEvents[start:end]
 
 		for ri, ev := range visible {
-			cells := formatEventRowCompact(ev)
+			// Compute prevCost from the event just before this one in the full slice.
+			var prevCost float64
+			absIdx := start + ri
+			if absIdx > 0 && m.popupEvents[absIdx-1].CostUSD != nil {
+				prevCost = *m.popupEvents[absIdx-1].CostUSD
+			}
+			cells := formatEventRowCompact(ev, prevCost)
 			row := renderRow(cells, colW, lipgloss.NewStyle())
 			if ri == m.popupCursor {
 				sb.WriteString(cursorStyle.Render(row) + "\n")
@@ -522,7 +528,8 @@ func shortSessionID(sid string) string {
 }
 
 // formatEventRowCompact converts a store.Event into compact display columns (for popup).
-func formatEventRowCompact(ev store.Event) []string {
+// prevCost is the accumulated cost of the previous event — used to compute the per-step delta.
+func formatEventRowCompact(ev store.Event, prevCost float64) []string {
 	ts := ev.Timestamp.Local().Format("2006-01-02 15:04:05")
 
 	in := "-"
@@ -534,12 +541,17 @@ func formatEventRowCompact(ev store.Event) []string {
 		out = fmt.Sprintf("%d", *ev.CompletionTokens)
 	}
 
-	spent := "-"
+	spentAcc := "-"
+	spentStep := "-"
 	if ev.CostUSD != nil && *ev.CostUSD > 0 {
-		spent = fmt.Sprintf("$%.4f", *ev.CostUSD)
+		spentAcc = fmt.Sprintf("$%.4f", *ev.CostUSD)
+		delta := *ev.CostUSD - prevCost
+		if delta > 0 {
+			spentStep = fmt.Sprintf("$%.4f", delta)
+		}
 	}
 
-	return []string{ts, ev.EventType, ev.Model, in, out, spent}
+	return []string{ts, ev.EventType, ev.Model, in, out, spentAcc, spentStep}
 }
 
 // renderRowMain renders rows for the main (background) Tracking table.
