@@ -587,7 +587,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 
 	// Format fields with aligned labels.
 	writeDetailField(&sb, "Agent", run.AgentID)
-	writeDetailField(&sb, "Model", run.Model)
+	writeDetailField(&sb, "Model", store.NormalizeModelName(run.Model))
 	writeDetailField(&sb, "Verdict", verdictLine)
 	writeDetailField(&sb, "Cost", fmt.Sprintf("$%.2f  Savings: %s", run.TotalCostUSD, savingsStr))
 	writeDetailField(&sb, "Samples", fmt.Sprintf("%d events", run.SampleSize))
