@@ -290,14 +290,29 @@ async function callIngest(payload: object): Promise<void> {
   const eventType = (payload as { event_type?: string }).event_type
 
   if (!serverReady) {
-    // Buffer the event; it will be flushed once the server is ready.
-    if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
-      preReadyQueue.shift() // drop oldest to bound memory
-      writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
+    // Daemon may have restarted — try to re-read the port file before buffering.
+    const port = readPortFile()
+    if (port !== null) {
+      serverPort = port
+      serverReady = true
+      log(`callIngest: daemon recovered on port ${port}, flushing pre-ready queue`)
+      // Flush any buffered events first.
+      if (preReadyQueue.length > 0) {
+        const queued = preReadyQueue.splice(0)
+        for (const buffered of queued) {
+          await httpPost(buffered)
+        }
+      }
+    } else {
+      // Still not ready — buffer the event.
+      if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
+        preReadyQueue.shift() // drop oldest to bound memory
+        writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
+      }
+      log(`Not ready yet, buffering ${eventType}`)
+      preReadyQueue.push(payload)
+      return
     }
-    log(`Not ready yet, buffering ${eventType}`)
-    preReadyQueue.push(payload)
-    return
   }
 
   log(`Sending ingest via HTTP: ${eventType}`)

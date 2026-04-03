@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -68,10 +69,24 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 		fmt.Println("  You can update it manually from: https://raw.githubusercontent.com/kiosvantra/metronous/main/metronous-plugin.ts")
 	}
 
+	// Restart the systemd user service so the daemon picks up the new binary.
+	restartService()
+
 	fmt.Printf("\nMetronous has been updated to %s.\n", latestTag)
 	fmt.Println("  Close and reopen the dashboard to use the new version.")
-	fmt.Println("  Restart the metronous service only if you also want the MCP daemon to run the updated binary.")
 	return nil
+}
+
+// restartService attempts to restart the metronous systemd user service so the
+// daemon picks up the newly installed binary. Non-fatal — best effort only.
+func restartService() {
+	cmd := exec.Command("systemctl", "--user", "restart", "metronous.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  Note: could not restart metronous.service automatically: %v\n", strings.TrimSpace(string(out)))
+		fmt.Println("  You can restart it manually with: systemctl --user restart metronous.service")
+	} else {
+		fmt.Println("  Metronous daemon restarted successfully.")
+	}
 }
 
 // updatePlugin downloads the latest plugin file from GitHub and copies it to
