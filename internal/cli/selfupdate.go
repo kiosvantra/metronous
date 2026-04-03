@@ -61,9 +61,65 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to download update: %w", err)
 	}
 
+	// Also update the plugin file if it exists at the known OpenCode plugin path.
+	if err := updatePlugin(latestTag); err != nil {
+		// Non-fatal: binary update succeeded, plugin update is best-effort.
+		fmt.Printf("  Warning: could not update plugin: %v\n", err)
+		fmt.Println("  You can update it manually from: https://raw.githubusercontent.com/kiosvantra/metronous/main/metronous-plugin.ts")
+	}
+
 	fmt.Printf("\nMetronous has been updated to %s.\n", latestTag)
 	fmt.Println("  Close and reopen the dashboard to use the new version.")
 	fmt.Println("  Restart the metronous service only if you also want the MCP daemon to run the updated binary.")
+	return nil
+}
+
+// updatePlugin downloads the latest plugin file from GitHub and copies it to
+// the OpenCode plugin directory (~/.config/opencode/plugins/metronous.ts).
+// If the file does not exist at that path, this is a no-op — we only update
+// what the user has already installed.
+func updatePlugin(tag string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not determine home directory: %w", err)
+	}
+
+	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "metronous.ts")
+
+	// Only update if the plugin is already installed at this path.
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	// Download from the tagged release on GitHub.
+	pluginURL := fmt.Sprintf("https://raw.githubusercontent.com/kiosvantra/metronous/%s/metronous-plugin.ts", tag)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(pluginURL)
+	if err != nil {
+		return fmt.Errorf("download plugin: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download plugin: HTTP %d from %s", resp.StatusCode, pluginURL)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read plugin response: %w", err)
+	}
+
+	// Write atomically via temp file.
+	tmpPath := pluginPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write plugin temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, pluginPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install plugin: %w", err)
+	}
+
+	fmt.Printf("  Plugin updated at %s\n", pluginPath)
 	return nil
 }
 
