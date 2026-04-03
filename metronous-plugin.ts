@@ -552,7 +552,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
           const durationMs = Date.now() - state.startTime
 
           // Cost is accumulated in real-time from step-finish events (message.part.updated).
-          // The messages API does not include cost data, so we rely solely on the live accumulation.
+          // Also save on idle so the cache always reflects the latest complete cost.
+          saveCostCache(sessionId, state.totalCostUsd)
           log(`Session idle — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
 
           const quality = calculateQualityProxy(state)
