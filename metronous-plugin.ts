@@ -97,10 +97,34 @@ function normalizeModel(model: string): string {
 
 const sessions = new Map<string, SessionState>()
 
+// Persist accumulated cost to disk so restarts don't lose progress.
+const COST_CACHE_FILE = `${METRONOUS_DATA_DIR}/session_costs.json`
+
+function loadCostCache(): Record<string, number> {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (!fs.existsSync(COST_CACHE_FILE)) return {}
+    return JSON.parse(fs.readFileSync(COST_CACHE_FILE, "utf8")) as Record<string, number>
+  } catch { return {} }
+}
+
+function saveCostCache(sessionId: string, cost: number) {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    const cache = loadCostCache()
+    cache[sessionId] = cost
+    fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(cache))
+  } catch {}
+}
+
+const costCache = loadCostCache()
+
 function getOrCreateSession(sessionId: string, agentId = "opencode", model = "unknown"): SessionState {
   if (!sessions.has(sessionId)) {
     const normalizedModel = normalizeModel(model)
     const hasProviderPrefix = normalizedModel.includes("/")
+    // Restore cost from disk cache if OpenCode was restarted mid-session
+    const restoredCost = costCache[sessionId] ?? 0
     sessions.set(sessionId, {
       startTime: Date.now(),
       model: hasProviderPrefix ? normalizedModel : "unknown",
@@ -110,7 +134,7 @@ function getOrCreateSession(sessionId: string, agentId = "opencode", model = "un
       errors: 0,
       reworkCount: 0,
       recentTools: new Map(),
-      totalCostUsd: 0,
+      totalCostUsd: restoredCost,
       promptTokens: 0,
       completionTokens: 0,
       lastStepCost: 0,
@@ -514,6 +538,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
           state.lastStepTokensTotal = newTokensTotal
           state.promptTokens = newTokensTotal
           state.completionTokens += part.tokens?.output ?? 0
+          saveCostCache(sessionId, state.totalCostUsd)
           log(`step-finish — stepCost=$${newCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
 
