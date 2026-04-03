@@ -545,8 +545,9 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!part || part.type !== "step-finish") return
           const sessionId = part.sessionID
           if (!sessionId) return
-          const state = sessions.get(sessionId)
-          if (!state) return
+          // step-finish can arrive before chat.message/chat.params establishes state.
+          // Ensure we restore baseline cost from disk and continue accumulation.
+          const state = getOrCreateSession(sessionId, currentAgentId, "unknown")
           // step-finish.cost is the per-step cost reported by the OpenCode runtime.
           // Accumulate it so "spent" matches the real request-level usage.
           const rawCost = part.cost
