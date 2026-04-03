@@ -201,9 +201,9 @@ type EventStore interface {
 	// GetAgentSummary returns aggregated metrics for the specified agent.
 	GetAgentSummary(ctx context.Context, agentID string) (AgentSummary, error)
 
-	// QueryDailyCostByModel aggregates total cost (USD) per model per day
+	// QueryDailyCostByModel aggregates total cost (USD) per model per local-day
 	// for events in the supplied time window. The day bucket is computed in
-	// UTC.
+	// the process-local timezone (time.Local).
 	// Implementations must treat the window as [since, until) and only consider
 	// events where event_type='complete'.
 	QueryDailyCostByModel(ctx context.Context, since, until time.Time) ([]DailyCostByModelRow, error)

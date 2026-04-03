@@ -457,7 +457,9 @@ func (es *EventStore) GetAgentSummary(ctx context.Context, agentID string) (stor
 // is attributed to the model recorded on that complete event.
 //
 // The window is treated as [since, until) in UTC instants, while the resulting
-// day buckets are computed in Go in UTC.
+// day buckets are computed in Go using the process-local timezone (time.Local).
+// This ensures that events at e.g. 10pm local time are bucketed to the correct
+// local day even if they cross a UTC midnight boundary.
 func (es *EventStore) QueryDailyCostByModel(ctx context.Context, since, until time.Time) ([]store.DailyCostByModelRow, error) {
 	const q = `
 		WITH complete_events AS (
@@ -521,8 +523,8 @@ func (es *EventStore) QueryDailyCostByModel(ctx context.Context, since, until ti
 		if err := rows.Scan(&timestampMs, &model, &delta); err != nil {
 			return nil, fmt.Errorf("scan daily cost row: %w", err)
 		}
-		utcTs := time.UnixMilli(timestampMs).UTC()
-		day := time.Date(utcTs.Year(), utcTs.Month(), utcTs.Day(), 0, 0, 0, 0, time.UTC)
+		localTs := time.UnixMilli(timestampMs).In(time.Local)
+		day := time.Date(localTs.Year(), localTs.Month(), localTs.Day(), 0, 0, 0, 0, time.Local)
 		dayKey := day.Format("2006-01-02")
 		days[dayKey] = day
 		aggs[aggKey{day: dayKey, model: store.NormalizeModelName(model)}] += delta
