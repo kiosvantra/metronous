@@ -73,6 +73,12 @@ interface SessionState {
   totalCostUsd: number
   promptTokens: number
   completionTokens: number
+  /** MAX cost seen in the current model segment — segment total when idle */
+  lastStepCost: number
+  /** Last tokens.total seen — used to detect model switches (resets to small value) */
+  lastStepTokensTotal: number
+  /** Accumulated cost from completed segments (before current segment) */
+  completedSegmentsCost: number
   /** The last model actively used in this session (updated on every chat.params) */
   lastActiveModel: string
   /** Timestamp of the last idle event — used to decide when to evict from memory */
@@ -106,6 +112,9 @@ function getOrCreateSession(sessionId: string, agentId = "opencode", model = "un
       totalCostUsd: 0,
       promptTokens: 0,
       completionTokens: 0,
+      lastStepCost: 0,
+      lastStepTokensTotal: 0,
+      completedSegmentsCost: 0,
       lastActiveModel: normalizedModel,
       lastIdleAt: 0,
     })
@@ -374,7 +383,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
         if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
         // Always track the last active model (may change mid-session).
-        if (modelStr !== "unknown") state.lastActiveModel = modelStr
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
 
         log(`chat.message — session: ${sessionId}, agent: ${agentName}, model: ${modelStr}`)
 
@@ -423,7 +433,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
         if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
         // Always update lastActiveModel — chat.params fires before every LLM call.
-        if (modelStr !== "unknown") state.lastActiveModel = modelStr
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
 
         // Debug: log raw agent/model shapes to help diagnose future issues
         log("CHAT_PARAMS", JSON.stringify({ rawAgent, rawModel, agentName, modelStr }))
@@ -494,18 +505,28 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!sessionId) return
           const state = sessions.get(sessionId)
           if (!state) return
-          // step-finish.cost and tokens are CUMULATIVE totals for the session
-          // Always take the latest (highest) value — it already includes all previous steps
-          if ((part.cost ?? 0) > state.totalCostUsd) {
-            state.totalCostUsd = part.cost ?? 0
+          // step-finish.cost fluctuates per turn (cache hits change the per-turn price).
+          // tokens.total is cumulative PER MODEL SEGMENT and resets to a small value on model switch.
+          // Strategy: track max(cost) per segment. On model switch (tokens.total drops), 
+          // commit the previous segment's max to completedSegmentsCost and start fresh.
+          const newCost = part.cost ?? 0
+          const newTokensTotal = part.tokens?.total ?? 0
+          if (newTokensTotal < state.lastStepTokensTotal) {
+            // tokens.total dropped → model switched → commit previous segment max
+            state.completedSegmentsCost += state.lastStepCost
+            state.lastStepCost = newCost
+          } else {
+            // same segment — track max cost seen in this segment
+            if (newCost > state.lastStepCost) {
+              state.lastStepCost = newCost
+            }
           }
-          if ((part.tokens?.input ?? 0) > state.promptTokens) {
-            state.promptTokens = part.tokens?.input ?? 0
-          }
-          if ((part.tokens?.output ?? 0) > state.completionTokens) {
-            state.completionTokens = part.tokens?.output ?? 0
-          }
-          log(`step-finish — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
+          state.lastStepTokensTotal = newTokensTotal
+          // totalCostUsd = completed segments + current segment max
+          state.totalCostUsd = state.completedSegmentsCost + state.lastStepCost
+          state.promptTokens = newTokensTotal
+          state.completionTokens += part.tokens?.output ?? 0
+          log(`step-finish — cost=$${newCost.toFixed(4)} segMax=$${state.lastStepCost.toFixed(4)} completed=$${state.completedSegmentsCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
 
         if (event.type === "session.idle") {
@@ -517,28 +538,38 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Snapshot duration BEFORE any await to avoid wall-clock inflation.
           const durationMs = Date.now() - state.startTime
 
-          // Reconcile via client.session.messages() to get the true cumulative cost.
-          // The last step-finish across ALL messages holds the real session total —
-          // regardless of which model was active at that point.
+          // Reconcile via client.session.messages() using delta logic:
+          // Reconcile using segment-max strategy:
+          // tokens.total resets on model switch → detect segments, sum MAX(cost) per segment.
           try {
             const result = await client.session.messages({ path: { id: sessionId } })
             writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
             const messages = (result as any)?.data ?? []
-            let costMax = 0, promptMax = 0, completionMax = 0
+            let completedCost = 0, segMaxCost = 0, lastTokensTotal = 0
+            let completionSum = 0, promptTotal = 0
             for (const msg of messages) {
               for (const part of (msg.parts ?? [])) {
                 if (part?.type === "step-finish") {
-                  // step-finish.cost is the CUMULATIVE session total — take MAX globally.
-                  costMax = Math.max(costMax, part.cost ?? 0)
-                  promptMax = Math.max(promptMax, part.tokens?.input ?? 0)
-                  completionMax = Math.max(completionMax, part.tokens?.output ?? 0)
+                  const c = part.cost ?? 0
+                  const t = part.tokens?.total ?? 0
+                  if (t < lastTokensTotal) {
+                    // model switch — commit previous segment max
+                    completedCost += segMaxCost
+                    segMaxCost = c
+                  } else if (c > segMaxCost) {
+                    segMaxCost = c
+                  }
+                  lastTokensTotal = t
+                  completionSum += part.tokens?.output ?? 0
+                  promptTotal = t > 0 ? t : promptTotal
                 }
               }
             }
-            if (costMax > 0 || promptMax > 0) {
-              state.totalCostUsd = costMax
-              state.promptTokens = promptMax
-              state.completionTokens = completionMax
+            const costTotal = completedCost + segMaxCost
+            if (costTotal > 0 || promptTotal > 0) {
+              state.totalCostUsd = costTotal
+              state.promptTokens = promptTotal
+              state.completionTokens = completionSum
             }
             log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
           } catch (e) {
