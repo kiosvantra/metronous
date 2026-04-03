@@ -530,7 +530,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Reconcile by summing all reported step-finish costs.
           try {
             const result = await client.session.messages({ path: { id: sessionId } })
-            writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
+            writeLog("RAW_MESSAGES", JSON.stringify(result))
             const messages = (result as any)?.data ?? []
             let costTotal = 0, lastTokensTotal = 0
             let completionSum = 0, promptTotal = 0
