@@ -506,28 +506,15 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!sessionId) return
           const state = sessions.get(sessionId)
           if (!state) return
-          // step-finish.cost fluctuates per turn (cache hits change the per-turn price).
-          // tokens.total is cumulative PER MODEL SEGMENT and resets to a small value on model switch.
-          // Strategy: track max(cost) per segment. On model switch (tokens.total drops), 
-          // commit the previous segment's max to completedSegmentsCost and start fresh.
+          // step-finish.cost is the per-step cost reported by the OpenCode runtime.
+          // Accumulate it so "spent" matches the real request-level usage.
           const newCost = part.cost ?? 0
           const newTokensTotal = part.tokens?.total ?? 0
-          if (newTokensTotal < state.lastStepTokensTotal) {
-            // tokens.total dropped → model switched → commit previous segment max
-            state.completedSegmentsCost += state.lastStepCost
-            state.lastStepCost = newCost
-          } else {
-            // same segment — track max cost seen in this segment
-            if (newCost > state.lastStepCost) {
-              state.lastStepCost = newCost
-            }
-          }
+          state.totalCostUsd += newCost
           state.lastStepTokensTotal = newTokensTotal
-          // totalCostUsd = completed segments + current segment max
-          state.totalCostUsd = state.completedSegmentsCost + state.lastStepCost
           state.promptTokens = newTokensTotal
           state.completionTokens += part.tokens?.output ?? 0
-          log(`step-finish — cost=$${newCost.toFixed(4)} segMax=$${state.lastStepCost.toFixed(4)} completed=$${state.completedSegmentsCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
+          log(`step-finish — stepCost=$${newCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
 
         if (event.type === "session.idle") {
@@ -540,33 +527,26 @@ export const plugin: Plugin = async ({ directory, client }) => {
           const durationMs = Date.now() - state.startTime
 
           // Reconcile via client.session.messages() using delta logic:
-          // Reconcile using segment-max strategy:
-          // tokens.total resets on model switch → detect segments, sum MAX(cost) per segment.
+          // Reconcile by summing all reported step-finish costs.
           try {
             const result = await client.session.messages({ path: { id: sessionId } })
             writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
             const messages = (result as any)?.data ?? []
-            let completedCost = 0, segMaxCost = 0, lastTokensTotal = 0
+            let costTotal = 0, lastTokensTotal = 0
             let completionSum = 0, promptTotal = 0
             for (const msg of messages) {
               for (const part of (msg.parts ?? [])) {
                 if (part?.type === "step-finish") {
                   const c = part.cost ?? 0
                   const t = part.tokens?.total ?? 0
-                  if (t < lastTokensTotal) {
-                    // model switch — commit previous segment max
-                    completedCost += segMaxCost
-                    segMaxCost = c
-                  } else if (c > segMaxCost) {
-                    segMaxCost = c
-                  }
+                  // Sum step cost; ignore tokens.total model segmentation for cost.
+                  costTotal += c
                   lastTokensTotal = t
                   completionSum += part.tokens?.output ?? 0
                   promptTotal = t > 0 ? t : promptTotal
                 }
               }
             }
-            const costTotal = completedCost + segMaxCost
             if (costTotal > 0 || promptTotal > 0) {
               state.totalCostUsd = costTotal
               state.promptTokens = promptTotal
