@@ -73,15 +73,31 @@ interface SessionState {
   totalCostUsd: number
   promptTokens: number
   completionTokens: number
+  /** The last model actively used in this session (updated on every chat.params) */
+  lastActiveModel: string
+}
+
+/**
+ * normalizeModel strips well-known provider prefixes so that
+ * "opencode/claude-sonnet-4-6" and "anthropic/claude-sonnet-4-6" and
+ * "claude-sonnet-4-6" are all treated as the same model.
+ */
+function normalizeModel(model: string): string {
+  const prefixes = ["opencode/", "anthropic/", "ollama-cloud/", "ollama/"]
+  for (const p of prefixes) {
+    if (model.startsWith(p)) return model.slice(p.length)
+  }
+  return model
 }
 
 const sessions = new Map<string, SessionState>()
 
 function getOrCreateSession(sessionId: string, agentId = "opencode", model = "unknown"): SessionState {
   if (!sessions.has(sessionId)) {
+    const normalizedModel = normalizeModel(model)
     sessions.set(sessionId, {
       startTime: Date.now(),
-      model,
+      model: normalizedModel,
       agentId,
       toolCalls: 0,
       successfulToolCalls: 0,
@@ -91,6 +107,7 @@ function getOrCreateSession(sessionId: string, agentId = "opencode", model = "un
       totalCostUsd: 0,
       promptTokens: 0,
       completionTokens: 0,
+      lastActiveModel: normalizedModel,
     })
   }
   return sessions.get(sessionId)!
@@ -325,10 +342,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
           : rawAgent?.name ?? rawAgent?.id ?? (rawAgent ? JSON.stringify(rawAgent) : null)
         const agentName = envAgentId ?? resolvedAgent ?? "opencode"
 
-        // Build model string: "providerID/modelID" (e.g. "opencode/claude-sonnet-4-6")
-        const modelStr = input.model
+        // Build model string and normalize to strip provider prefixes.
+        const rawModelStr = input.model
           ? `${input.model.providerID}/${input.model.modelID}`
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         // Update current agent for sessions not yet seen
         if (!envAgentId && resolvedAgent) {
@@ -337,9 +355,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
         const isNewSession = !sessions.has(sessionId)
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        // Update model/agent if the session already existed with defaults
+        // Update model/agent if the session already existed with defaults.
         if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always track the last active model (may change mid-session).
+        if (modelStr !== "unknown") state.lastActiveModel = modelStr
 
         log(`chat.message — session: ${sessionId}, agent: ${agentName}, model: ${modelStr}`)
 
@@ -373,11 +393,12 @@ export const plugin: Plugin = async ({ directory, client }) => {
         // Model may have .id (short: "claude-sonnet-4-6") and also .providerID/.modelID
         // Prefer building the full "providerID/modelID" string; fall back to .id
         const rawModel = input.model as any
-        const modelStr = rawModel
+        const rawModelStr = rawModel
           ? (rawModel.providerID && rawModel.modelID
               ? `${rawModel.providerID}/${rawModel.modelID}`
               : rawModel.id ?? "unknown")
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         if (!envAgentId && resolvedAgent) {
           currentAgentId = resolvedAgent
@@ -386,6 +407,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
         const state = getOrCreateSession(sessionId, agentName, modelStr)
         if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always update lastActiveModel — chat.params fires before every LLM call.
+        if (modelStr !== "unknown") state.lastActiveModel = modelStr
 
         // Debug: log raw agent/model shapes to help diagnose future issues
         log("CHAT_PARAMS", JSON.stringify({ rawAgent, rawModel, agentName, modelStr }))
@@ -479,7 +502,9 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Snapshot duration BEFORE any await to avoid wall-clock inflation.
           const durationMs = Date.now() - state.startTime
 
-          // Reconcile via client.session.messages() — correct path param is { id: sessionId }
+          // Reconcile via client.session.messages() to get the true cumulative cost.
+          // The last step-finish across ALL messages holds the real session total —
+          // regardless of which model was active at that point.
           try {
             const result = await client.session.messages({ path: { id: sessionId } })
             writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
@@ -488,8 +513,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
             for (const msg of messages) {
               for (const part of (msg.parts ?? [])) {
                 if (part?.type === "step-finish") {
-                  // step-finish.cost and tokens are CUMULATIVE — take MAX across all messages
-                  // (the last step-finish holds the true session total)
+                  // step-finish.cost is the CUMULATIVE session total — take MAX globally.
                   costMax = Math.max(costMax, part.cost ?? 0)
                   promptMax = Math.max(promptMax, part.tokens?.input ?? 0)
                   completionMax = Math.max(completionMax, part.tokens?.output ?? 0)
@@ -501,17 +525,23 @@ export const plugin: Plugin = async ({ directory, client }) => {
               state.promptTokens = promptMax
               state.completionTokens = completionMax
             }
-            log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
+            log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
           } catch (e) {
             log(`Could not reconcile messages: ${e}`)
           }
 
           const quality = calculateQualityProxy(state)
+          // Use lastActiveModel (the model active at session end) for the complete event.
+          // This ensures the cost is attributed to the correct model even if the session
+          // started with a different model.
+          const completeModel = state.lastActiveModel !== "unknown"
+            ? state.lastActiveModel
+            : state.model
           await callIngest({
             agent_id: state.agentId,
             event_type: "complete",
             session_id: sessionId,
-            model: state.model,
+            model: completeModel,
             cost_usd: state.totalCostUsd,
             prompt_tokens: state.promptTokens,
             completion_tokens: state.completionTokens,
