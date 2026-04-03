@@ -632,6 +632,8 @@ func trendDirectionStyled(verdicts []string) string {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true).Render(dir)
 	case "↓ degrading":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render(dir)
+	case "→ unknown":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Render(dir)
 	default: // → stable
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Render(dir)
 	}
@@ -674,18 +676,33 @@ func verdictSeverity(v string) int {
 }
 
 // trendDirection returns a direction indicator string for a slice of verdict strings.
-// INSUFFICIENT_DATA at either endpoint is treated as a neutral sentinel — it does not
-// imply improvement or degradation from data gaps.
+// If the most recent verdict is INSUFFICIENT_DATA, the direction is "unknown" — we
+// cannot assess the trend when the latest run lacks enough data.
+// If only the first endpoint is INSUFFICIENT_DATA (but the last is not), the
+// comparison is still valid and uses the last known verdict.
 func trendDirection(verdicts []string) string {
 	if len(verdicts) < 2 {
 		return "→ stable"
 	}
-	first := verdicts[0]
 	last := verdicts[len(verdicts)-1]
 
-	// Data gaps are neutral — don't signal improvement or degradation.
-	if first == string(store.VerdictInsufficientData) || last == string(store.VerdictInsufficientData) {
-		return "→ stable"
+	// If the latest verdict has insufficient data, we cannot determine direction.
+	if last == string(store.VerdictInsufficientData) {
+		return "→ unknown"
+	}
+
+	// Find the most recent non-INSUFFICIENT_DATA verdict before the last one
+	// to use as the comparison baseline.
+	first := ""
+	for i := len(verdicts) - 2; i >= 0; i-- {
+		if verdicts[i] != string(store.VerdictInsufficientData) {
+			first = verdicts[i]
+			break
+		}
+	}
+	if first == "" {
+		// All previous verdicts were INSUFFICIENT_DATA — no baseline to compare.
+		return "→ unknown"
 	}
 
 	firstSev := verdictSeverity(first)

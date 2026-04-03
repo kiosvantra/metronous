@@ -688,8 +688,13 @@ func TestTrendDirection(t *testing.T) {
 		{"switch to keep is improving", []string{"SWITCH", "KEEP"}, "↑ improving"},
 		{"keep to switch is degrading", []string{"KEEP", "SWITCH"}, "↓ degrading"},
 		{"keep to keep is stable", []string{"KEEP", "KEEP"}, "→ stable"},
-		{"switch to insufficient_data is neutral", []string{"SWITCH", "INSUFFICIENT_DATA"}, "→ stable"},
-		{"insufficient_data to keep is neutral", []string{"INSUFFICIENT_DATA", "KEEP"}, "→ stable"},
+		// If the last verdict is INSUFFICIENT_DATA, direction is unknown.
+		{"switch to insufficient_data is unknown", []string{"SWITCH", "INSUFFICIENT_DATA"}, "→ unknown"},
+		// If previous verdicts are all INSUFFICIENT_DATA, no baseline — unknown.
+		{"insufficient_data to keep no baseline is unknown", []string{"INSUFFICIENT_DATA", "KEEP"}, "→ unknown"},
+		// If last is valid and there is a prior valid verdict, compare normally.
+		{"keep then insufficient then keep is stable", []string{"KEEP", "INSUFFICIENT_DATA", "KEEP"}, "→ stable"},
+		{"switch then insufficient then keep is improving", []string{"SWITCH", "INSUFFICIENT_DATA", "KEEP"}, "↑ improving"},
 		{"empty slice is stable", []string{}, "→ stable"},
 		{"single verdict is stable", []string{"KEEP"}, "→ stable"},
 	}
