@@ -23,6 +23,10 @@ import (
 	"github.com/kiosvantra/metronous/internal/version"
 )
 
+// updateDoneMsg is sent when a self-update command completes.
+// err is empty on success, non-empty on failure.
+type updateDoneMsg struct{ err string }
+
 // UpdateCheckMsg is sent when the background update check completes.
 type UpdateCheckMsg struct {
 	Available     bool
@@ -280,6 +284,16 @@ func httpGet(url string) ([]byte, error) {
 // they are not active. Each sub-model already ignores messages it does not
 // understand via the default case in its own Update switch.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle self-update result.
+	if ud, ok := msg.(updateDoneMsg); ok {
+		if ud.err != "" {
+			m.StatusMsg = ud.err
+		} else {
+			m.StatusMsg = "Update complete! Restart the dashboard to use the new version."
+		}
+		return m, nil
+	}
+
 	// Handle update check result
 	if um, ok := msg.(UpdateCheckMsg); ok {
 		m.UpdateAvailable = um.Available
@@ -317,15 +331,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				updateCmd := exec.Command(exePath, "self-update")
-				updateCmd.Stdout = os.Stdout
-				updateCmd.Stderr = os.Stderr
-				err := updateCmd.Run()
+				out, err := updateCmd.CombinedOutput()
 				if err != nil {
-					m.StatusMsg = "Update failed: " + err.Error()
-				} else {
-					m.StatusMsg = "Update complete! Close and reopen the dashboard."
+					return updateDoneMsg{err: fmt.Sprintf("Update failed: %s", strings.TrimSpace(string(out)))}
 				}
-				return nil
+				return updateDoneMsg{err: ""}
 			}
 
 		case "1":
@@ -457,15 +467,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, func() tea.Msg {
 						updateCmd := exec.Command(exePath, "self-update")
-						updateCmd.Stdout = os.Stdout
-						updateCmd.Stderr = os.Stderr
-						err := updateCmd.Run()
+						out, err := updateCmd.CombinedOutput()
 						if err != nil {
-							m.StatusMsg = "Update failed: " + err.Error()
-						} else {
-							m.StatusMsg = "Update complete! Close and reopen the dashboard."
+							return updateDoneMsg{err: fmt.Sprintf("Update failed: %s", strings.TrimSpace(string(out)))}
 						}
-						return nil
+						return updateDoneMsg{err: ""}
 					}
 				}
 				m.CurrentTab = Tab(m.landingCursor)
@@ -581,10 +587,14 @@ func (m *AppModel) View() string {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
 	}
 
-	if m.showLanding {
-		return prefix + fmt.Sprintf("%s\n%s\n%s", banner, content, hint)
+	statusLine := ""
+	if m.StatusMsg != "" {
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("  "+m.StatusMsg) + "\n"
 	}
-	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
+	if m.showLanding {
+		return prefix + fmt.Sprintf("%s\n%s\n%s%s", banner, content, statusLine, hint)
+	}
+	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s%s", tabBar, banner, content, statusLine, hint)
 }
 
 func (m *AppModel) renderLanding() string {
@@ -616,31 +626,25 @@ func (m *AppModel) renderLanding() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cyan).Render("METRONOUS")
 	sub := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Local AI agent telemetry, benchmarking, and model calibration for OpenCode agents.")
 
-	// Update label: show version status inline.
-	updateLabel := "Update"
-	if m.UpdateAvailable {
-		updateLabel = fmt.Sprintf("Update  (%s available — press u to install)", m.LatestVersion)
-		updateLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true).Render("Update") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render(fmt.Sprintf("  (%s available — press u to install)", m.LatestVersion))
-	} else {
-		updateLabel = "Update  (up to date)"
-	}
-
-	// Menu.
+	// Menu entries — plain strings, no pre-styled content.
 	type menuEntry struct {
-		idx    int
-		name   string
-		tab    Tab
-		isFunc bool // true = not a tab (Update/Quit)
+		idx  int
+		name string
+	}
+	var updateStatus string
+	if m.UpdateAvailable {
+		updateStatus = fmt.Sprintf("Update  (%s available)", m.LatestVersion)
+	} else {
+		updateStatus = "Update  (up to date)"
 	}
 	entries := []menuEntry{
-		{0, "Tracking", TabTracking, false},
-		{1, "Benchmark Summary", TabBenchmarkSummary, false},
-		{2, "Benchmark Detailed", TabBenchmarkDetailed, false},
-		{3, "Charts", TabCharts, false},
-		{4, "Config", TabConfig, false},
-		{5, updateLabel, TabTracking, true},
-		{6, "Quit", TabTracking, true},
+		{0, "Tracking"},
+		{1, "Benchmark Summary"},
+		{2, "Benchmark Detailed"},
+		{3, "Charts"},
+		{4, "Config"},
+		{5, updateStatus},
+		{6, "Quit"},
 	}
 
 	menuLines := make([]string, 0, len(entries))
@@ -649,20 +653,15 @@ func (m *AppModel) renderLanding() string {
 		style := mutedStyle
 		if e.idx == m.landingCursor {
 			bullet = "▶"
-			style = cursorStyle
-		}
-		var label string
-		// For Update entry, the name already contains styled content — handle separately.
-		if e.idx == 5 {
-			if e.idx == m.landingCursor {
-				label = cursorStyle.Render(bullet+" ") + e.name
+			if e.idx == 5 && m.UpdateAvailable {
+				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
 			} else {
-				label = mutedStyle.Render(bullet+" ") + mutedStyle.Render(e.name)
+				style = cursorStyle
 			}
-		} else {
-			label = style.Render(fmt.Sprintf("%s %s", bullet, e.name))
+		} else if e.idx == 5 && m.UpdateAvailable {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
 		}
-		menuLines = append(menuLines, label)
+		menuLines = append(menuLines, style.Render(fmt.Sprintf("%s %s", bullet, e.name)))
 	}
 
 	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Originally developed within the Gentle AI ecosystem. Press Enter to open; select Quit to exit.")
