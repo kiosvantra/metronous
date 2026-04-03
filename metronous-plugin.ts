@@ -75,18 +75,17 @@ interface SessionState {
   completionTokens: number
   /** The last model actively used in this session (updated on every chat.params) */
   lastActiveModel: string
+  /** Timestamp of the last idle event — used to decide when to evict from memory */
+  lastIdleAt: number
 }
 
 /**
- * normalizeModel strips well-known provider prefixes so that
- * "opencode/claude-sonnet-4-6" and "anthropic/claude-sonnet-4-6" and
- * "claude-sonnet-4-6" are all treated as the same model.
+ * normalizeModel preserves the full provider/model string (e.g. "opencode/claude-sonnet-4-6")
+ * so that different providers of the same base model can be compared independently.
+ * Only cleans up edge cases like empty strings or undefined.
  */
 function normalizeModel(model: string): string {
-  const prefixes = ["opencode/", "anthropic/", "ollama-cloud/", "ollama/"]
-  for (const p of prefixes) {
-    if (model.startsWith(p)) return model.slice(p.length)
-  }
+  if (!model || model === "undefined/undefined") return "unknown"
   return model
 }
 
@@ -108,6 +107,7 @@ function getOrCreateSession(sessionId: string, agentId = "opencode", model = "un
       promptTokens: 0,
       completionTokens: 0,
       lastActiveModel: normalizedModel,
+      lastIdleAt: 0,
     })
   }
   return sessions.get(sessionId)!
@@ -532,8 +532,6 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
           const quality = calculateQualityProxy(state)
           // Use lastActiveModel (the model active at session end) for the complete event.
-          // This ensures the cost is attributed to the correct model even if the session
-          // started with a different model.
           const completeModel = state.lastActiveModel !== "unknown"
             ? state.lastActiveModel
             : state.model
@@ -550,7 +548,21 @@ export const plugin: Plugin = async ({ directory, client }) => {
             duration_ms: durationMs,
             timestamp: now(),
           })
-          sessions.delete(sessionId)
+
+          // Keep the session in memory so a resumed conversation (model switch,
+          // new message in same session) can accumulate cost correctly.
+          // Mark the idle time — a background sweep will evict after 30 min.
+          state.lastIdleAt = Date.now()
+
+          // Sweep stale sessions: remove any that have been idle > 30 minutes.
+          const IDLE_TTL_MS = 30 * 60 * 1000
+          const nowMs = Date.now()
+          for (const [sid, s] of sessions.entries()) {
+            if (s.lastIdleAt > 0 && nowMs - s.lastIdleAt > IDLE_TTL_MS) {
+              log(`Evicting stale session ${sid} (idle for ${Math.round((nowMs - s.lastIdleAt) / 60000)} min)`)
+              sessions.delete(sid)
+            }
+          }
         }
 
         if (event.type === "session.error") {
