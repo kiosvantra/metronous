@@ -526,40 +526,9 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Snapshot duration BEFORE any await to avoid wall-clock inflation.
           const durationMs = Date.now() - state.startTime
 
-          // Reconcile via client.session.messages() using delta logic:
-          // Reconcile by summing all reported step-finish costs.
-          try {
-            const result = await client.session.messages({ path: { id: sessionId } })
-            try {
-              const fs = require("fs") as typeof import("fs")
-              fs.writeFileSync(`${METRONOUS_DATA_DIR}/raw_messages_${sessionId}.json`, JSON.stringify(result, null, 2))
-            } catch {}
-            writeLog("RAW_MESSAGES", JSON.stringify(result))
-            const messages = (result as any)?.data ?? []
-            let costTotal = 0, lastTokensTotal = 0
-            let completionSum = 0, promptTotal = 0
-            for (const msg of messages) {
-              for (const part of (msg.parts ?? [])) {
-                if (part?.type === "step-finish") {
-                  const c = part.cost ?? 0
-                  const t = part.tokens?.total ?? 0
-                  // Sum step cost; ignore tokens.total model segmentation for cost.
-                  costTotal += c
-                  lastTokensTotal = t
-                  completionSum += part.tokens?.output ?? 0
-                  promptTotal = t > 0 ? t : promptTotal
-                }
-              }
-            }
-            if (costTotal > 0 || promptTotal > 0) {
-              state.totalCostUsd = costTotal
-              state.promptTokens = promptTotal
-              state.completionTokens = completionSum
-            }
-            log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
-          } catch (e) {
-            log(`Could not reconcile messages: ${e}`)
-          }
+          // Cost is accumulated in real-time from step-finish events (message.part.updated).
+          // The messages API does not include cost data, so we rely solely on the live accumulation.
+          log(`Session idle — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
 
           const quality = calculateQualityProxy(state)
           // Use lastActiveModel (the model active at session end) for the complete event.
