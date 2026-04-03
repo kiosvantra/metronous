@@ -104,17 +104,31 @@ function loadCostCache(): Record<string, number> {
   try {
     const fs = require("fs") as typeof import("fs")
     if (!fs.existsSync(COST_CACHE_FILE)) return {}
-    return JSON.parse(fs.readFileSync(COST_CACHE_FILE, "utf8")) as Record<string, number>
-  } catch { return {} }
+    const parsed = JSON.parse(fs.readFileSync(COST_CACHE_FILE, "utf8"))
+    if (!(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))) return {}
+    const validated: Record<string, number> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value)) validated[key] = value
+    }
+    return validated
+  } catch (err) {
+    logError("loadCostCache failed:", err)
+    return {}
+  }
 }
 
 function saveCostCache(sessionId: string, cost: number) {
   try {
+    if (!Number.isFinite(cost)) {
+      logError("saveCostCache: refusing to write non-finite cost:", cost)
+      return
+    }
     const fs = require("fs") as typeof import("fs")
-    const cache = loadCostCache()
-    cache[sessionId] = cost
-    fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(cache))
-  } catch {}
+    costCache[sessionId] = cost
+    fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(costCache))
+  } catch (err) {
+    logError("saveCostCache failed:", err)
+  }
 }
 
 const costCache = loadCostCache()
@@ -410,6 +424,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
         // Always track the last active model (may change mid-session).
         // Only update if the new model has a provider prefix — never downgrade to a bare model name.
         if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         log(`chat.message — session: ${sessionId}, agent: ${agentName}, model: ${modelStr}`)
 
@@ -460,6 +475,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
         // Always update lastActiveModel — chat.params fires before every LLM call.
         // Only update if the new model has a provider prefix — never downgrade to a bare model name.
         if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         // Debug: log raw agent/model shapes to help diagnose future issues
         log("CHAT_PARAMS", JSON.stringify({ rawAgent, rawModel, agentName, modelStr }))
@@ -506,6 +522,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
           tool_name: toolName,
           tool_success: success,
           duration_ms: (output?.metadata as any)?.durationMs ?? 0,
+          // This is a lagging snapshot from the previous step-finish, not the current step's cost.
           cost_usd: state.totalCostUsd,
           prompt_tokens: state.promptTokens,
           completion_tokens: state.completionTokens,
@@ -532,12 +549,14 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!state) return
           // step-finish.cost is the per-step cost reported by the OpenCode runtime.
           // Accumulate it so "spent" matches the real request-level usage.
-          const newCost = part.cost ?? 0
+          const rawCost = part.cost
+          const newCost = Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0
+          if (typeof rawCost === "number" && (!Number.isFinite(rawCost) || rawCost < 0)) logError("step-finish cost was negative:", rawCost)
           const newTokensTotal = part.tokens?.total ?? 0
           state.totalCostUsd += newCost
           state.lastStepTokensTotal = newTokensTotal
-          state.promptTokens = newTokensTotal
-          state.completionTokens += part.tokens?.output ?? 0
+          state.promptTokens += Number.isFinite(part.tokens?.input) ? part.tokens!.input : 0
+          state.completionTokens += Number.isFinite(part.tokens?.output) ? part.tokens!.output : 0
           saveCostCache(sessionId, state.totalCostUsd)
           log(`step-finish — stepCost=$${newCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
@@ -558,9 +577,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
           const quality = calculateQualityProxy(state)
           // Use lastActiveModel (the model active at session end) for the complete event.
-          const completeModel = (state.lastActiveModel !== "unknown" && state.lastActiveModel.includes("/"))
-            ? state.lastActiveModel
-            : "unknown"
+          const completeModel = state.lastActiveModel
           await callIngest({
             agent_id: state.agentId,
             event_type: "complete",
