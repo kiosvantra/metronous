@@ -100,9 +100,10 @@ const sessions = new Map<string, SessionState>()
 function getOrCreateSession(sessionId: string, agentId = "opencode", model = "unknown"): SessionState {
   if (!sessions.has(sessionId)) {
     const normalizedModel = normalizeModel(model)
+    const hasProviderPrefix = normalizedModel.includes("/")
     sessions.set(sessionId, {
       startTime: Date.now(),
-      model: normalizedModel,
+      model: hasProviderPrefix ? normalizedModel : "unknown",
       agentId,
       toolCalls: 0,
       successfulToolCalls: 0,
@@ -115,7 +116,7 @@ function getOrCreateSession(sessionId: string, agentId = "opencode", model = "un
       lastStepCost: 0,
       lastStepTokensTotal: 0,
       completedSegmentsCost: 0,
-      lastActiveModel: normalizedModel,
+      lastActiveModel: hasProviderPrefix ? normalizedModel : "unknown",
       lastIdleAt: 0,
     })
   }
@@ -380,7 +381,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
         const isNewSession = !sessions.has(sessionId)
         const state = getOrCreateSession(sessionId, agentName, modelStr)
         // Update model/agent if the session already existed with defaults.
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
         // Always track the last active model (may change mid-session).
         // Only update if the new model has a provider prefix — never downgrade to a bare model name.
@@ -430,7 +431,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
         }
 
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
         // Always update lastActiveModel — chat.params fires before every LLM call.
         // Only update if the new model has a provider prefix — never downgrade to a bare model name.
@@ -578,9 +579,9 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
           const quality = calculateQualityProxy(state)
           // Use lastActiveModel (the model active at session end) for the complete event.
-          const completeModel = state.lastActiveModel !== "unknown"
+          const completeModel = (state.lastActiveModel !== "unknown" && state.lastActiveModel.includes("/"))
             ? state.lastActiveModel
-            : state.model
+            : "unknown"
           await callIngest({
             agent_id: state.agentId,
             event_type: "complete",
