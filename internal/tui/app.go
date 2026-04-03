@@ -160,7 +160,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		needsClear:       true,
 		showLanding:      true,
 		landingCursor:    0,
-		landingQuitIndex: 5,
+		landingQuitIndex: 6,
 		UpdateAvailable:  false,
 		LatestVersion:    "",
 	}
@@ -426,15 +426,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showLanding {
 				if m.landingCursor > 0 {
 					m.landingCursor--
-					m.CurrentTab = Tab(m.landingCursor)
+					if m.landingCursor < numTabs {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
 				}
 				return m, nil
 			}
 		case "down", "j":
 			if m.showLanding {
-				if m.landingCursor < numTabs-1 {
+				if m.landingCursor < m.landingQuitIndex {
 					m.landingCursor++
-					m.CurrentTab = Tab(m.landingCursor)
+					if m.landingCursor < numTabs {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
 				}
 				return m, nil
 			}
@@ -443,6 +447,26 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showLanding {
 				if m.landingCursor == m.landingQuitIndex {
 					return m, tea.Quit
+				}
+				// Update option (index 5).
+				if m.landingCursor == m.landingQuitIndex-1 {
+					exePath, err := os.Executable()
+					if err != nil {
+						m.StatusMsg = "Error: could not find executable"
+						return m, nil
+					}
+					return m, func() tea.Msg {
+						updateCmd := exec.Command(exePath, "self-update")
+						updateCmd.Stdout = os.Stdout
+						updateCmd.Stderr = os.Stderr
+						err := updateCmd.Run()
+						if err != nil {
+							m.StatusMsg = "Update failed: " + err.Error()
+						} else {
+							m.StatusMsg = "Update complete! Close and reopen the dashboard."
+						}
+						return nil
+					}
 				}
 				m.CurrentTab = Tab(m.landingCursor)
 				m.showLanding = false
@@ -592,18 +616,31 @@ func (m *AppModel) renderLanding() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cyan).Render("METRONOUS")
 	sub := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Local AI agent telemetry, benchmarking, and model calibration for OpenCode agents.")
 
+	// Update label: show version status inline.
+	updateLabel := "Update"
+	if m.UpdateAvailable {
+		updateLabel = fmt.Sprintf("Update  (%s available — press u to install)", m.LatestVersion)
+		updateLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true).Render("Update") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render(fmt.Sprintf("  (%s available — press u to install)", m.LatestVersion))
+	} else {
+		updateLabel = "Update  (up to date)"
+	}
+
 	// Menu.
-	entries := []struct {
-		idx  int
-		name string
-		tab  Tab
-	}{
-		{0, "Tracking", TabTracking},
-		{1, "Benchmark Summary", TabBenchmarkSummary},
-		{2, "Benchmark Detailed", TabBenchmarkDetailed},
-		{3, "Charts", TabCharts},
-		{4, "Config", TabConfig},
-		{5, "Quit", TabTracking},
+	type menuEntry struct {
+		idx    int
+		name   string
+		tab    Tab
+		isFunc bool // true = not a tab (Update/Quit)
+	}
+	entries := []menuEntry{
+		{0, "Tracking", TabTracking, false},
+		{1, "Benchmark Summary", TabBenchmarkSummary, false},
+		{2, "Benchmark Detailed", TabBenchmarkDetailed, false},
+		{3, "Charts", TabCharts, false},
+		{4, "Config", TabConfig, false},
+		{5, updateLabel, TabTracking, true},
+		{6, "Quit", TabTracking, true},
 	}
 
 	menuLines := make([]string, 0, len(entries))
@@ -614,8 +651,18 @@ func (m *AppModel) renderLanding() string {
 			bullet = "▶"
 			style = cursorStyle
 		}
-		label := fmt.Sprintf("%s %s", bullet, e.name)
-		menuLines = append(menuLines, style.Render(label))
+		var label string
+		// For Update entry, the name already contains styled content — handle separately.
+		if e.idx == 5 {
+			if e.idx == m.landingCursor {
+				label = cursorStyle.Render(bullet+" ") + e.name
+			} else {
+				label = mutedStyle.Render(bullet+" ") + mutedStyle.Render(e.name)
+			}
+		} else {
+			label = style.Render(fmt.Sprintf("%s %s", bullet, e.name))
+		}
+		menuLines = append(menuLines, label)
 	}
 
 	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Originally developed within the Gentle AI ecosystem. Press Enter to open; select Quit to exit.")
