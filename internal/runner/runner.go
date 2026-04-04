@@ -62,38 +62,18 @@ func (r *Runner) RunWeekly(ctx context.Context, windowDays int) error {
 }
 
 // RunIntraweek executes a manual on-demand benchmark pipeline.
-// The event window starts at lastRunAt+1ms (the first moment after the most recent
-// stored run) and ends at now. If no prior run exists for any agent, the window
-// falls back to [now-windowDays, now) — the same as a weekly run.
-//
-// Per-agent window derivation: we use the global max(run_at) across all agents
-// so the interval is consistent across the whole batch.
+// The event window is [now-windowDays, now) — the same as a weekly run.
+// This ensures each F5 press accumulates ALL events in the current week,
+// so sample counts grow over time rather than shrinking to only new events.
 func (r *Runner) RunIntraweek(ctx context.Context, windowDays int) error {
 	end := time.Now().UTC()
+	start := end.Add(-time.Duration(windowDays) * 24 * time.Hour)
 
-	// Determine the global last run_at across all agents.
-	// We query the benchmark store for the most recent run regardless of agent.
-	runs, err := r.benchmarkStore.GetRuns(ctx, "", 1)
-	if err != nil {
-		return fmt.Errorf("get last run for intraweek interval: %w", err)
-	}
-
-	var start time.Time
-	if len(runs) > 0 && !runs[0].RunAt.IsZero() {
-		// Start 1ms after the last recorded benchmark run.
-		start = runs[0].RunAt.Add(time.Millisecond)
-		r.logger.Info("intraweek: derived start from last run",
-			zap.Time("last_run_at", runs[0].RunAt),
-			zap.Time("window_start", start),
-		)
-	} else {
-		// No prior run — fall back to windowDays.
-		start = end.Add(-time.Duration(windowDays) * 24 * time.Hour)
-		r.logger.Info("intraweek: no prior run found, using windowDays fallback",
-			zap.Int("window_days", windowDays),
-			zap.Time("window_start", start),
-		)
-	}
+	r.logger.Info("intraweek: using full weekly window",
+		zap.Time("window_start", start),
+		zap.Time("window_end", end),
+		zap.Int("window_days", windowDays),
+	)
 
 	return r.run(ctx, store.RunKindIntraweek, start, end, windowDays)
 }

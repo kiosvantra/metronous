@@ -255,14 +255,11 @@ func TestRunnerIntraweekTagsRunKind(t *testing.T) {
 	}
 }
 
-// TestRunnerIntraweekUsesLastRunAtPlusOne verifies that RunIntraweek sets the
-// window start to lastRunAt+1ms when a prior run exists in the benchmark store.
-//
-// Strategy: directly save a synthetic "previous" BenchmarkRun with a well-known
-// RunAt in the past, then call RunIntraweek and verify the window start is
-// exactly lastRunAt+1ms.  We avoid actually processing agents (no events are
-// inserted) so the test focuses only on the interval derivation logic.
-func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
+// TestRunnerIntraweekUsesFullWeeklyWindow verifies that RunIntraweek always uses
+// the full weekly window [now-windowDays, now) regardless of prior runs.
+// This ensures F5 accumulates ALL events in the current week, not just
+// incremental events since the last run — which would shrink sample counts.
+func TestRunnerIntraweekUsesFullWeeklyWindow(t *testing.T) {
 	ctx := context.Background()
 	es, bs := setupStores(t)
 	tmpDir := t.TempDir()
@@ -271,8 +268,7 @@ func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
 	engine := decision.NewDecisionEngine(&thresholds)
 	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
 
-	// Directly save a synthetic "previous" run with a known RunAt in the past.
-	// This simulates a weekly run that happened 3 days ago.
+	// Save a synthetic prior run 3 days ago — this should NOT affect the window.
 	lastRunAt := time.Now().UTC().Add(-3 * 24 * time.Hour).Truncate(time.Millisecond)
 	prevRun := store.BenchmarkRun{
 		RunAt:      lastRunAt,
@@ -286,9 +282,7 @@ func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
 		t.Fatalf("SaveRun (synthetic): %v", err)
 	}
 
-	// Insert events for a different agent so there is work for RunIntraweek to do,
-	// with timestamps falling within [lastRunAt+1ms, now].
-	// We use time.Now() timestamps so they naturally fall in the window.
+	// Insert events for a test agent.
 	insertEvents(t, ctx, es, "iw-interval-agent", 60, "complete")
 
 	beforeIntraweek := time.Now().UTC()
@@ -297,7 +291,7 @@ func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
 	}
 	afterIntraweek := time.Now().UTC()
 
-	// Verify the intraweek run was created for iw-interval-agent.
+	// Verify the intraweek run was created.
 	iwRun, err := bs.GetLatestRun(ctx, "iw-interval-agent")
 	if err != nil {
 		t.Fatalf("GetLatestRun after intraweek: %v", err)
@@ -310,10 +304,17 @@ func TestRunnerIntraweekUsesLastRunAtPlusOne(t *testing.T) {
 		t.Errorf("RunKind: got %q, want intraweek", iwRun.RunKind)
 	}
 
-	// WindowStart must be lastRunAt+1ms (within 1ms storage precision).
-	expectedStart := lastRunAt.Add(time.Millisecond)
-	if diff := iwRun.WindowStart.Sub(expectedStart).Abs(); diff > time.Millisecond {
-		t.Errorf("WindowStart: got %v, want %v (diff=%v)", iwRun.WindowStart, expectedStart, diff)
+	// WindowStart must be [now-7days, now) — full weekly window, NOT lastRunAt+1ms.
+	expectedWindowDuration := 7 * 24 * time.Hour
+	actualDuration := iwRun.WindowEnd.Sub(iwRun.WindowStart)
+	if diff := (actualDuration - expectedWindowDuration).Abs(); diff > 5*time.Second {
+		t.Errorf("window duration: got %v, want ~%v (diff=%v)", actualDuration, expectedWindowDuration, diff)
+	}
+
+	// WindowStart must NOT be close to lastRunAt+1ms (that was the old broken behavior).
+	oldStart := lastRunAt.Add(time.Millisecond)
+	if diff := iwRun.WindowStart.Sub(oldStart).Abs(); diff < time.Hour {
+		t.Errorf("WindowStart %v is too close to lastRunAt+1ms %v — old incremental behavior detected", iwRun.WindowStart, oldStart)
 	}
 
 	// WindowEnd must be approximately now.
