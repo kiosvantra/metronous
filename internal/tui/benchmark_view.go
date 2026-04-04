@@ -108,7 +108,7 @@ func loadModelPricing(dataDir string) map[string]float64 {
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
 	bs        store.BenchmarkStore
-	runs      []store.BenchmarkRun // rows for the current cycle (one per agent, placeholder if no run)
+	runs      []store.BenchmarkRun // rows for the current cycle (one per agent+model combo, placeholder if no run)
 	agents    []discovery.AgentInfo
 	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
 	trendByID map[string][]string // agentID → verdict trend (oldest first)
@@ -395,33 +395,46 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Build a lookup: agentID → run in this cycle (last run if multiple per agent per cycle).
-		runByAgent := make(map[string]store.BenchmarkRun, len(windowRuns))
+		// ── 5. Build one row per (agent, model) combo + NO RUN placeholders ─────
+		// Collect the latest run per (agentID, model) pair within the cycle.
+		type agentModel struct{ agentID, model string }
+		latestByAgentModel := make(map[agentModel]store.BenchmarkRun, len(windowRuns))
 		for _, r := range windowRuns {
-			if existing, ok := runByAgent[r.AgentID]; !ok || r.RunAt.After(existing.RunAt) {
-				runByAgent[r.AgentID] = r
+			key := agentModel{r.AgentID, r.Model}
+			if existing, ok := latestByAgentModel[key]; !ok || r.RunAt.After(existing.RunAt) {
+				latestByAgentModel[key] = r
 			}
 		}
 
-		// ── 5. Build one row per agent (NO RUN placeholder if absent) ─────────
+		// Track which agents have at least one real run in this cycle.
+		agentsWithRuns := make(map[string]bool, len(windowRuns))
+		for key := range latestByAgentModel {
+			agentsWithRuns[key.agentID] = true
+		}
+
 		var page []store.BenchmarkRun
+		for key, run := range latestByAgentModel {
+			_ = key
+			page = append(page, run)
+		}
+		// Add NO RUN placeholder for agents with zero runs in the cycle.
 		for _, agentID := range allIDs {
-			if run, ok := runByAgent[agentID]; ok {
-				page = append(page, run)
-			} else {
-				// Placeholder: AgentID set, RunAt zero → isNoData() returns true.
+			if !agentsWithRuns[agentID] {
 				page = append(page, store.BenchmarkRun{AgentID: agentID})
 			}
 		}
 
-		// Sort: primary → subagent → all → built-in, then alphabetical.
+		// Sort: agent type → agentID → model (alphabetical).
 		sort.Slice(page, func(i, j int) bool {
 			ti := agentTypeOrder(typeByID[page[i].AgentID])
 			tj := agentTypeOrder(typeByID[page[j].AgentID])
 			if ti != tj {
 				return ti < tj
 			}
-			return page[i].AgentID < page[j].AgentID
+			if page[i].AgentID != page[j].AgentID {
+				return page[i].AgentID < page[j].AgentID
+			}
+			return page[i].Model < page[j].Model
 		})
 
 		// ── 6. Fetch verdict trends for each agent in the page (last 8 weeks) ─
