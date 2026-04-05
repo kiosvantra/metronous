@@ -80,6 +80,8 @@ func (r *Runner) RunIntraweek(ctx context.Context, windowDays int) error {
 
 // run is the shared implementation for RunWeekly and RunIntraweek.
 func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end time.Time, windowDays int) error {
+	runAt := time.Now().UTC()
+
 	r.logger.Info("starting benchmark run",
 		zap.String("run_kind", string(kind)),
 		zap.Time("window_start", start),
@@ -104,7 +106,7 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 	var results []agentResult
 	var failedAgents []string
 	for _, agentID := range agents {
-		res, err := r.processAgentAllModels(ctx, agentID, start, end, windowDays)
+		res, err := r.processAgentAllModels(ctx, agentID, start, end, windowDays, runAt)
 		if err != nil {
 			r.logger.Error("failed to process agent",
 				zap.String("agent_id", agentID),
@@ -152,6 +154,20 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 		}
 	}
 
+	// For intraweek runs, mark older runs as superseded when the model changes.
+	if kind == store.RunKindIntraweek {
+		cycleStart, cycleEnd := computeCycleBounds(runAt)
+		for _, res := range results {
+			if err := r.benchmarkStore.MarkSupersededRuns(ctx, res.run.AgentID, runAt, res.run.Model, cycleStart, cycleEnd); err != nil {
+				r.logger.Warn("failed to mark superseded runs",
+					zap.String("agent_id", res.run.AgentID),
+					zap.String("new_model", res.run.Model),
+					zap.Error(err))
+				// Non-fatal: continue
+			}
+		}
+	}
+
 	r.logger.Info("benchmark run complete",
 		zap.String("run_kind", string(kind)),
 		zap.Int("agents_processed", len(results)),
@@ -175,7 +191,7 @@ type modelMetrics struct {
 // performance independently.
 //
 // ArtifactPath, RunKind, WindowStart, and WindowEnd are filled in by the caller.
-func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, start, end time.Time, windowDays int) ([]agentResult, error) {
+func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, start, end time.Time, windowDays int, runAt time.Time) ([]agentResult, error) {
 	// 1. Fetch all events for the agent in the window.
 	events, err := benchmark.FetchEventsForWindow(ctx, r.eventStore, agentID, start, end)
 	if err != nil {
@@ -194,7 +210,6 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 	}
 
 	// 3. Compute metrics for every model independently.
-	now := time.Now().UTC()
 	perModel := make(map[string]modelMetrics, len(modelEvents))
 	for model, evts := range modelEvents {
 		m := benchmark.AggregateMetrics(r.logger, agentID, evts)
@@ -217,7 +232,7 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 		}
 
 		run := store.BenchmarkRun{
-			RunAt:               now,
+			RunAt:               runAt,
 			WindowDays:          windowDays,
 			AgentID:             agentID,
 			Model:               model,
@@ -331,4 +346,20 @@ func (r *Runner) discoverAgents(ctx context.Context, start, end time.Time) ([]st
 		}
 	}
 	return agents, nil
+}
+
+// computeCycleBounds returns the start and end of the Sunday-bounded week cycle for the given time.
+// The cycle starts at Sunday 00:00 UTC and ends at the following Sunday 00:00 UTC.
+func computeCycleBounds(t time.Time) (time.Time, time.Time) {
+	t = t.UTC()
+	// Determine which day of the week t is (0=Sunday, 1=Monday, ..., 6=Saturday).
+	dayOfWeek := int(t.Weekday())
+	// Calculate days back to the previous Sunday.
+	daysBackToSunday := dayOfWeek
+	// Set cycleStart to Sunday 00:00 UTC.
+	cycleStart := t.AddDate(0, 0, -daysBackToSunday)
+	cycleStart = time.Date(cycleStart.Year(), cycleStart.Month(), cycleStart.Day(), 0, 0, 0, 0, time.UTC)
+	// cycleEnd is the following Sunday 00:00 UTC (7 days later).
+	cycleEnd := cycleStart.AddDate(0, 0, 7)
+	return cycleStart, cycleEnd
 }

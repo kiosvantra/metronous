@@ -69,12 +69,19 @@ type WindowMetrics struct {
 }
 
 // FetchEventsForWindow retrieves all events for the given agent within the time window.
+// If start and end are both zero, retrieves all events (used for historical metrics).
 func FetchEventsForWindow(ctx context.Context, es store.EventStore, agentID string, start, end time.Time) ([]store.Event, error) {
-	return es.QueryEvents(ctx, store.EventQuery{
+	query := store.EventQuery{
 		AgentID: agentID,
-		Since:   start,
-		Until:   end,
-	})
+	}
+	// Only set time bounds if provided (non-zero).
+	if !start.IsZero() {
+		query.Since = start
+	}
+	if !end.IsZero() {
+		query.Until = end
+	}
+	return es.QueryEvents(ctx, query)
 }
 
 // AggregateMetrics computes WindowMetrics from a slice of events.

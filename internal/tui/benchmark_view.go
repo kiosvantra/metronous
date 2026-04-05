@@ -441,21 +441,47 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Sort: agentID asc → SampleSize desc (most data first within each agent).
+		// Sort: status (active first) → agentID asc → run_at desc → SampleSize desc.
+		// NO DATA placeholders go last.
+		statusOrder := map[store.RunStatus]int{
+			store.RunStatusActive:     0,
+			store.RunStatusSuperseded: 1,
+		}
 		sort.Slice(page, func(i, j int) bool {
-			if page[i].AgentID != page[j].AgentID {
-				return page[i].AgentID < page[j].AgentID
-			}
-			// NO DATA placeholders go last within an agent group.
+			// NO DATA placeholders always go last.
 			if isNoData(page[i]) != isNoData(page[j]) {
 				return !isNoData(page[i])
 			}
+			// Active runs come before superseded runs.
+			iStatus := statusOrder[page[i].Status]
+			jStatus := statusOrder[page[j].Status]
+			if iStatus != jStatus {
+				return iStatus < jStatus
+			}
+			// Within same status, sort by agentID asc.
+			if page[i].AgentID != page[j].AgentID {
+				return page[i].AgentID < page[j].AgentID
+			}
+			// Within same agent, sort by run_at desc (most recent first).
+			if page[i].RunAt != page[j].RunAt {
+				return page[i].RunAt.After(page[j].RunAt)
+			}
+			// Tiebreaker: SampleSize desc.
 			return page[i].SampleSize > page[j].SampleSize
 		})
 
 		// ── 6. Fetch verdict trends for each agent in the page (last 8 weeks) ─
 		trendByID := make(map[string][]string, len(page))
+		seenAgentIDs := make(map[string]struct{}, len(page))
 		for _, run := range page {
+			if run.AgentID == "" {
+				continue
+			}
+			if _, seen := seenAgentIDs[run.AgentID]; seen {
+				continue
+			}
+			seenAgentIDs[run.AgentID] = struct{}{}
+
 			trend, err := m.bs.GetVerdictTrend(ctx, run.AgentID, 8)
 			if err == nil {
 				trendByID[run.AgentID] = trend
@@ -512,6 +538,19 @@ func (m BenchmarkModel) View() string {
 		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more above", m.offset)) + "\n")
 	}
 
+	// Compute current model per agent (highest run_at with Status='active').
+	// Index invariant: currentModelByAgent stores absolute indexes into m.runs
+	// (not page-relative indexes). The render loop also iterates m.runs with
+	// absolute index i, so currentModelByAgent[agentID] == i is valid.
+	currentModelByAgent := make(map[string]int) // agent → run index
+	for i, run := range m.runs {
+		if !isNoData(run) && run.Status == store.RunStatusActive {
+			if _, exists := currentModelByAgent[run.AgentID]; !exists || m.runs[currentModelByAgent[run.AgentID]].RunAt.Before(run.RunAt) {
+				currentModelByAgent[run.AgentID] = i
+			}
+		}
+	}
+
 	// Data rows — render only the visible window [offset, offset+maxBenchmarkRows).
 	end := m.offset + maxBenchmarkRows
 	if end > len(m.runs) {
@@ -535,10 +574,28 @@ func (m BenchmarkModel) View() string {
 		// Render columns before Verdict without special colour.
 		// verdictColIdx = 6 (Time, Agent, Model, Samples, Accuracy, Avg Response, Verdict, → Switch To, Savings)
 		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
+
+		// Add visual marker (●) to agent cell if this is the current active run for the agent.
+		isCurrent := !isNoDataRow && run.Status == store.RunStatusActive && currentModelByAgent[run.AgentID] == i
+		if isCurrent {
+			// Replace the agent column with a marker prefix.
+			agentCell := row[1]
+			agentWithMarker := "● " + agentCell
+			// Re-render the first column (Time) + modified Agent column.
+			rendered = renderRow(row[0:1], benchColWidths[0:1], baseStyle)
+			rendered += baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[1], agentWithMarker))
+			// Add back the remaining columns (Model, Samples, Accuracy, Avg Response).
+			rendered += " " + renderRow(row[2:verdictColIdx], benchColWidths[2:verdictColIdx], baseStyle)
+		}
+
 		// Verdict column: coloured independently.
 		var verdictCell string
 		if isNoDataRow {
 			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		} else if run.Status == store.RunStatusSuperseded {
+			// Superseded runs show "CHANGED" in grey.
+			verdictCell = verdictOther.Render(
+				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
 		} else {
 			verdictCell = verdictStyle(run.Verdict).Render(
 				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
@@ -680,7 +737,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 }
 
 // verdictAbbrev returns a single-character abbreviation for a verdict.
-// Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  ?=INSUFFICIENT_DATA
+// Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA
 func verdictAbbrev(v string) string {
 	switch store.VerdictType(v) {
 	case store.VerdictKeep:
@@ -691,6 +748,8 @@ func verdictAbbrev(v string) string {
 		return "U"
 	case store.VerdictInsufficientData:
 		return "?"
+	case store.VerdictType("CHANGED"):
+		return "C"
 	default:
 		return "?"
 	}
@@ -717,7 +776,7 @@ func trendDirectionStyled(verdicts []string) string {
 // formatVerdictTrend formats the last 5 verdicts as abbreviated single chars
 // separated by arrows, followed by a colored direction indicator.
 // Legend line is appended below.
-// e.g. "K → K → S → K → ?  (↓ degrading)\n  Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  ?=INSUFFICIENT_DATA"
+// e.g. "K → K → S → C → ?  (↓ degrading)\n  Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA"
 func formatVerdictTrend(trend []string) string {
 	if len(trend) == 0 {
 		return "-"
@@ -733,7 +792,7 @@ func formatVerdictTrend(trend []string) string {
 	}
 	trendLine := strings.Join(abbrevs, " → ")
 	direction := trendDirectionStyled(trend)
-	return fmt.Sprintf("%s  (%s)\nLegend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  ?=INSUFFICIENT_DATA", trendLine, direction)
+	return fmt.Sprintf("%s  (%s)\nLegend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA", trendLine, direction)
 }
 
 // verdictSeverity returns a numeric severity for a verdict (lower = better).
@@ -741,6 +800,10 @@ func verdictSeverity(v string) int {
 	switch store.VerdictType(v) {
 	case store.VerdictKeep:
 		return 0
+	case store.VerdictInsufficientData:
+		return 1
+	case store.VerdictType("CHANGED"):
+		return 1
 	case store.VerdictSwitch:
 		return 2
 	case store.VerdictUrgentSwitch:
@@ -751,10 +814,10 @@ func verdictSeverity(v string) int {
 }
 
 // trendDirection returns a direction indicator string for a slice of verdict strings.
-// If the most recent verdict is INSUFFICIENT_DATA, the direction is "unknown" — we
-// cannot assess the trend when the latest run lacks enough data.
-// If only the first endpoint is INSUFFICIENT_DATA (but the last is not), the
-// comparison is still valid and uses the last known verdict.
+// If the most recent verdict is INSUFFICIENT_DATA or CHANGED, direction is "unknown" —
+// we cannot assess trend direction from transition/non-comparable points.
+// If only older entries are INSUFFICIENT_DATA/CHANGED (but the last is not),
+// comparison is still valid and uses the most recent comparable baseline.
 func trendDirection(verdicts []string) string {
 	if len(verdicts) < 2 {
 		return "→ stable"
@@ -762,21 +825,21 @@ func trendDirection(verdicts []string) string {
 	last := verdicts[len(verdicts)-1]
 
 	// If the latest verdict has insufficient data, we cannot determine direction.
-	if last == string(store.VerdictInsufficientData) {
+	if last == string(store.VerdictInsufficientData) || last == "CHANGED" {
 		return "→ unknown"
 	}
 
-	// Find the most recent non-INSUFFICIENT_DATA verdict before the last one
+	// Find the most recent non-INSUFFICIENT_DATA / non-CHANGED verdict before the last one
 	// to use as the comparison baseline.
 	first := ""
 	for i := len(verdicts) - 2; i >= 0; i-- {
-		if verdicts[i] != string(store.VerdictInsufficientData) {
+		if verdicts[i] != string(store.VerdictInsufficientData) && verdicts[i] != "CHANGED" {
 			first = verdicts[i]
 			break
 		}
 	}
 	if first == "" {
-		// All previous verdicts were INSUFFICIENT_DATA — no baseline to compare.
+		// All previous verdicts were INSUFFICIENT_DATA/CHANGED — no baseline to compare.
 		return "→ unknown"
 	}
 

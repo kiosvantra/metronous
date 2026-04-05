@@ -239,6 +239,16 @@ const (
 	RunKindIntraweek RunKindType = "intraweek"
 )
 
+// RunStatus indicates whether a benchmark run is currently active or has been superseded.
+type RunStatus string
+
+const (
+	// RunStatusActive is the default for new runs and active models.
+	RunStatusActive RunStatus = "active"
+	// RunStatusSuperseded indicates the model was replaced by a newer model in the same cycle.
+	RunStatusSuperseded RunStatus = "superseded"
+)
+
 // BenchmarkRun holds all metrics and the verdict for a single benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
@@ -322,6 +332,10 @@ type BenchmarkRun struct {
 
 	// P95TurnMs is the 95th-percentile turn duration in milliseconds (complete events only).
 	P95TurnMs float64
+
+	// Status indicates whether this run is active or has been superseded by a newer model.
+	// Defaults to RunStatusActive.
+	Status RunStatus
 }
 
 // BenchmarkModelSummary aggregates benchmark metrics per model across all agents.
@@ -409,6 +423,17 @@ type BenchmarkStore interface {
 	// QueryRunsInWindow returns all benchmark runs whose run_at falls within
 	// [since, until) (inclusive start, exclusive end), ordered by run_at DESC.
 	QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]BenchmarkRun, error)
+
+	// MarkSupersededRuns marks older intraweek runs as superseded when a new model is used
+	// in the same cycle. It updates runs where:
+	// - agent_id = agentID
+	// - run_kind = 'intraweek'
+	// - run_at < newRunAt
+	// - model != newModel
+	// - run_at >= cycleStart and run_at < cycleEnd
+	// Setting run_status = 'superseded'. This is called only for intraweek runs after
+	// inserting new runs. Weekly runs are never marked superseded.
+	MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error
 
 	// Close releases all resources held by the store.
 	Close() error
