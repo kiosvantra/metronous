@@ -291,7 +291,7 @@ func (m ConfigModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Threshold Configuration") + "\n\n")
-	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  ctrl+s: save  ctrl+r: reload") + "\n")
+	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  s or ctrl+s: save  r or ctrl+r: reload") + "\n")
 	sb.WriteString(dimStyle.Render("  Keymap preset: Default (numbers/arrows) or Nvim (hjkl) via the Config tab") + "\n\n")
 
 	for i, f := range configFields {

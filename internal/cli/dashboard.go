@@ -31,11 +31,11 @@ The dashboard provides three tabs:
   [3] Config     — view and edit performance thresholds
 
 Key bindings:
-  1/2/3 or ←/→ : Switch tabs
-  q or ctrl+c   : Quit
-  ctrl+s        : Save thresholds (Config tab)
-  ctrl+r        : Reload thresholds (Config tab)
-  ↑/↓           : Navigate tables`,
+	  1/2/3 or ←/→ : Switch tabs
+	  q or ctrl+c   : Quit
+	  s or ctrl+s   : Save thresholds (Config tab)
+	  r or ctrl+r   : Reload thresholds (Config tab)
+	  ↑/↓           : Navigate tables`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDashboard(dataDir, configPath)
 		},

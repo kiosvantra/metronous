@@ -513,6 +513,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil
+
+		case "s":
+			if m.CurrentTab == TabConfig {
+				var cmd tea.Cmd
+				m.config, cmd = m.config.UpdateSave(key)
+				return m, cmd
+			}
+
+		case "r":
+			if m.CurrentTab == TabConfig {
+				var cmd tea.Cmd
+				m.config, cmd = m.config.UpdateReload(key)
+				return m, cmd
+			}
 		}
 
 		// Unknown key — forward only to the active sub-model.

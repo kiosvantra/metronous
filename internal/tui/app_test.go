@@ -485,6 +485,76 @@ func TestConfigViewSaveReloadKeymapPreset(t *testing.T) {
 	}
 }
 
+// TestConfigViewPlainSaveReloadScopedToConfigTab verifies that plain 's' and
+// 'r' keys trigger save and reload only while the Config tab is active, while
+// leaving other tabs unaffected.
+func TestConfigViewPlainSaveReloadScopedToConfigTab(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Build an app model wired to a real config path (no stores needed).
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Ensure View() renders tabs instead of the loading placeholder.
+	updated, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = updated.(*tui.AppModel)
+
+	// On a non-Config tab, plain 's' and 'r' should not trigger save/reload.
+	if app.CurrentTab == tui.TabConfig {
+		t.Fatalf("expected initial tab to be non-Config, got %d", app.CurrentTab)
+	}
+
+	updated, cmd := sendKey(app, "s")
+	app = updated.(*tui.AppModel)
+	if cmd != nil {
+		t.Fatalf("expected no command from plain 's' on non-Config tab, got %#v", cmd)
+	}
+
+	updated, cmd = sendKey(app, "r")
+	app = updated.(*tui.AppModel)
+	if cmd != nil {
+		t.Fatalf("expected no command from plain 'r' on non-Config tab, got %#v", cmd)
+	}
+
+	// Jump to the Config tab.
+	updated, _ = sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected TabConfig after switching, got %d", app.CurrentTab)
+	}
+
+	// Plain 's' should trigger a save command.
+	updated, cmd = sendKey(app, "s")
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected save command from plain 's' on Config tab")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	view := app.View()
+	if !strings.Contains(view, "Saved") {
+		t.Fatalf("expected 'Saved' in Config view after plain 's', got: %q", view)
+	}
+
+	// Plain 'r' should trigger a reload command.
+	updated, cmd = sendKey(app, "r")
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from plain 'r' on Config tab")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	view = app.View()
+	if !strings.Contains(view, "Reload") {
+		t.Fatalf("expected 'Reload' in Config view after plain 'r', got: %q", view)
+	}
+}
+
 // TestConfigViewSaveKeepsPresetAcrossTabSwitch verifies that toggling the
 // keymap preset to nvim, saving via ctrl+s, switching to another tab, and
 // returning to Config keeps the nvim preset and shows a Saved status message.
