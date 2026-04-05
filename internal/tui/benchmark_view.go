@@ -501,6 +501,7 @@ func (m BenchmarkModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Run Cycle") + "\n")
+	sb.WriteString(dimStyle.Render("Current cycle snapshot — active model per agent with all historical model variants") + "\n")
 
 	// F5 indicator — always visible below the title, same as Benchmark Summary.
 	f5TopStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
