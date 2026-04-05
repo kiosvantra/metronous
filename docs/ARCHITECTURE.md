@@ -82,7 +82,7 @@ For benchmark methodology and scoring formulas see [BENCHMARKS.md](BENCHMARKS.md
                           │            │             │
                           │  ┌─────────┴─────────┐  │
                           │  │  Scheduler (cron)  │  │
-                          │  │  Sunday 02:00      │  │
+                          │  │  Monday 02:00      │  │
                           │  │  Runner → Engine   │  │
                           │  └───────────────────┘  │
                           └────────────────────────┘
@@ -277,7 +277,7 @@ metronous server --daemon-mode
     ├── decision.NewDecisionEngine(&thresholds)
     ├── runner.NewRunner(es, bs, engine, artifactDir)
     ├── scheduler.NewSchedulerWithContext(ctx, runner, 7, logger)
-    │       └── RegisterWeeklyJob("0 0 2 * * 0")  ← Sunday 02:00 local
+    │       └── RegisterWeeklyJob("0 0 2 * * 1")  ← Monday 02:00 local
     ├── tracking.NewEventQueue(es, DefaultBufferSize)  ← async write buffer
     ├── mcp.NewStdioServer()  ← also starts HTTP server on dynamic port
     │       └── writes port to mcp.port
@@ -299,7 +299,7 @@ The daemon runs as a **systemd user service** on Linux:
 
 The weekly benchmark scheduler (`internal/scheduler/cron.go`) is embedded directly in the daemon process using `robfig/cron/v3` with second-precision parsing.
 
-- **Schedule**: `"0 0 2 * * 0"` — Sunday at 02:00 local time
+- **Schedule**: `"0 0 2 * * 1"` — Monday at 02:00 local time
 - **Window**: last 7 days (`DefaultWindowDays = 7`)
 - **Intraweek (F5)**: `Runner.RunIntraweek()` derives the window start from `max(run_at)` of all previous benchmark runs, so only events since the last run are evaluated
 - **Cancellation**: the scheduler context is derived from the daemon context; in-progress jobs observe cancellation on daemon shutdown

@@ -325,7 +325,7 @@ Los modelos gratuitos omiten las verificaciones de ROI y costo en el motor de de
 
 | Tipo | Disparador | Ventana |
 |------|------------|---------|
-| `weekly` | Domingo 02:00 hora local (cron `"0 0 2 * * 0"`) | Últimos 7 días desde `now` |
+| `weekly` | Lunes 02:00 hora local (cron `"0 0 2 * * 1"`) | Últimos 7 días desde `now` |
 | `intraweek` | `F5` en la pestaña **Benchmark Detailed** | Desde `last_run_at + 1ms` hasta `now` (regresa a 7 días si no hay ejecución previa) |
 
 Ambos tipos usan la misma implementación `Runner.run()` y producen filas `BenchmarkRun` idénticas en `benchmark.db`, etiquetadas con `run_kind`. Las ejecuciones intra-semana son útiles para obtener métricas actualizadas a mitad de semana sin esperar el programa del domingo.

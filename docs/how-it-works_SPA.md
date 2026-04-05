@@ -56,7 +56,7 @@ Este documento explica la **metodología** detrás de Metronous: qué datos reco
    La base de datos `benchmark.db` contiene tablas de resumen (`agent_summaries`, `benchmark_runs`) que se actualizan de forma incremental a medida que llegan nuevos eventos.
 
 3. **Pipeline de benchmark semanal**  
-    Por defecto, Metronous ejecuta un análisis de benchmark cada domingo a las 02:00 hora local (configurable via el TUI o variable de entorno). El pipeline consta de cuatro etapas:
+    Por defecto, Metronous ejecuta un análisis de benchmark cada lunes a las 02:00 hora local (configurable via el TUI o variable de entorno). El pipeline consta de cuatro etapas:
 
     **Alineación de ciclos de ejecución (TUI):** la pestaña "Benchmark Detailed" agrupa los resultados en *semanas delimitadas por domingo* en *hora local*; esto es lo que PgUp/PgDn navega. La pestaña "Benchmark History Summary" muestra solo pares (agente, modelo) activos en los últimos 4 ciclos semanales, ponderados por recencia.
 

@@ -136,7 +136,7 @@ func TestServiceProgramContextCancellation(t *testing.T) {
 
 // TestDaemonStartsEmbeddedScheduler verifies that the daemon wires the weekly
 // benchmark scheduler into its runtime.  We cannot observe the cron firing
-// (the Sunday 02:00 trigger is 7 days away) but we can assert that:
+// (the Monday 02:00 trigger is 7 days away) but we can assert that:
 //  1. The daemon starts and shuts down cleanly with a scheduler in the mix.
 //  2. Shutdown completes in bounded time (i.e., the scheduler's Stop() does
 //     not block forever).

@@ -54,7 +54,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    The `benchmark.db` contains summary tables (`agent_summaries`, `benchmark_runs`) that are updated incrementally as new events arrive.
 
 3. **Weekly Benchmark Pipeline**  
-    By default, Metronous runs a benchmark analysis every Sunday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
+    By default, Metronous runs a benchmark analysis every Monday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
 
     **Run Cycle alignment (TUI):** the "Benchmark Detailed" tab groups results into *Sunday-bounded weeks* in *local time*; this is what PgUp/PgDn navigates. The "Benchmark History Summary" tab shows only (agent, model) pairs active in the last 4 weekly cycles, weighted by recency.
 

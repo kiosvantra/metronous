@@ -27,7 +27,7 @@ OpenCode → metronous-plugin.ts → HTTP POST /ingest → metronous daemon → 
 
 - **Plugin (`metronous-plugin.ts`)**: OpenCode plugin that captures agent events and forwards them to the daemon via HTTP. Accumulates cost from `step-finish` events and persists session cost to `~/.metronous/data/session_costs.json` across restarts.
 - **MCP shim (`metronous mcp`)**: stdio↔HTTP bridge launched by OpenCode as an MCP server. Reads the daemon port from `~/.metronous/data/mcp.port` and forwards events.
-- **Daemon (`metronous server --daemon-mode`)**: Long-lived background service (systemd on Linux) that ingests events, stores them in SQLite, and runs weekly benchmarks at Sunday 02:00 local time.
+- **Daemon (`metronous server --daemon-mode`)**: Long-lived background service (systemd on Linux) that ingests events, stores them in SQLite, and runs weekly benchmarks at Monday 02:00 local time.
 - **TUI Dashboard**: 5-tab terminal UI with live tracking, benchmark results, cost charts, and config editing.
 
 For full component details see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).  

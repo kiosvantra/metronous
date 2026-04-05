@@ -3,10 +3,12 @@
 //
 // # Weekly Benchmark Scheduling
 //
-// The weekly benchmark (cron "0 0 2 * * 0", Sunday 02:00 local time) is
-// embedded directly in the daemon runtime via [scheduler.NewSchedulerWithContext].
-// It starts automatically whenever the daemon starts and is cancelled cleanly
-// when the daemon shuts down. No external OS timer is required.
+// The weekly benchmark is embedded directly in the daemon runtime via
+// [scheduler.NewSchedulerWithContext]. By default it runs with the schedule
+// "0 0 2 * * 1" (Monday 02:00 local time) but this can be overridden via the
+// application config (scheduler.benchmark_schedule in config.yaml). It starts
+// automatically whenever the daemon starts and is cancelled cleanly when the
+// daemon shuts down. No external OS timer is required.
 //
 // The daemon is managed as a persistent service by the OS service manager on
 // each supported platform, which ensures the benchmark fires even when no
@@ -37,7 +39,9 @@ import (
 	"sync"
 
 	"github.com/kardianos/service"
+	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 
 	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/decision"
@@ -155,10 +159,75 @@ func (p *Program) loadThresholds() config.Thresholds {
 	return thresholds
 }
 
+// schedulerConfig mirrors the subset of fields in config.yaml that are relevant
+// for the embedded weekly benchmark scheduler.
+type schedulerConfig struct {
+	BenchmarkSchedule string `yaml:"benchmark_schedule"`
+	WindowDays        int    `yaml:"window_days"`
+}
+
+// appConfig is a minimal representation of ~/.metronous/config.yaml.
+type appConfig struct {
+	Scheduler schedulerConfig `yaml:"scheduler"`
+}
+
+// loadSchedulerConfig reads scheduler settings from config.yaml located next to
+// the data directory (typically ~/.metronous/config.yaml). On any error or
+// missing fields it falls back to the safe defaults defined in the scheduler
+// package so the daemon always starts with a known-good schedule.
+func (p *Program) loadSchedulerConfig() (schedule string, windowDays int) {
+	// Safe defaults used when config is missing or invalid.
+	schedule = scheduler.DefaultWeeklySchedule
+	windowDays = scheduler.DefaultWindowDays
+
+	configPath := filepath.Join(filepath.Dir(p.cfg.DataDir), "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		// Config file is optional; log at info level and use defaults.
+		p.logger.Info("config file not found, using scheduler defaults",
+			zap.String("path", configPath),
+			zap.Error(err),
+		)
+		return
+	}
+
+	var cfg appConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		p.logger.Warn("failed to parse config file, using scheduler defaults",
+			zap.String("path", configPath),
+			zap.Error(err),
+		)
+		return
+	}
+
+	if cfg.Scheduler.BenchmarkSchedule != "" {
+		schedule = cfg.Scheduler.BenchmarkSchedule
+	}
+	if cfg.Scheduler.WindowDays > 0 {
+		windowDays = cfg.Scheduler.WindowDays
+	}
+
+	// Validate the schedule string when it differs from the built-in default.
+	if schedule != scheduler.DefaultWeeklySchedule {
+		parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		if _, err := parser.Parse(schedule); err != nil {
+			p.logger.Warn("invalid scheduler.benchmark_schedule in config; falling back to default",
+				zap.String("path", configPath),
+				zap.String("schedule", schedule),
+				zap.Error(err),
+			)
+			schedule = scheduler.DefaultWeeklySchedule
+		}
+	}
+
+	return
+}
+
 // run is the main daemon loop: it starts the event store, queue, MCP server,
 // and the embedded weekly benchmark scheduler.
 //
-// The weekly benchmark (cron "0 0 2 * * 0", Sunday 02:00 local time) runs
+// The weekly benchmark (cron "0 0 2 * * 1", Monday 02:00 local time) runs
 // inside this process — no external OS timer is needed. Cancelling ctx
 // (via Shutdown) stops the scheduler and any in-progress benchmark job.
 func (p *Program) run(ctx context.Context) error {
@@ -214,11 +283,13 @@ func (p *Program) run(ctx context.Context) error {
 			zap.Error(err))
 	})
 	benchRunner := runner.NewRunnerWithModelLookup(es, bs, engine, artifactDir, p.logger, agentModelLookup)
-	sched := scheduler.NewSchedulerWithContext(ctx, benchRunner, scheduler.DefaultWindowDays, p.logger)
-	if _, err := sched.RegisterWeeklyJob(scheduler.DefaultWeeklySchedule); err != nil {
+
+	scheduleExpr, windowDays := p.loadSchedulerConfig()
+	sched := scheduler.NewSchedulerWithContext(ctx, benchRunner, windowDays, p.logger)
+	if _, err := sched.RegisterWeeklyJob(scheduleExpr); err != nil {
 		// Non-fatal: the scheduler is a background enhancement; MCP server must still start.
 		p.logger.Error("failed to register weekly benchmark job",
-			zap.String("schedule", scheduler.DefaultWeeklySchedule),
+			zap.String("schedule", scheduleExpr),
 			zap.Error(err),
 		)
 	} else {
@@ -245,7 +316,7 @@ func (p *Program) run(ctx context.Context) error {
 
 	p.logger.Info("metronous daemon starting",
 		zap.String("data_dir", p.cfg.DataDir),
-		zap.String("weekly_schedule", scheduler.DefaultWeeklySchedule),
+		zap.String("weekly_schedule", scheduleExpr),
 	)
 
 	return srv.ServeDaemon(ctx)

@@ -14,7 +14,7 @@
 // re-running `metronous install` unloads the old job before rewriting and
 // reloading it.  This covers self-update scenarios transparently.
 //
-// Scheduling: the weekly cron ("0 0 2 * * 0", Sunday 02:00 local time) is
+// Scheduling: the weekly cron ("0 0 2 * * 1", Monday 02:00 local time) is
 // embedded in the daemon binary itself via [scheduler.NewSchedulerWithContext].
 // No separate launchd StartCalendarInterval is needed — launchd only needs
 // to keep the process alive.
@@ -61,7 +61,7 @@ func generateLaunchdPlist(binaryPath, dataDir string) string {
     </array>
 
     <!-- Keep the daemon alive so the embedded weekly benchmark scheduler
-         fires at the scheduled time (Sunday 02:00 local) even when no
+         fires at the scheduled time (Monday 02:00 local) even when no
          OpenCode client is open.  launchd will restart the process if it
          exits unexpectedly. -->
     <key>KeepAlive</key>
@@ -94,7 +94,7 @@ This command:
   5. Installs the OpenCode plugin (metronous.ts)
 
 The daemon is kept alive by launchd (KeepAlive=true), so the embedded weekly
-benchmark scheduler fires every Sunday at 02:00 local time even when no
+benchmark scheduler fires every Monday at 02:00 local time even when no
 OpenCode client is open.
 
 Re-running install is idempotent: if a previous version is loaded it will be
@@ -197,7 +197,7 @@ func runInstall() error {
 
 	fmt.Println("\nMetronous launchd agent installed and started.")
 	fmt.Printf("Use 'launchctl list %s' to check agent status.\n", launchAgentLabel)
-	fmt.Println("The weekly benchmark runs every Sunday at 02:00 local time via the embedded scheduler.")
+	fmt.Println("The weekly benchmark runs every Monday at 02:00 local time via the embedded scheduler.")
 	fmt.Println("All OpenCode instances will now use the shared daemon via 'metronous mcp'.")
 	return nil
 }

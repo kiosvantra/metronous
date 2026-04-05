@@ -323,7 +323,7 @@ Free models skip ROI and cost checks in the decision engine. They can still rece
 
 | Type | Trigger | Window |
 |------|---------|--------|
-| `weekly` | Sunday 02:00 local (cron `"0 0 2 * * 0"`) | Last 7 days from `now` |
+| `weekly` | Monday 02:00 local (cron `"0 0 2 * * 1"`) | Last 7 days from `now` |
 | `intraweek` | `F5` in **Benchmark Detailed** tab | From `last_run_at + 1ms` to `now` (falls back to 7 days if no prior run) |
 
 Both types use the same `Runner.run()` implementation and produce identical `BenchmarkRun` rows in `benchmark.db`, tagged with `run_kind`. Intraweek runs are useful for getting up-to-date metrics mid-week without waiting for the Sunday schedule.

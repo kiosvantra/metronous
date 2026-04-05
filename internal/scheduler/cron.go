@@ -4,7 +4,7 @@
 //
 // # Scheduling Architecture
 //
-// The weekly benchmark (schedule "0 0 2 * * 0", Sunday 02:00 local time) is
+// The weekly benchmark (schedule "0 0 2 * * 1", Monday 02:00 local time) is
 // embedded directly in the Metronous daemon runtime via [NewSchedulerWithContext].
 // This means the schedule runs as long as the daemon process is alive — no
 // separate OS timer (systemd.timer, launchd calendar interval, Windows Task
@@ -31,8 +31,8 @@ import (
 )
 
 const (
-	// DefaultWeeklySchedule runs at 2am every Sunday (using 6-field cron with seconds).
-	DefaultWeeklySchedule = "0 0 2 * * 0"
+	// DefaultWeeklySchedule runs at 2am every Monday (using 6-field cron with seconds).
+	DefaultWeeklySchedule = "0 0 2 * * 1"
 
 	// DefaultWindowDays is the default benchmark evaluation window.
 	DefaultWindowDays = 7
