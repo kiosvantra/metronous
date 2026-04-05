@@ -209,7 +209,11 @@ func (p *Program) run(ctx context.Context) error {
 		p.logger.Warn("failed to create artifact dir", zap.String("path", artifactDir), zap.Error(err))
 	}
 
-	benchRunner := runner.NewRunner(es, bs, engine, artifactDir, p.logger)
+	agentModelLookup := config.LoadDefaultAgentModelLookup(func(err error) {
+		p.logger.Warn("could not load opencode.json for agent model lookup, using heuristic fallback",
+			zap.Error(err))
+	})
+	benchRunner := runner.NewRunnerWithModelLookup(es, bs, engine, artifactDir, p.logger, agentModelLookup)
 	sched := scheduler.NewSchedulerWithContext(ctx, benchRunner, scheduler.DefaultWindowDays, p.logger)
 	if _, err := sched.RegisterWeeklyJob(scheduler.DefaultWeeklySchedule); err != nil {
 		// Non-fatal: the scheduler is a background enhancement; MCP server must still start.

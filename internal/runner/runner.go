@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/kiosvantra/metronous/internal/benchmark"
+	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/decision"
 	"github.com/kiosvantra/metronous/internal/store"
 )
@@ -23,9 +24,14 @@ type Runner struct {
 	engine         *decision.DecisionEngine
 	artifactDir    string
 	logger         *zap.Logger
+	agentModel     config.AgentModelLookup
 }
 
 // NewRunner creates a Runner with the required dependencies.
+// agentModel is used to look up each agent's currently configured model from
+// the opencode.json file at benchmark time. Pass config.NullAgentModelLookup
+// when the lookup is unavailable (e.g. in tests), in which case the runner falls
+// back to the window-based heuristic (most events in the 7-day window).
 func NewRunner(
 	eventStore store.EventStore,
 	benchmarkStore store.BenchmarkStore,
@@ -33,8 +39,26 @@ func NewRunner(
 	artifactDir string,
 	logger *zap.Logger,
 ) *Runner {
+	return NewRunnerWithModelLookup(eventStore, benchmarkStore, engine, artifactDir, logger, config.NullAgentModelLookup)
+}
+
+// NewRunnerWithModelLookup creates a Runner with an explicit AgentModelLookup.
+// Use this in production to pass a lookup backed by opencode.json so the active
+// model is determined from the agent's current configuration rather than event
+// frequency.
+func NewRunnerWithModelLookup(
+	eventStore store.EventStore,
+	benchmarkStore store.BenchmarkStore,
+	engine *decision.DecisionEngine,
+	artifactDir string,
+	logger *zap.Logger,
+	agentModel config.AgentModelLookup,
+) *Runner {
 	if logger == nil {
 		logger = zap.NewNop()
+	}
+	if agentModel == nil {
+		agentModel = config.NullAgentModelLookup
 	}
 	return &Runner{
 		eventStore:     eventStore,
@@ -42,18 +66,20 @@ func NewRunner(
 		engine:         engine,
 		artifactDir:    artifactDir,
 		logger:         logger,
+		agentModel:     agentModel,
 	}
 }
 
 // agentResult bundles the verdict and the pending BenchmarkRun for a single agent.
 // The run is not yet persisted when this struct is returned — the ArtifactPath
 // field is filled in by RunWeekly after the consolidated artifact is written.
-// CurrentModel is the model with the most events during the evaluation window —
-// used to determine which model should be marked as 'active' vs 'superseded'.
+// CurrentModel is the agent's currently configured model (from opencode.json when
+// available, falling back to the model with the most events in the evaluation
+// window). It determines which model is marked 'active' vs 'superseded'.
 type agentResult struct {
 	verdict      decision.Verdict
 	run          store.BenchmarkRun
-	currentModel string // Model with most events in the window (the "active" one)
+	currentModel string // Currently configured model — marks the active run
 }
 
 // RunWeekly executes the scheduled weekly benchmark pipeline.
@@ -146,9 +172,10 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 	}
 
 	// Persist each BenchmarkRun with the artifact path now populated.
-	// For intraweek runs, mark only the current model (most frequent) as 'active',
-	// and supersede others. For weekly runs, all are marked active initially,
-	// and cross-cycle superseding is handled separately.
+	// For intraweek runs, mark only the currently configured model as 'active'
+	// (from opencode.json, or window heuristic as fallback) and supersede others.
+	// For weekly runs, all models are initially active (historical superseding is
+	// applied at startup via migrations in the benchmark store).
 	for i := range results {
 		results[i].run.ArtifactPath = artifactPath
 		if kind == store.RunKindIntraweek {
@@ -228,17 +255,37 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 		return nil, nil
 	}
 
-	// 3. Determine the current model from WINDOW events only (start→end).
-	// Using the full historical count inflates old models that the user has already
-	// switched away from. The window represents recent usage — whichever model has
-	// the most events there is the one the agent is currently configured for.
-	// Fall back to all-time counts only if the window contains no usable events.
+	// 3. Determine the current (active) model for this agent.
+	//
+	// Primary source: opencode.json agent[agentID].model — this is the model the
+	// agent is actually configured to use right now. Strip provider prefixes so it
+	// matches the normalized model names used throughout the benchmark pipeline.
+	//
+	// Fallback (agent not in opencode.json, e.g. DB-only agents): use the model
+	// with the most non-error events in the 7-day evaluation window. If the window
+	// is empty, fall back further to the most-recent event across all history.
+
+	var currentModel string
+
+	if rawConfigModel, ok := r.agentModel(agentID); ok {
+		// Config source: normalize to strip provider prefix (e.g. "opencode/claude-sonnet-4-6"
+		// → "claude-sonnet-4-6") so it aligns with the normalized keys in modelEvents.
+		currentModel = store.NormalizeModelName(rawConfigModel)
+		r.logger.Debug("active model from opencode.json config",
+			zap.String("agent_id", agentID),
+			zap.String("raw_config_model", rawConfigModel),
+			zap.String("normalized_model", currentModel),
+		)
+	}
+
+	// Fetch window events regardless — needed for raw-model preservation even when
+	// the config source resolves currentModel.
 	windowEvents, err := benchmark.FetchEventsForWindow(ctx, r.eventStore, agentID, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("fetch window events for %q: %w", agentID, err)
 	}
 
-	// Group window events by normalized model (counts for currentModel determination)
+	// Group window events by normalized model (counts for heuristic fallback)
 	// and by raw model (for provider-prefix preservation in dominantRawModel).
 	// Pre-grouping here avoids O(models × windowEvents) inner-loop scans later.
 	windowModelCounts := make(map[string]int)           // normalizedModel → event count
@@ -255,16 +302,23 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 		windowRawByModel[normalized][e.Model]++
 	}
 
-	// Pick the model with the most window events. Tie-break alphabetically (deterministic).
-	var currentModel string
-	var maxEvents int
-	for model, cnt := range windowModelCounts {
-		if cnt > maxEvents || (cnt == maxEvents && model < currentModel) {
-			currentModel = model
-			maxEvents = cnt
+	if currentModel == "" {
+		// Heuristic fallback: pick the model with the most window events.
+		// Tie-break alphabetically for determinism.
+		var maxEvents int
+		for model, cnt := range windowModelCounts {
+			if cnt > maxEvents || (cnt == maxEvents && model < currentModel) {
+				currentModel = model
+				maxEvents = cnt
+			}
 		}
+		r.logger.Debug("active model from window heuristic (agent not in opencode.json)",
+			zap.String("agent_id", agentID),
+			zap.String("current_model", currentModel),
+		)
 	}
-	// If no window events, fall back to most-recent event across all history.
+
+	// If still empty (no window events at all), fall back to most-recent event across all history.
 	if currentModel == "" {
 		var latestTs time.Time
 		for _, e := range events {

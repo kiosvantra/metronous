@@ -60,8 +60,11 @@ func main() {
 	}
 	engine := decision.NewDecisionEngine(thresholds)
 
-	// Create runner
-	r := runner.NewRunner(eventStore, benchmarkStore, engine, dataDir, logger)
+	// Create runner with opencode.json-backed active model lookup.
+	agentModelLookup := config.LoadDefaultAgentModelLookup(func(err error) {
+		log.Printf("⚠️  Could not load opencode.json (%v), using heuristic fallback for active model", err)
+	})
+	r := runner.NewRunnerWithModelLookup(eventStore, benchmarkStore, engine, dataDir, logger, agentModelLookup)
 
 	// Run benchmark with configurable window (default 7 days)
 	windowDays := 7

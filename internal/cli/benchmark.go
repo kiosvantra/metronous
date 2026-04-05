@@ -78,7 +78,10 @@ func runBenchmarkRun(cmd *cobra.Command, args []string) error {
 	}
 
 	engine := decision.NewDecisionEngine(thresholds)
-	r := runner.NewRunner(eventStore, benchmarkStore, engine, dataDir, logger)
+	agentModelLookup := config.LoadDefaultAgentModelLookup(func(err error) {
+		fmt.Fprintf(os.Stderr, "Warning: could not load opencode.json (%v), using heuristic fallback for active model\n", err)
+	})
+	r := runner.NewRunnerWithModelLookup(eventStore, benchmarkStore, engine, dataDir, logger, agentModelLookup)
 
 	fmt.Println("Running benchmark...")
 	fmt.Printf("Data directory: %s\n\n", dataDir)

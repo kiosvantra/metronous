@@ -152,7 +152,8 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 			thresholds = &defaults
 		}
 		engine := decision.NewDecisionEngine(thresholds)
-		iwr = runner.NewRunner(es, bs, engine, dataDir, nil)
+		agentModelLookup := config.LoadDefaultAgentModelLookup(nil)
+		iwr = runner.NewRunnerWithModelLookup(es, bs, engine, dataDir, nil, agentModelLookup)
 	}
 
 	return AppModel{

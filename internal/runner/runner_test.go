@@ -14,6 +14,15 @@ import (
 	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
 
+// makeModelLookup returns an AgentModelLookup that maps each agentID to a model
+// from the provided map. Agents not in the map return not-found.
+func makeModelLookup(m map[string]string) config.AgentModelLookup {
+	return func(agentID string) (string, bool) {
+		model, ok := m[agentID]
+		return model, ok
+	}
+}
+
 // setupStores creates in-memory event and benchmark stores for testing.
 func setupStores(t *testing.T) (store.EventStore, store.BenchmarkStore) {
 	t.Helper()
@@ -488,5 +497,149 @@ func TestRunnerIntraweekFallbackWhenNoHistory(t *testing.T) {
 	expectedStart := beforeRun.Add(-7 * 24 * time.Hour)
 	if diff := got.WindowStart.Sub(expectedStart).Abs(); diff > 2*time.Second {
 		t.Errorf("WindowStart fallback: got %v, expected near %v (diff=%v)", got.WindowStart, expectedStart, diff)
+	}
+}
+
+// ─── Config-based active model tests ────────────────────────────────────────
+
+// TestRunnerIntraweekActiveModelFromConfig verifies that when an AgentModelLookup
+// is provided, the model returned by the lookup is marked 'active', even when a
+// different model has more events in the window.
+func TestRunnerIntraweekActiveModelFromConfig(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	// The lookup says "config-model" is the currently configured model.
+	lookup := makeModelLookup(map[string]string{
+		"config-agent": "opencode/config-model",
+	})
+	r := runner.NewRunnerWithModelLookup(es, bs, engine, tmpDir, zap.NewNop(), lookup)
+
+	// Insert 200 events for "old-model" (more events) and 60 for "config-model".
+	// Without the fix the heuristic would pick "old-model" as active.
+	insertEventsWithModel(t, ctx, es, "config-agent", 200, "complete", "old-model")
+	insertEventsWithModel(t, ctx, es, "config-agent", 60, "complete", "opencode/config-model")
+
+	if err := r.RunIntraweek(ctx, 7); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "config-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("expected at least one run")
+	}
+
+	// Exactly one run should be active — the one for "config-model".
+	var activeRun *store.BenchmarkRun
+	for i := range runs {
+		if runs[i].Status == store.RunStatusActive {
+			if activeRun != nil {
+				t.Errorf("found more than one active run (models: %q and %q)", activeRun.Model, runs[i].Model)
+			}
+			activeRun = &runs[i]
+		}
+	}
+	if activeRun == nil {
+		t.Fatal("no active run found")
+	}
+	// Config lookup normalizes "opencode/config-model" → "config-model".
+	if activeRun.Model != "config-model" {
+		t.Errorf("active run model: got %q, want %q (config lookup should override event-count heuristic)", activeRun.Model, "config-model")
+	}
+}
+
+// TestRunnerIntraweekActiveModelFallbackWhenNotInConfig verifies that when an
+// agent is NOT in the AgentModelLookup, the runner falls back to the window
+// heuristic (most events in the 7-day window).
+func TestRunnerIntraweekActiveModelFallbackWhenNotInConfig(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	// Lookup has no entry for "fallback-agent".
+	lookup := makeModelLookup(map[string]string{
+		"other-agent": "opencode/some-model",
+	})
+	r := runner.NewRunnerWithModelLookup(es, bs, engine, tmpDir, zap.NewNop(), lookup)
+
+	now := time.Now().UTC()
+	windowDays := 7
+
+	// Insert 500 old events for "old-model" (outside window) and 60 recent events
+	// for "recent-model" (inside window). Heuristic should pick "recent-model".
+	oldBase := now.Add(-time.Duration(windowDays+2) * 24 * time.Hour)
+	insertEventsWithModelAt(t, ctx, es, "fallback-agent", 500, "complete", "old-model", oldBase)
+	insertEventsWithModelAt(t, ctx, es, "fallback-agent", 60, "complete", "recent-model", now)
+
+	if err := r.RunIntraweek(ctx, windowDays); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "fallback-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+
+	var activeRun *store.BenchmarkRun
+	for i := range runs {
+		if runs[i].Status == store.RunStatusActive {
+			activeRun = &runs[i]
+			break
+		}
+	}
+	if activeRun == nil {
+		t.Fatal("no active run found")
+	}
+	if activeRun.Model != "recent-model" {
+		t.Errorf("active run model: got %q, want %q (heuristic fallback should pick window model)", activeRun.Model, "recent-model")
+	}
+}
+
+// TestRunnerWeeklyAllRunsActiveWhenConfigProvidesModel verifies that for weekly
+// runs, all models are always marked active (weekly runs never mark each other
+// superseded in the same cycle — that's handled by cross-cycle logic).
+// The config-based currentModel only affects intraweek runs.
+func TestRunnerWeeklyAllRunsActiveWhenConfigProvidesModel(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+
+	// Config says "model-a" is current, but for weekly runs both should be active.
+	lookup := makeModelLookup(map[string]string{
+		"weekly-agent": "model-a",
+	})
+	r := runner.NewRunnerWithModelLookup(es, bs, engine, tmpDir, zap.NewNop(), lookup)
+
+	insertEventsWithModel(t, ctx, es, "weekly-agent", 60, "complete", "model-a")
+	insertEventsWithModel(t, ctx, es, "weekly-agent", 60, "complete", "model-b")
+
+	if err := r.RunWeekly(ctx, 7); err != nil {
+		t.Fatalf("RunWeekly: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "weekly-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(runs))
+	}
+	for _, run := range runs {
+		if run.Status != store.RunStatusActive {
+			t.Errorf("weekly run for model %q: got status %q, want active (weekly runs are always initially active)", run.Model, run.Status)
+		}
 	}
 }
