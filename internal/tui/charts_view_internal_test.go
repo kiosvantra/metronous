@@ -72,6 +72,9 @@ func (m mockChartsBenchmarkStore) QueryModelSummaries(context.Context) ([]store.
 func (m mockChartsBenchmarkStore) QueryRunsInWindow(context.Context, time.Time, time.Time) ([]store.BenchmarkRun, error) {
 	return m.runs, nil
 }
+func (m mockChartsBenchmarkStore) MarkSupersededRuns(context.Context, string, time.Time, string, time.Time, time.Time) error {
+	return nil
+}
 func (m mockChartsBenchmarkStore) Close() error { return nil }
 
 func TestChartsFetchRanksMonthlyCards(t *testing.T) {

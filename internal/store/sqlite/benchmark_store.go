@@ -69,6 +69,9 @@ const addAvgTurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_turn_ms RE
 // addP95TurnMsColumn adds the p95_turn_ms metric column (complete events only).
 const addP95TurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN p95_turn_ms REAL NOT NULL DEFAULT 0.0`
 
+// addRunStatusColumn adds the run_status column to track active vs superseded runs.
+const addRunStatusColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_status TEXT NOT NULL DEFAULT 'active'`
+
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
 type BenchmarkStore struct {
 	writeDB *sql.DB
@@ -146,6 +149,7 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 		{addAvgCompletionTokensColumn, "avg_completion_tokens"},
 		{addAvgTurnMsColumn, "avg_turn_ms"},
 		{addP95TurnMsColumn, "p95_turn_ms"},
+		{addRunStatusColumn, "run_status"},
 	}
 	for _, m := range migrations {
 		if err := applyAddColumnMigration(ctx, db, m.stmt, m.colName); err != nil {
@@ -157,6 +161,8 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 
 // SaveRun persists a benchmark run. If run.ID is empty, a UUID is generated.
 // If RunKind is empty it defaults to RunKindWeekly for backward compatibility.
+// SaveRun always inserts run_status='active'; run.Status is not used here.
+// Status transitions are handled only by MarkSupersededRuns.
 func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) error {
 	if run.ID == "" {
 		run.ID = uuid.New().String()
@@ -172,14 +178,14 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
 			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 			run_kind, window_start, window_end,
-			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms
+			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?,
-			?, ?, ?, ?
+			?, ?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -209,6 +215,7 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		run.AvgCompletionTokens,
 		run.AvgTurnMs,
 		run.P95TurnMs,
+		string(store.RunStatusActive),
 	)
 	if err != nil {
 		return fmt.Errorf("save benchmark run: %w", err)
@@ -243,7 +250,7 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -285,7 +292,7 @@ func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQu
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -339,7 +346,7 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -503,6 +510,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			runKind       string
 			windowStartMs int64
 			windowEndMs   int64
+			runStatus     string
 			run           store.BenchmarkRun
 		)
 		err := rows.Scan(
@@ -532,6 +540,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&run.AvgCompletionTokens,
 			&run.AvgTurnMs,
 			&run.P95TurnMs,
+			&runStatus,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan benchmark run row: %w", err)
@@ -544,6 +553,10 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 		}
 		run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 		run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+		run.Status = store.RunStatus(runStatus)
+		if run.Status == "" {
+			run.Status = store.RunStatusActive
+		}
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
@@ -565,6 +578,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		runKind       string
 		windowStartMs int64
 		windowEndMs   int64
+		runStatus     string
 		run           store.BenchmarkRun
 	)
 	err := row.Scan(
@@ -594,6 +608,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&run.AvgCompletionTokens,
 		&run.AvgTurnMs,
 		&run.P95TurnMs,
+		&runStatus,
 	)
 	if err != nil {
 		return nil, err
@@ -606,6 +621,10 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	}
 	run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 	run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+	run.Status = store.RunStatus(runStatus)
+	if run.Status == "" {
+		run.Status = store.RunStatusActive
+	}
 	return &run, nil
 }
 
@@ -674,7 +693,7 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
 		FROM benchmark_runs
 		WHERE run_at >= ? AND run_at < ?
 		ORDER BY run_at DESC`
@@ -687,15 +706,17 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 	return scanBenchmarkRuns(rows)
 }
 
-// GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
+// GetVerdictTrend returns the last N verdicts for the given agent, ordered oldest first.
+// Superseded runs are represented as "CHANGED" in the trend.
 // Returns an empty slice if the agent has no runs or fewer than requested.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	if weeks <= 0 {
 		return nil, nil
 	}
 	// Fetch newest-first, then reverse for oldest-first order.
-	const q = `SELECT verdict FROM benchmark_runs
+	const q = `SELECT verdict, run_status FROM benchmark_runs
 		WHERE agent_id = ?
+			AND (run_kind = 'weekly' OR run_status = 'superseded')
 		ORDER BY run_at DESC
 		LIMIT ?`
 
@@ -708,10 +729,16 @@ func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, w
 	var verdicts []string
 	for rows.Next() {
 		var v string
-		if err := rows.Scan(&v); err != nil {
+		var status string
+		if err := rows.Scan(&v, &status); err != nil {
 			return nil, fmt.Errorf("scan verdict: %w", err)
 		}
-		verdicts = append(verdicts, v)
+		// Superseded runs show as "CHANGED" in the trend.
+		if status == string(store.RunStatusSuperseded) {
+			verdicts = append(verdicts, "CHANGED")
+		} else {
+			verdicts = append(verdicts, v)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate verdict rows: %w", err)
@@ -722,4 +749,41 @@ func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, w
 		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
 	}
 	return verdicts, nil
+}
+
+// MarkSupersededRuns marks older intraweek runs as superseded when a new model is used
+// in the same cycle. It updates runs where:
+// - agent_id = agentID
+// - run_kind = 'intraweek'
+// - run_at < newRunAt
+// - model != newModel
+// - run_at >= cycleStart and run_at < cycleEnd
+// Setting run_status = 'superseded'. This is called only for intraweek runs after
+// inserting new runs. Weekly runs are never marked superseded.
+func (bs *BenchmarkStore) MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error {
+	const q = `
+		UPDATE benchmark_runs
+		SET run_status = ?
+		WHERE agent_id = ? AND run_kind = ? AND run_at < ? AND model != ?
+		AND run_at >= ? AND run_at < ? AND run_status != ?
+	`
+
+	newRunMs := newRunAt.UTC().UnixMilli()
+	cycleStartMs := cycleStart.UTC().UnixMilli()
+	cycleEndMs := cycleEnd.UTC().UnixMilli()
+
+	_, err := bs.writeDB.ExecContext(ctx, q,
+		string(store.RunStatusSuperseded),
+		agentID,
+		string(store.RunKindIntraweek),
+		newRunMs,
+		newModel,
+		cycleStartMs,
+		cycleEndMs,
+		string(store.RunStatusSuperseded),
+	)
+	if err != nil {
+		return fmt.Errorf("mark superseded runs for %s: %w", agentID, err)
+	}
+	return nil
 }
