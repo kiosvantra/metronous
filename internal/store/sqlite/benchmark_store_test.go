@@ -425,6 +425,86 @@ func TestGetVerdictTrend(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("superseded runs excluded from trend — only active runs appear", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Insert 3 runs: 2 active (KEEP), 1 superseded (SWITCH).
+		// The superseded run should NOT appear in the trend.
+		base := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Millisecond)
+		r1 := sampleRun("active-only-agent", store.VerdictKeep)
+		r1.RunAt = base
+		r1.Status = store.RunStatusActive
+		r2 := sampleRun("active-only-agent", store.VerdictSwitch)
+		r2.RunAt = base.Add(24 * time.Hour)
+		r2.Status = store.RunStatusSuperseded // model change — should NOT appear
+		r3 := sampleRun("active-only-agent", store.VerdictKeep)
+		r3.RunAt = base.Add(48 * time.Hour)
+		r3.Status = store.RunStatusActive
+		for _, r := range []store.BenchmarkRun{r1, r2, r3} {
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+		}
+		trend, err := bs.GetVerdictTrend(ctx, "active-only-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		// Should contain only the 2 active KEEP runs (oldest first), no CHANGED.
+		if len(trend) != 2 {
+			t.Fatalf("expected 2 entries (only active runs), got %d: %v", len(trend), trend)
+		}
+		for _, v := range trend {
+			if v == "CHANGED" {
+				t.Errorf("CHANGED should not appear when superseded runs are excluded: %v", trend)
+			}
+		}
+	})
+
+	t.Run("CHANGED inserted when active model switches between runs", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Three active runs: model-a KEEP, then model-b KEEP (switch), then model-b KEEP.
+		base := time.Now().Add(-96 * time.Hour).UTC().Truncate(time.Millisecond)
+
+		r1 := sampleRun("model-switch-agent", store.VerdictKeep)
+		r1.Model = "model-a"
+		r1.RunAt = base
+		r1.Status = store.RunStatusActive
+
+		r2 := sampleRun("model-switch-agent", store.VerdictKeep)
+		r2.Model = "model-b"
+		r2.RunAt = base.Add(48 * time.Hour)
+		r2.Status = store.RunStatusActive
+
+		r3 := sampleRun("model-switch-agent", store.VerdictKeep)
+		r3.Model = "model-b"
+		r3.RunAt = base.Add(96 * time.Hour)
+		r3.Status = store.RunStatusActive
+
+		for _, r := range []store.BenchmarkRun{r1, r2, r3} {
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+		}
+		trend, err := bs.GetVerdictTrend(ctx, "model-switch-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		// Expected: KEEP (model-a), CHANGED, KEEP (model-b), KEEP (model-b).
+		want := []string{
+			string(store.VerdictKeep),
+			"CHANGED",
+			string(store.VerdictKeep),
+			string(store.VerdictKeep),
+		}
+		if len(trend) != len(want) {
+			t.Fatalf("expected %d entries, got %d: %v", len(want), len(trend), trend)
+		}
+		for i, w := range want {
+			if trend[i] != w {
+				t.Errorf("trend[%d]: got %q, want %q", i, trend[i], w)
+			}
+		}
+	})
 }
 
 // TestQueryRunsPagination verifies QueryRuns supports offset+limit sliding-window pagination.

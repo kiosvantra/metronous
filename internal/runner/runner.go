@@ -228,15 +228,53 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 		return nil, nil
 	}
 
-	// 3. Determine the current model (the one with the most events — indicates active usage).
-	// This is used to mark only one model per agent as 'active' in an intraweek cycle.
-	// In case of ties, pick the model that comes first alphabetically (deterministic).
+	// 3. Determine the current model from WINDOW events only (start→end).
+	// Using the full historical count inflates old models that the user has already
+	// switched away from. The window represents recent usage — whichever model has
+	// the most events there is the one the agent is currently configured for.
+	// Fall back to all-time counts only if the window contains no usable events.
+	windowEvents, err := benchmark.FetchEventsForWindow(ctx, r.eventStore, agentID, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("fetch window events for %q: %w", agentID, err)
+	}
+
+	// Group window events by normalized model (counts for currentModel determination)
+	// and by raw model (for provider-prefix preservation in dominantRawModel).
+	// Pre-grouping here avoids O(models × windowEvents) inner-loop scans later.
+	windowModelCounts := make(map[string]int)           // normalizedModel → event count
+	windowRawByModel := make(map[string]map[string]int) // normalizedModel → rawModel → count
+	for _, e := range windowEvents {
+		if e.EventType == "error" {
+			continue
+		}
+		normalized := store.NormalizeModelName(e.Model)
+		windowModelCounts[normalized]++
+		if windowRawByModel[normalized] == nil {
+			windowRawByModel[normalized] = make(map[string]int)
+		}
+		windowRawByModel[normalized][e.Model]++
+	}
+
+	// Pick the model with the most window events. Tie-break alphabetically (deterministic).
 	var currentModel string
 	var maxEvents int
-	for model, evts := range modelEvents {
-		if len(evts) > maxEvents || (len(evts) == maxEvents && model < currentModel) {
+	for model, cnt := range windowModelCounts {
+		if cnt > maxEvents || (cnt == maxEvents && model < currentModel) {
 			currentModel = model
-			maxEvents = len(evts)
+			maxEvents = cnt
+		}
+	}
+	// If no window events, fall back to most-recent event across all history.
+	if currentModel == "" {
+		var latestTs time.Time
+		for _, e := range events {
+			if e.EventType == "error" {
+				continue
+			}
+			if e.Timestamp.After(latestTs) {
+				latestTs = e.Timestamp
+				currentModel = store.NormalizeModelName(e.Model)
+			}
 		}
 	}
 
@@ -262,17 +300,22 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 			}
 		}
 
-		// Compute dominant raw model from events with this normalized model.
-		// This preserves provider context (e.g., opencode/claude-sonnet vs anthropic/claude-sonnet).
-		rawModelCounts := make(map[string]int)
-		for _, e := range modelEvents[model] {
-			raw := e.Model // raw model name with provider prefix
-			rawModelCounts[raw]++
+		// Compute dominant raw model from the pre-grouped window raw counts.
+		// Window events are preferred so we capture the current provider prefix
+		// (e.g. opencode/claude-sonnet-4-6 rather than the old unprefixed form).
+		// Fall back to all-time events when no window events exist for this model.
+		rawModelCounts := windowRawByModel[model]
+		if len(rawModelCounts) == 0 {
+			// No window events for this model — fall back to all-time events.
+			rawModelCounts = make(map[string]int)
+			for _, e := range modelEvents[model] {
+				rawModelCounts[e.Model]++
+			}
 		}
 		var dominantRawModel string
 		var maxCount int
 		for raw, count := range rawModelCounts {
-			if count > maxCount {
+			if count > maxCount || (count == maxCount && raw > dominantRawModel) {
 				dominantRawModel = raw
 				maxCount = count
 			}

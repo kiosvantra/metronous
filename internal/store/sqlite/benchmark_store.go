@@ -783,47 +783,79 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 }
 
 // GetVerdictTrend returns the last N verdicts for the given agent, ordered oldest first.
-// Superseded runs are represented as "CHANGED" in the trend.
-// Returns an empty slice if the agent has no runs or fewer than requested.
+// Each entry represents one benchmark cycle. CHANGED is inserted when consecutive
+// active runs use different models (indicating a real model switch between cycles).
+//
+// Only active runs are included so the trend reflects genuine quality assessments
+// (KEEP / SWITCH / URGENT_SWITCH / INSUFFICIENT_DATA) rather than repeating CHANGED
+// for every entry produced by the one-time historical supersede migration.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	if weeks <= 0 {
 		return nil, nil
 	}
-	// Fetch newest-first, then reverse for oldest-first order.
-	const q = `SELECT verdict, run_status FROM benchmark_runs
-		WHERE agent_id = ?
-			AND (run_kind = 'weekly' OR run_status = 'superseded')
+
+	// Look back further than `weeks` to compensate for CHANGED entries that expand
+	// the slice: each model transition inserts an extra entry.
+	lookback := weeks * 6
+	if lookback < 20 {
+		lookback = 20
+	}
+
+	// Select active runs only, newest-first, so we pick one representative row
+	// per benchmark batch (same run_at = same pass). Multiple models can share
+	// the same run_at; ORDER BY run_at DESC gives the newest first, and we keep
+	// the first occurrence per run_at group (= the active model).
+	const q = `
+		SELECT verdict, model
+		FROM benchmark_runs
+		WHERE agent_id = ? AND run_status = 'active'
 		ORDER BY run_at DESC
 		LIMIT ?`
 
-	rows, err := bs.readDB.QueryContext(ctx, q, agentID, weeks)
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, lookback)
 	if err != nil {
 		return nil, fmt.Errorf("get verdict trend for %q: %w", agentID, err)
 	}
 	defer rows.Close()
 
-	var verdicts []string
+	type batchEntry struct {
+		verdict string
+		model   string
+	}
+	var batches []batchEntry
 	for rows.Next() {
-		var v string
-		var status string
-		if err := rows.Scan(&v, &status); err != nil {
-			return nil, fmt.Errorf("scan verdict: %w", err)
+		var e batchEntry
+		if err := rows.Scan(&e.verdict, &e.model); err != nil {
+			return nil, fmt.Errorf("scan verdict trend row: %w", err)
 		}
-		// Superseded runs show as "CHANGED" in the trend.
-		if status == string(store.RunStatusSuperseded) {
-			verdicts = append(verdicts, "CHANGED")
-		} else {
-			verdicts = append(verdicts, v)
-		}
+		batches = append(batches, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate verdict rows: %w", err)
+		return nil, fmt.Errorf("iterate verdict trend rows: %w", err)
 	}
 
-	// Reverse to get oldest-first order.
-	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
-		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
+	// batches is newest-first. Reverse to oldest-first for display.
+	for i, j := 0, len(batches)-1; i < j; i, j = i+1, j-1 {
+		batches[i], batches[j] = batches[j], batches[i]
 	}
+
+	// Trim to the last N entries (oldest-first window).
+	if len(batches) > weeks {
+		batches = batches[len(batches)-weeks:]
+	}
+
+	// Build the final trend, inserting CHANGED between consecutive entries that
+	// used different models (genuine model switch between benchmark cycles).
+	var verdicts []string
+	var prevModel string
+	for _, b := range batches {
+		if prevModel != "" && b.model != prevModel {
+			verdicts = append(verdicts, "CHANGED")
+		}
+		verdicts = append(verdicts, b.verdict)
+		prevModel = b.model
+	}
+
 	return verdicts, nil
 }
 

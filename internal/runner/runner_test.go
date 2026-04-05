@@ -41,6 +41,12 @@ func insertEvents(t *testing.T, ctx context.Context, es store.EventStore, agentI
 // insertEventsWithModel inserts n events for the given agent and model.
 func insertEventsWithModel(t *testing.T, ctx context.Context, es store.EventStore, agentID string, n int, eventType, model string) {
 	t.Helper()
+	insertEventsWithModelAt(t, ctx, es, agentID, n, eventType, model, time.Now())
+}
+
+// insertEventsWithModelAt inserts n events for the given agent and model, starting at baseTime.
+func insertEventsWithModelAt(t *testing.T, ctx context.Context, es store.EventStore, agentID string, n int, eventType, model string, baseTime time.Time) {
+	t.Helper()
 	dur := 1000
 	cost := 0.01
 	quality := 0.9
@@ -53,7 +59,7 @@ func insertEventsWithModel(t *testing.T, ctx context.Context, es store.EventStor
 			SessionID:    "session-" + model,
 			EventType:    eventType,
 			Model:        model,
-			Timestamp:    time.Now().Add(-time.Duration(i) * time.Hour).UTC(),
+			Timestamp:    baseTime.Add(-time.Duration(i) * time.Hour).UTC(),
 			DurationMs:   &dur,
 			CostUSD:      &cost,
 			QualityScore: &quality,
@@ -396,6 +402,57 @@ func TestRunnerNormalizesModelPrefixes(t *testing.T) {
 	}
 	if runs[0].SampleSize != 70 {
 		t.Errorf("expected 70 samples (merged), got %d", runs[0].SampleSize)
+	}
+}
+
+// TestRunnerIntraweekActiveModelFromWindowNotAllTime verifies that the active model is
+// determined from WINDOW events (recent 7 days), not all historical events.
+// This ensures that after a model switch the new model is marked active, even if the
+// old model has many more total events in history.
+func TestRunnerIntraweekActiveModelFromWindowNotAllTime(t *testing.T) {
+	ctx := context.Background()
+	es, bs := setupStores(t)
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	now := time.Now().UTC()
+	windowDays := 7
+
+	// Insert 500 old events for "old-model" (outside the 7-day window) — should NOT influence currentModel.
+	oldBase := now.Add(-time.Duration(windowDays+2) * 24 * time.Hour)
+	insertEventsWithModelAt(t, ctx, es, "switch-agent", 500, "complete", "old-model", oldBase)
+
+	// Insert 60 recent events for "new-model" (within the 7-day window) — should be currentModel.
+	insertEventsWithModelAt(t, ctx, es, "switch-agent", 60, "complete", "opencode/new-model", now)
+
+	if err := r.RunIntraweek(ctx, windowDays); err != nil {
+		t.Fatalf("RunIntraweek: %v", err)
+	}
+
+	runs, err := bs.GetRuns(ctx, "switch-agent", 10)
+	if err != nil {
+		t.Fatalf("GetRuns: %v", err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("expected at least one run")
+	}
+
+	// Find the active run.
+	var activeRun *store.BenchmarkRun
+	for i := range runs {
+		if runs[i].Status == store.RunStatusActive {
+			activeRun = &runs[i]
+			break
+		}
+	}
+	if activeRun == nil {
+		t.Fatal("no active run found — expected new-model to be active")
+	}
+	if activeRun.Model != "new-model" {
+		t.Errorf("active run Model: got %q, want %q (window-based currentModel should win over all-time count)", activeRun.Model, "new-model")
 	}
 }
 
