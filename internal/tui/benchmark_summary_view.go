@@ -29,9 +29,11 @@ type BenchmarkSummaryDataMsg struct {
 type summaryRow struct {
 	AgentID      string
 	Model        string
-	Runs         int     // total benchmark runs
-	AvgAccuracy  float64 // weighted average accuracy
-	AvgTurnMs    float64 // weighted average turn duration (complete events only)
+	RawModel     string  // un-normalized model name with provider prefix (matches detailed view)
+	IsActive     bool    // true when this model has run_status='active' in its most recent run
+	Runs         int     // total benchmark runs (weekly only)
+	AvgAccuracy  float64 // weighted average accuracy (weekly runs only)
+	AvgTurnMs    float64 // weighted average turn duration (weekly runs only)
 	TotalCostUSD float64 // cost from the run used for LastVerdict
 	HealthScore  float64 // composite 0-100 (higher is better)
 	LastVerdict  store.VerdictType
@@ -208,9 +210,19 @@ func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.C
 }
 
 // fetchSummary returns a command that queries the BenchmarkStore and builds summary rows
-// aggregated per (agent, model) pair across all stored runs.
-// It fetches up to 200 recent runs per agent (covering many weeks) and computes
-// weighted averages by SampleSize.
+// aggregated per (agent, model) pair.
+//
+// Aggregation scope: only weekly runs (RunKind == RunKindWeekly) are used for metric
+// averages (accuracy, response time, ROI). This is consistent with the trend logic in
+// the detailed view which also uses weekly verdicts. Intraweek runs are noisier (smaller
+// windows) and including them would skew averages. The run count (Runs field) also counts
+// weekly-only runs.
+//
+// Active model marker: matches the detailed view — the model whose most recent run has
+// run_status='active' is marked with IsActive=true. Only one model per agent is active.
+//
+// Model display: uses RawModel (with provider prefix) when available, matching the
+// detailed view's formatBenchmarkRow logic.
 func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 	if m.bs == nil {
 		return nil
@@ -224,18 +236,21 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			return BenchmarkSummaryDataMsg{Err: err}
 		}
 
-		// Aggregate per (agent, model) pair.
+		// Aggregate per (agent, normalized-model) pair.
 		type key struct{ agent, model string }
 		type agg struct {
-			runs         int
-			totalSamples int
-			sumAccuracy  float64
-			sumP95       float64
-			sumROI       float64
+			rawModel     string  // most recent RawModel for display
+			runs         int     // weekly-only run count
+			totalSamples int     // weighted sum denominator (weekly, non-insufficient)
+			sumAccuracy  float64 // weighted accuracy sum
+			sumP95       float64 // weighted turn ms sum
+			sumROI       float64 // weighted ROI sum
 			roiSamples   int
 			lastCostUSD  float64
 			lastVerdict  store.VerdictType
-			lastRunAt    time.Time
+			lastRunAt    time.Time       // most recent NON-INSUFFICIENT run (for verdict/cost display)
+			mostRecentAt time.Time       // actual most recent run (for active-model tiebreaking)
+			lastStatus   store.RunStatus // status of the actual most recent run for this model
 			// Fallback metrics from the most recent run (used when all runs are
 			// INSUFFICIENT_DATA so we don't display misleading 0% accuracy).
 			lastAccuracy float64
@@ -261,12 +276,16 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 					aggMap[k] = a
 				}
 
+				// Metric averages use weekly runs only — intraweek runs are excluded
+				// because their shorter windows produce noisier accuracy estimates.
+				isWeekly := r.RunKind == store.RunKindWeekly || r.RunKind == ""
+
 				// INSUFFICIENT_DATA runs are excluded from weighted metric averages
 				// because they have too few samples to be statistically meaningful.
 				// However we keep their raw metrics as a fallback so that pairs
 				// where ALL runs are insufficient don't show a misleading 0% accuracy.
 				isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
-				if !isInsufficient {
+				if isWeekly && !isInsufficient {
 					samples := r.SampleSize
 					if samples <= 0 {
 						samples = 1
@@ -286,18 +305,19 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 						a.roiSamples += samples
 					}
 				}
-				a.runs++
+				if isWeekly {
+					a.runs++
+				}
 
-				// Always track the most recent run's raw metrics as fallback.
-				if r.RunAt.After(a.lastRunAt) || a.lastRunAt.IsZero() {
-					if !isInsufficient {
-						a.lastRunAt = r.RunAt
-						a.lastVerdict = r.Verdict
-						a.lastCostUSD = r.TotalCostUSD
-					} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
-						a.lastRunAt = r.RunAt
-						a.lastVerdict = r.Verdict
-						a.lastCostUSD = r.TotalCostUSD
+				// Track the actual most recent run for status and RawModel (all runs,
+				// not just weekly), because run_status='active' is set on the most recent
+				// run regardless of its kind.
+				if r.RunAt.After(a.mostRecentAt) || a.mostRecentAt.IsZero() {
+					a.mostRecentAt = r.RunAt
+					a.lastStatus = r.Status
+					// Use RawModel from the most recent run for display.
+					if r.RawModel != "" {
+						a.rawModel = r.RawModel
 					}
 					// Always update fallback metrics from the most recent run.
 					a.lastAccuracy = r.Accuracy
@@ -307,6 +327,40 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 					}
 					a.lastP95 = turnMs
 					a.lastROI = r.ROIScore
+				}
+
+				// Track the most recent NON-INSUFFICIENT run separately for
+				// verdict/cost display (lastRunAt). This avoids showing misleading
+				// INSUFFICIENT_DATA verdicts when a more meaningful verdict exists.
+				if !isInsufficient {
+					if r.RunAt.After(a.lastRunAt) || a.lastRunAt.IsZero() {
+						a.lastRunAt = r.RunAt
+						a.lastVerdict = r.Verdict
+						a.lastCostUSD = r.TotalCostUSD
+					}
+				} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+					// No prior non-insufficient run — use insufficient as fallback verdict.
+					if r.RunAt.After(a.lastRunAt) || a.lastRunAt.IsZero() {
+						a.lastRunAt = r.RunAt
+						a.lastVerdict = r.Verdict
+						a.lastCostUSD = r.TotalCostUSD
+					}
+				}
+			}
+		}
+
+		// Determine the active model per agent: the (agent, model) pair whose most
+		// recent run has run_status='active'. Uses mostRecentAt (the actual most
+		// recent run time) for tiebreaking — not lastRunAt which only tracks
+		// non-insufficient runs. Mirrors the detailed view logic at
+		// benchmark_view.go:currentModelByAgent.
+		activeModelByAgent := make(map[string]string)    // agentID → normalized model name
+		activeRunAtByAgent := make(map[string]time.Time) // agentID → mostRecentAt of winner
+		for k, a := range aggMap {
+			if a.lastStatus == store.RunStatusActive {
+				if prev, ok := activeRunAtByAgent[k.agent]; !ok || a.mostRecentAt.After(prev) {
+					activeModelByAgent[k.agent] = k.model
+					activeRunAtByAgent[k.agent] = a.mostRecentAt
 				}
 			}
 		}
@@ -320,11 +374,11 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			avgP95 := 0.0
 			avgROI := 0.0
 			if a.totalSamples > 0 {
-				// We have valid (non-insufficient) runs — use weighted averages.
+				// We have valid (non-insufficient) weekly runs — use weighted averages.
 				avgAcc = a.sumAccuracy / float64(a.totalSamples)
 				avgP95 = a.sumP95 / float64(a.totalSamples)
 			} else {
-				// All runs were INSUFFICIENT_DATA — use the most recent run's raw
+				// All weekly runs were INSUFFICIENT_DATA — use the most recent run's raw
 				// metrics so we don't display a misleading 0% accuracy / 0ms latency.
 				avgAcc = a.lastAccuracy
 				avgP95 = a.lastP95
@@ -335,9 +389,19 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 				avgROI = a.lastROI
 			}
 			health := computeHealthScore(avgAcc, avgP95, a.lastVerdict, avgROI, minROI)
+
+			// Determine display model name: prefer RawModel (provider prefix included)
+			// matching the detailed view's formatBenchmarkRow logic.
+			displayModel := a.rawModel
+			if displayModel == "" {
+				displayModel = k.model // fall back to normalized name
+			}
+
 			rows = append(rows, summaryRow{
 				AgentID:      k.agent,
-				Model:        k.model,
+				Model:        displayModel,
+				RawModel:     a.rawModel,
+				IsActive:     activeModelByAgent[k.agent] == k.model,
 				Runs:         a.runs,
 				AvgAccuracy:  avgAcc,
 				AvgTurnMs:    avgP95,
@@ -496,7 +560,24 @@ func (m *BenchmarkSummaryModel) View() string {
 		const healthColIdx = 6
 		const verdictColIdx2 = 7
 
-		rendered := renderRow(cells[:healthColIdx], summaryColWidths[:healthColIdx], baseStyle)
+		// Add visual marker (●) to the agent column for the active model,
+		// mirroring the detailed view's isCurrent logic.
+		var rendered string
+		if row.IsActive {
+			// Truncate plain agentCell to (width-2) visible chars, then prepend the marker.
+			agentCell := cells[0]
+			maxAgentLen := summaryColWidths[0] - 2 // reserve 2 visible chars for "● "
+			if len(agentCell) > maxAgentLen {
+				agentCell = agentCell[:maxAgentLen-1] + "…"
+			}
+			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
+			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
+			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
+			rendered = agentColRendered + " " + renderRow(cells[1:healthColIdx], summaryColWidths[1:healthColIdx], baseStyle)
+		} else {
+			rendered = renderRow(cells[:healthColIdx], summaryColWidths[:healthColIdx], baseStyle)
+		}
+
 		// Health column with colour.
 		healthCell := healthStyle(row.HealthScore).Inherit(baseStyle).Render(
 			fmt.Sprintf("%-*s", summaryColWidths[healthColIdx], cells[healthColIdx]))

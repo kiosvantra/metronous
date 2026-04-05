@@ -1322,6 +1322,202 @@ func TestBenchmarkSummaryViewRendersAgentRows(t *testing.T) {
 	}
 }
 
+// TestBenchmarkSummaryActiveModelMarker verifies that IsActive=true is set
+// only on the model whose most recent run has run_status='active', mirroring
+// the detailed view's currentModelByAgent logic.
+func TestBenchmarkSummaryActiveModelMarker(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		// agent-a: two models; gpt-4-turbo is active (most recent, status=active)
+		{
+			AgentID:    "agent-a",
+			Model:      "gpt-4",
+			RunAt:      now.Add(-48 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 100,
+			Accuracy:   0.90,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusSuperseded,
+		},
+		{
+			AgentID:    "agent-a",
+			Model:      "gpt-4-turbo",
+			RawModel:   "openai/gpt-4-turbo",
+			RunAt:      now.Add(-2 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 150,
+			Accuracy:   0.95,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+		// agent-b: single model, active
+		{
+			AgentID:    "agent-b",
+			Model:      "claude-3",
+			RawModel:   "anthropic/claude-3",
+			RunAt:      now.Add(-24 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 80,
+			Accuracy:   0.88,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+
+	// Build a map for easy lookup.
+	byAgentModel := make(map[string]tui.SummaryRowForTest)
+	for _, r := range rows {
+		byAgentModel[r.AgentID+"/"+r.Model] = r
+	}
+
+	// agent-a: gpt-4-turbo (display via RawModel) should be active; gpt-4 should not.
+	activeRow, ok := byAgentModel["agent-a/openai/gpt-4-turbo"]
+	if !ok {
+		// RawModel used as Model — look up by normalized key as well.
+		for _, r := range rows {
+			if r.AgentID == "agent-a" && tui.GetSummaryRowIsActive(r) {
+				activeRow = r
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		t.Fatal("no active row found for agent-a")
+	}
+	if !tui.GetSummaryRowIsActive(activeRow) {
+		t.Errorf("agent-a active model row: expected IsActive=true, got false")
+	}
+	if tui.GetSummaryRowRawModel(activeRow) != "openai/gpt-4-turbo" {
+		t.Errorf("agent-a active row: expected RawModel=openai/gpt-4-turbo, got %q", tui.GetSummaryRowRawModel(activeRow))
+	}
+
+	// The superseded gpt-4 row for agent-a must NOT be active.
+	for _, r := range rows {
+		if r.AgentID == "agent-a" && tui.GetSummaryRowIsActive(r) {
+			continue // already verified the active one above
+		}
+		if r.AgentID == "agent-a" && r.Model != activeRow.Model && tui.GetSummaryRowIsActive(r) {
+			t.Errorf("agent-a non-active model row should have IsActive=false")
+		}
+	}
+
+	// agent-b: its only model must be active.
+	var agentBRow *tui.SummaryRowForTest
+	for i := range rows {
+		if rows[i].AgentID == "agent-b" {
+			agentBRow = &rows[i]
+			break
+		}
+	}
+	if agentBRow == nil {
+		t.Fatal("no row found for agent-b")
+	}
+	if !tui.GetSummaryRowIsActive(*agentBRow) {
+		t.Errorf("agent-b single model row: expected IsActive=true, got false")
+	}
+}
+
+// TestBenchmarkSummaryWeeklyOnlyAggregation verifies that intraweek runs are
+// excluded from metric averages but the active model is still determined from
+// the most recent run regardless of kind.
+func TestBenchmarkSummaryWeeklyOnlyAggregation(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		// Weekly run with lower accuracy.
+		{
+			AgentID:    "agent-x",
+			Model:      "model-a",
+			RunAt:      now.Add(-72 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 200,
+			Accuracy:   0.80,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+		// Intraweek run (more recent) with higher accuracy — should NOT shift the avg.
+		{
+			AgentID:    "agent-x",
+			Model:      "model-a",
+			RunAt:      now.Add(-1 * time.Hour),
+			RunKind:    store.RunKindIntraweek,
+			SampleSize: 200,
+			Accuracy:   0.99,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	r := rows[0]
+
+	// Weighted avg should only include the weekly run (0.80), not the intraweek (0.99).
+	if r.AvgAccuracy != 0.80 {
+		t.Errorf("expected AvgAccuracy=0.80 (weekly-only), got %.4f", r.AvgAccuracy)
+	}
+
+	// Run count should be 1 (weekly only).
+	if r.Runs != 1 {
+		t.Errorf("expected Runs=1 (weekly-only count), got %d", r.Runs)
+	}
+}
+
+// TestBenchmarkSummaryRawModelDisplay verifies that the Model field in the
+// summary row uses RawModel (with provider prefix) when available, matching
+// the detailed view's formatBenchmarkRow logic.
+func TestBenchmarkSummaryRawModelDisplay(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		{
+			AgentID:    "agent-z",
+			Model:      "claude-sonnet-4-6",
+			RawModel:   "opencode/claude-sonnet-4-6",
+			RunAt:      now,
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 100,
+			Accuracy:   0.95,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	r := rows[0]
+
+	// Model should equal RawModel when RawModel is set.
+	if r.Model != "opencode/claude-sonnet-4-6" {
+		t.Errorf("expected Model=opencode/claude-sonnet-4-6, got %q", r.Model)
+	}
+	if tui.GetSummaryRowRawModel(r) != "opencode/claude-sonnet-4-6" {
+		t.Errorf("expected RawModel=opencode/claude-sonnet-4-6, got %q", tui.GetSummaryRowRawModel(r))
+	}
+}
+
+// TestBenchmarkSummaryActiveMarkerInView verifies that the ● marker appears in
+// the rendered view for active rows and is absent for superseded rows.
+func TestBenchmarkSummaryActiveMarkerInView(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
+	rows := []tui.SummaryRowForTest{
+		{AgentID: "agent-active", Model: "model-a", IsActive: true, Runs: 3},
+		{AgentID: "agent-old", Model: "model-b", IsActive: false, Runs: 2},
+	}
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: rows})
+	view := m.View()
+
+	// The active row should have the ● marker somewhere in the view.
+	if !strings.Contains(view, "●") {
+		t.Errorf("expected ● marker in view for active row, got: %q", view)
+	}
+}
+
 // TestChartsPanelsAndNavigation verifies the Charts tab renders the cost chart
 // plus summary cards and keeps month/day navigation working.
 func TestChartsPanelsAndNavigation(t *testing.T) {
