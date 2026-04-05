@@ -782,13 +782,14 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 	return scanBenchmarkRuns(rows)
 }
 
-// GetVerdictTrend returns the last N verdicts for the given agent, ordered oldest first.
+// GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
 // Each entry represents one benchmark cycle. CHANGED is inserted when consecutive
 // active runs use different models (indicating a real model switch between cycles).
 //
-// Only active runs are included so the trend reflects genuine quality assessments
-// (KEEP / SWITCH / URGENT_SWITCH / INSUFFICIENT_DATA) rather than repeating CHANGED
-// for every entry produced by the one-time historical supersede migration.
+// Only active weekly runs (run_kind='weekly') are included so the trend reflects
+// scheduled quality assessments only. Intraweek (on-demand) runs are excluded.
+// Superseded runs are also excluded so the trend reflects genuine quality assessments
+// (KEEP / SWITCH / URGENT_SWITCH / INSUFFICIENT_DATA) rather than historical noise.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	if weeks <= 0 {
 		return nil, nil
@@ -801,18 +802,17 @@ func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, w
 		lookback = 20
 	}
 
-	// Select active runs only, newest-first, so we pick one representative row
-	// per benchmark batch (same run_at = same pass). Multiple models can share
-	// the same run_at; ORDER BY run_at DESC gives the newest first, and we keep
-	// the first occurrence per run_at group (= the active model).
+	// Select active weekly runs only, newest-first, so we pick one representative
+	// row per benchmark cycle. Intraweek (on-demand) runs are excluded so the
+	// trend reflects only scheduled weekly quality assessments.
 	const q = `
 		SELECT verdict, model
 		FROM benchmark_runs
-		WHERE agent_id = ? AND run_status = 'active'
+		WHERE agent_id = ? AND run_status = 'active' AND run_kind = ?
 		ORDER BY run_at DESC
 		LIMIT ?`
 
-	rows, err := bs.readDB.QueryContext(ctx, q, agentID, lookback)
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, string(store.RunKindWeekly), lookback)
 	if err != nil {
 		return nil, fmt.Errorf("get verdict trend for %q: %w", agentID, err)
 	}

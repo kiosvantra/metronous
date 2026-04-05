@@ -460,6 +460,50 @@ func TestGetVerdictTrend(t *testing.T) {
 		}
 	})
 
+	t.Run("intraweek runs excluded — only weekly runs appear in trend", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Two weekly KEEP runs and one intraweek SWITCH run (active).
+		// The intraweek run must NOT appear in the trend.
+		base := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Millisecond)
+
+		weekly1 := sampleRun("weekly-only-agent", store.VerdictKeep)
+		weekly1.RunAt = base
+		weekly1.RunKind = store.RunKindWeekly
+		weekly1.Status = store.RunStatusActive
+
+		intraweek := sampleRun("weekly-only-agent", store.VerdictSwitch)
+		intraweek.RunAt = base.Add(24 * time.Hour)
+		intraweek.RunKind = store.RunKindIntraweek
+		intraweek.Status = store.RunStatusActive // active but intraweek — must be excluded
+
+		weekly2 := sampleRun("weekly-only-agent", store.VerdictKeep)
+		weekly2.RunAt = base.Add(48 * time.Hour)
+		weekly2.RunKind = store.RunKindWeekly
+		weekly2.Status = store.RunStatusActive
+
+		for _, r := range []store.BenchmarkRun{weekly1, intraweek, weekly2} {
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun: %v", err)
+			}
+		}
+		trend, err := bs.GetVerdictTrend(ctx, "weekly-only-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		// Expected: only the 2 weekly KEEP runs — SWITCH must not appear.
+		if len(trend) != 2 {
+			t.Fatalf("expected 2 entries (weekly only), got %d: %v", len(trend), trend)
+		}
+		for _, v := range trend {
+			if v == string(store.VerdictSwitch) {
+				t.Errorf("intraweek SWITCH must not appear in trend: %v", trend)
+			}
+		}
+		if trend[0] != string(store.VerdictKeep) || trend[1] != string(store.VerdictKeep) {
+			t.Errorf("expected [KEEP KEEP], got %v", trend)
+		}
+	})
+
 	t.Run("CHANGED inserted when active model switches between runs", func(t *testing.T) {
 		bs := newTestBenchmarkStore(t)
 		// Three active runs: model-a KEEP, then model-b KEEP (switch), then model-b KEEP.
@@ -503,6 +547,28 @@ func TestGetVerdictTrend(t *testing.T) {
 			if trend[i] != w {
 				t.Errorf("trend[%d]: got %q, want %q", i, trend[i], w)
 			}
+		}
+	})
+
+	t.Run("agent with only intraweek runs returns empty trend", func(t *testing.T) {
+		bs := newTestBenchmarkStore(t)
+		// Insert 3 intraweek runs — none should appear in the weekly trend.
+		base := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Millisecond)
+		for i := 0; i < 3; i++ {
+			r := sampleRun("intraweek-only-agent", store.VerdictKeep)
+			r.RunAt = base.Add(time.Duration(i) * 24 * time.Hour)
+			r.RunKind = store.RunKindIntraweek
+			r.Status = store.RunStatusActive
+			if err := bs.SaveRun(ctx, r); err != nil {
+				t.Fatalf("SaveRun[%d]: %v", i, err)
+			}
+		}
+		trend, err := bs.GetVerdictTrend(ctx, "intraweek-only-agent", 8)
+		if err != nil {
+			t.Fatalf("GetVerdictTrend: %v", err)
+		}
+		if len(trend) != 0 {
+			t.Errorf("expected empty trend for intraweek-only agent, got %v", trend)
 		}
 	})
 }

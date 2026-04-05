@@ -749,7 +749,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 	// Trend line: show last N verdicts with direction indicator.
 	if len(trend) > 0 {
 		trendStr := formatVerdictTrend(trend)
-		writeDetailField(&sb, "Trend", clamp(trendStr))
+		writeDetailField(&sb, "Weekly Trend", clamp(trendStr))
 	}
 
 	return sb.String()
