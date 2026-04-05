@@ -412,13 +412,50 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			})
 		}
 
-		// Sort: healthiest first (desc), then alphabetical by agent.
+		// Sort: cascade sort matching the Detailed view pattern.
+		// NO DATA rows (Runs==0, no weekly runs) go last.
+		// Within each agent: active model (IsActive=true) first, then other models by health desc.
+		// Agents are ordered by their active model's health score desc (or best model if no active).
+		// Tiebreaker: agentID asc, then model asc.
+		// agentBestHealth maps agentID → health score used for inter-agent ordering.
+		// Active model's health is authoritative; for agents with no active model,
+		// use the highest health score across all their models.
+		agentBestHealth := make(map[string]float64)
+		agentHasActive := make(map[string]bool)
+		for _, r := range rows {
+			if r.IsActive {
+				agentBestHealth[r.AgentID] = r.HealthScore
+				agentHasActive[r.AgentID] = true
+			}
+		}
+		// For agents with no active model, accumulate the max health score.
+		for _, r := range rows {
+			if !agentHasActive[r.AgentID] && r.HealthScore > agentBestHealth[r.AgentID] {
+				agentBestHealth[r.AgentID] = r.HealthScore
+			}
+		}
+		isNoDataRow := func(r summaryRow) bool { return r.Runs == 0 }
 		sort.Slice(rows, func(i, j int) bool {
+			// NO DATA placeholders always go last.
+			if isNoDataRow(rows[i]) != isNoDataRow(rows[j]) {
+				return !isNoDataRow(rows[i])
+			}
+			// Sort agents by their active model's health desc (best agent first).
+			hi := agentBestHealth[rows[i].AgentID]
+			hj := agentBestHealth[rows[j].AgentID]
+			if rows[i].AgentID != rows[j].AgentID {
+				if hi != hj {
+					return hi > hj
+				}
+				return rows[i].AgentID < rows[j].AgentID
+			}
+			// Same agent: active model comes first.
+			if rows[i].IsActive != rows[j].IsActive {
+				return rows[i].IsActive
+			}
+			// Same agent, both non-active (or both active): sort by health desc.
 			if rows[i].HealthScore != rows[j].HealthScore {
 				return rows[i].HealthScore > rows[j].HealthScore
-			}
-			if rows[i].AgentID != rows[j].AgentID {
-				return rows[i].AgentID < rows[j].AgentID
 			}
 			return rows[i].Model < rows[j].Model
 		})
@@ -499,7 +536,7 @@ func max64(a, b float64) float64 {
 func (m *BenchmarkSummaryModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Benchmark Summary") + "\n")
+	sb.WriteString(titleStyle.Render("Benchmark History Summary") + "\n")
 
 	// F5 indicator — always visible below the title.
 	f5Style := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
@@ -582,10 +619,13 @@ func (m *BenchmarkSummaryModel) View() string {
 		healthCell := healthStyle(row.HealthScore).Inherit(baseStyle).Render(
 			fmt.Sprintf("%-*s", summaryColWidths[healthColIdx], cells[healthColIdx]))
 		rendered += healthCell
-		// Last Verdict column: for INSUFFICIENT_DATA rows we show grey text,
-		// and still allow the cursor background highlight.
+		// Last Verdict column: only the active model shows its last verdict.
+		// Non-active models always display "-" (dim, no colour styling).
 		verdictCell := ""
-		if row.LastVerdict == store.VerdictInsufficientData {
+		if !row.IsActive {
+			verdictCell = baseStyle.Render(
+				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], "-"))
+		} else if row.LastVerdict == store.VerdictInsufficientData {
 			verdictCell = baseStyle.Render(
 				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
 		} else {
@@ -620,7 +660,8 @@ func (m *BenchmarkSummaryModel) View() string {
 		sb.WriteString("\n")
 		divider := strings.Repeat("─", totalWidth(summaryColWidths))
 		sb.WriteString(dimStyle.Render(divider) + "\n")
-		sb.WriteString(detailLabelStyle.Render("Agent Summary") + "\n")
+		sb.WriteString(detailLabelStyle.Render("Agent History Summary") + "\n")
+		sb.WriteString(dimStyle.Render("Weighted historical averages across all weekly benchmark cycles") + "\n")
 		sb.WriteString(dimStyle.Render(divider) + "\n")
 		writeDetailField(&sb, "Agent", r.AgentID)
 		writeDetailField(&sb, "Model", r.Model)

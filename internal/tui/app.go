@@ -54,7 +54,7 @@ const numTabs = 5
 
 // tabNames are the display labels for each tab (1-indexed for humans).
 var tabNames = [numTabs]string{
-	"[1] Benchmark Summary",
+	"[1] Benchmark History Summary",
 	"[2] Benchmark Detailed",
 	"[3] Tracking",
 	"[4] Charts",
@@ -650,7 +650,7 @@ func (m *AppModel) renderLanding() string {
 		updateStatus = "Update  (up to date)"
 	}
 	entries := []menuEntry{
-		{0, "Benchmark Summary"},
+		{0, "Benchmark History Summary"},
 		{1, "Benchmark Detailed"},
 		{2, "Tracking"},
 		{3, "Charts"},

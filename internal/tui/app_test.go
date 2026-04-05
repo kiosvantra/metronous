@@ -1257,8 +1257,8 @@ func TestBenchmarkSummaryViewShowsTitle(t *testing.T) {
 		},
 	})
 	view := m.View()
-	if !strings.Contains(view, "Benchmark Summary") {
-		t.Errorf("expected 'Benchmark Summary' title in view, got: %q", view)
+	if !strings.Contains(view, "Benchmark History Summary") {
+		t.Errorf("expected 'Benchmark History Summary' title in view, got: %q", view)
 	}
 }
 
