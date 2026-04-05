@@ -511,9 +511,7 @@ func formatSessionRow(s store.SessionSummary) []string {
 
 	durationCell := "-"
 	if s.DurationMs != nil && *s.DurationMs > 0 {
-		secs := float64(*s.DurationMs) / 1000.0
-		// Keep compact so the table stays readable.
-		durationCell = fmt.Sprintf("[%.2fs]", secs)
+		durationCell = formatDuration(float64(*s.DurationMs))
 	}
 
 	return []string{ts, s.AgentID, "complete", s.Model, in, out, spent, sessionShort, durationCell}
