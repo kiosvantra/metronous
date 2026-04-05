@@ -307,7 +307,18 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle app-level key events first (tab switching, quit, and
 	// tab-specific shortcuts like ctrl+s / ctrl+r).
 	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
+		keyStr := key.String()
+		// In nvim keymap preset, map h/l to left/right for tab navigation.
+		if m.config.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
+			switch keyStr {
+			case "h":
+				keyStr = "left"
+			case "l":
+				keyStr = "right"
+			}
+		}
+
+		switch keyStr {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 

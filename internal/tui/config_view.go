@@ -84,19 +84,40 @@ func (m ConfigModel) Init() tea.Cmd {
 func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		if m.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
+			// In nvim preset, map h/l to left/right for config adjustments.
+			switch key {
+			case "h":
+				key = "left"
+			case "l":
+				key = "right"
+			}
+		}
+
+		switch key {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(configFields)-1 {
+			// The last cursor position is reserved for the keymap preset row.
+			maxCursor := len(configFields)
+			if m.cursor < maxCursor {
 				m.cursor++
 			}
 		case "right", "+", "=":
-			m.adjustCurrent(+1)
+			if m.cursor == len(configFields) {
+				m.toggleKeymapPreset(+1)
+			} else {
+				m.adjustCurrent(+1)
+			}
 		case "left", "-":
-			m.adjustCurrent(-1)
+			if m.cursor == len(configFields) {
+				m.toggleKeymapPreset(-1)
+			} else {
+				m.adjustCurrent(-1)
+			}
 		}
 
 	case configSavedMsg:
@@ -166,6 +187,22 @@ func (m *ConfigModel) setFieldValue(key string, v float64) {
 	case "max_cost_usd_per_session":
 		m.thresholds.Defaults.MaxCostUSDPerSession = v
 	}
+}
+
+// toggleKeymapPreset cycles the keymap preset between the supported values.
+// dir should be +1 or -1.
+func (m *ConfigModel) toggleKeymapPreset(dir int) {
+	presets := []config.KeymapPreset{config.KeymapPresetDefault, config.KeymapPresetNvim}
+	current := m.thresholds.EffectiveKeymapPreset()
+	idx := 0
+	for i, p := range presets {
+		if p == current {
+			idx = i
+			break
+		}
+	}
+	idx = (idx + dir + len(presets)) % len(presets)
+	m.thresholds.KeymapPreset = presets[idx]
 }
 
 // saveCmd returns a tea.Cmd that writes the current thresholds to disk atomically.
@@ -254,7 +291,8 @@ func (m ConfigModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Threshold Configuration") + "\n\n")
-	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  ctrl+s: save  ctrl+r: reload") + "\n\n")
+	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  ctrl+s: save  ctrl+r: reload") + "\n")
+	sb.WriteString(dimStyle.Render("  Keymap preset: Default (numbers/arrows) or Nvim (hjkl) via the Config tab") + "\n\n")
 
 	for i, f := range configFields {
 		v := m.getFieldValue(f.key)
@@ -277,6 +315,23 @@ func (m ConfigModel) View() string {
 		}
 		sb.WriteString("\n")
 	}
+
+	// Keymap preset row.
+	keymapPreset := m.thresholds.EffectiveKeymapPreset()
+	var keymapLabel string
+	switch keymapPreset {
+	case config.KeymapPresetNvim:
+		keymapLabel = "Nvim (hjkl navigation)"
+	default:
+		keymapLabel = "Default (numbers/arrows)"
+	}
+	row := fmt.Sprintf("  %-28s  %s", "Keymap preset", keymapLabel)
+	if m.cursor == len(configFields) {
+		sb.WriteString(fieldActiveStyle.Render("▶ " + strings.TrimLeft(row, " ")))
+	} else {
+		sb.WriteString(fieldInactiveStyle.Render(row))
+	}
+	sb.WriteString("\n")
 
 	// Per-agent overrides count.
 	if len(m.thresholds.PerAgent) > 0 {

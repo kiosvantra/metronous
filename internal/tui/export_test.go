@@ -173,6 +173,18 @@ func DefaultThresholdValuesForTest() config.Thresholds {
 	return config.DefaultThresholdValues()
 }
 
+// GetConfigKeymapPresetForTest exposes the effective keymap preset for
+// a ConfigModel so external tests can assert on it.
+func GetConfigKeymapPresetForTest(m ConfigModel) config.KeymapPreset {
+	return m.thresholds.EffectiveKeymapPreset()
+}
+
+// SetAppKeymapPresetForTest allows external tests to force a keymap preset
+// on the AppModel without needing to load thresholds from disk.
+func SetAppKeymapPresetForTest(m *AppModel, preset config.KeymapPreset) {
+	m.config.thresholds.KeymapPreset = preset
+}
+
 // TrendDirection exposes the internal trendDirection function for testing.
 func TrendDirection(verdicts []string) string {
 	return trendDirection(verdicts)

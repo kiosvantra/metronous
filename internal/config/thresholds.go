@@ -1,6 +1,20 @@
 // Package config provides configuration types and loading utilities for Metronous.
 package config
 
+// KeymapPreset configures the TUI keybinding preset.
+//
+// "default" preserves the original Metronous keybindings.
+// "nvim" enables additional Vim-style navigation shortcuts (hjkl).
+type KeymapPreset string
+
+const (
+	// KeymapPresetDefault keeps the original keybindings and does not enable
+	// any extra Vim-style shortcuts.
+	KeymapPresetDefault KeymapPreset = "default"
+	// KeymapPresetNvim enables Vim-style navigation (hjkl) in the TUI.
+	KeymapPresetNvim KeymapPreset = "nvim"
+)
+
 // DefaultThresholds defines the baseline performance thresholds applied to all
 // agents unless overridden by per-agent settings.
 type DefaultThresholds struct {
@@ -94,6 +108,10 @@ type Thresholds struct {
 	// ModelPricing holds pricing data used to determine whether a model is free.
 	// Models with price == 0 have ROI/cost checks skipped in the decision engine.
 	ModelPricing ModelPricing `json:"model_pricing,omitempty"`
+
+	// KeymapPreset configures the TUI keybinding preset. When empty or unknown,
+	// the default preset is used to preserve historical behaviour.
+	KeymapPreset KeymapPreset `json:"keymap_preset,omitempty"`
 }
 
 // IsModelFree returns true if the model is explicitly listed in ModelPricing with
@@ -128,7 +146,27 @@ func DefaultThresholdValues() Thresholds {
 			PerformanceModel: "claude-haiku-4-5",
 			DefaultModel:     "claude-sonnet-4-5",
 		},
-		PerAgent: make(map[string]AgentThresholds),
+		PerAgent:     make(map[string]AgentThresholds),
+		KeymapPreset: KeymapPresetDefault,
+	}
+}
+
+// EffectiveKeymapPreset returns the keymap preset to apply for the TUI.
+//
+// An empty or unknown value falls back to the default preset so that
+// existing thresholds.json files continue to behave exactly as before.
+func (t *Thresholds) EffectiveKeymapPreset() KeymapPreset {
+	if t == nil {
+		return KeymapPresetDefault
+	}
+	switch t.KeymapPreset {
+	case "", KeymapPresetDefault:
+		return KeymapPresetDefault
+	case KeymapPresetNvim:
+		return KeymapPresetNvim
+	default:
+		// Unknown string — treat as default for forwards compatibility.
+		return KeymapPresetDefault
 	}
 }
 

@@ -152,3 +152,37 @@ func TestThresholdsJSONRoundTrip(t *testing.T) {
 		t.Errorf("per-agent MinAccuracy round-trip mismatch")
 	}
 }
+
+// TestEffectiveKeymapPreset verifies that EffectiveKeymapPreset falls back to
+// the default preset for empty or unknown values and preserves known presets.
+func TestEffectiveKeymapPreset(t *testing.T) {
+	// Nil receiver → default.
+	var nilThresholds *config.Thresholds
+	if got := nilThresholds.EffectiveKeymapPreset(); got != config.KeymapPresetDefault {
+		t.Fatalf("nil EffectiveKeymapPreset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+
+	// Empty value → default.
+	t1 := config.Thresholds{}
+	if got := t1.EffectiveKeymapPreset(); got != config.KeymapPresetDefault {
+		t.Errorf("empty EffectiveKeymapPreset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+
+	// Explicit default string.
+	t2 := config.Thresholds{KeymapPreset: config.KeymapPresetDefault}
+	if got := t2.EffectiveKeymapPreset(); got != config.KeymapPresetDefault {
+		t.Errorf("explicit default EffectiveKeymapPreset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+
+	// Explicit nvim preset.
+	t3 := config.Thresholds{KeymapPreset: config.KeymapPresetNvim}
+	if got := t3.EffectiveKeymapPreset(); got != config.KeymapPresetNvim {
+		t.Errorf("nvim EffectiveKeymapPreset: got %q, want %q", got, config.KeymapPresetNvim)
+	}
+
+	// Unknown value → default.
+	t4 := config.Thresholds{KeymapPreset: "unknown"}
+	if got := t4.EffectiveKeymapPreset(); got != config.KeymapPresetDefault {
+		t.Errorf("unknown EffectiveKeymapPreset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+}

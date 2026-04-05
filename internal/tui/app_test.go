@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/store"
 	"github.com/kiosvantra/metronous/internal/tui"
 )
@@ -138,6 +139,43 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabTracking {
 		t.Errorf("expected TabTracking after left arrow, got %d", m.CurrentTab)
+	}
+}
+
+func TestAppTabSwitchingByNvimKeysDefaultPresetNoEffect(t *testing.T) {
+	m := newTestApp(t)
+	// Dismiss landing.
+	updated, _ := sendKey(m, "1")
+	m = updated.(*tui.AppModel)
+
+	// With default preset, 'l' should not change the tab.
+	updated, _ = sendKey(m, "l")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Fatalf("expected tab to remain TabBenchmarkSummary after 'l' with default preset, got %d", m.CurrentTab)
+	}
+}
+
+func TestAppTabSwitchingByNvimKeysWhenPresetEnabled(t *testing.T) {
+	m := newTestApp(t)
+	tui.SetAppKeymapPresetForTest(m, config.KeymapPresetNvim)
+
+	// Dismiss landing.
+	updated, _ := sendKey(m, "1")
+	m = updated.(*tui.AppModel)
+
+	// 'l' should behave like right arrow and move to the next tab.
+	updated, _ = sendKey(m, "l")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Fatalf("expected TabBenchmarkDetailed after 'l' with nvim preset, got %d", m.CurrentTab)
+	}
+
+	// 'h' should behave like left arrow and move back.
+	updated, _ = sendKey(m, "h")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Fatalf("expected TabBenchmarkSummary after 'h' with nvim preset, got %d", m.CurrentTab)
 	}
 }
 
@@ -308,6 +346,33 @@ func TestConfigViewEditsThresholdValue(t *testing.T) {
 
 	if after <= initial {
 		t.Errorf("expected value to increase, got initial=%f after=%f", initial, after)
+	}
+}
+
+func TestConfigViewKeymapPresetToggle(t *testing.T) {
+	m := tui.NewConfigModel("")
+	m, _ = m.Update(tui.ConfigReloadedMsg{Thresholds: tui.DefaultThresholdValuesForTest()})
+
+	// Initial preset should be default.
+	if got := tui.GetConfigKeymapPresetForTest(m); got != config.KeymapPresetDefault {
+		t.Fatalf("initial keymap preset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+
+	// Move cursor to the keymap row (one position past the last field).
+	for i := 0; i < 10; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+
+	// Press '=' to advance the preset.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("=")})
+
+	if got := tui.GetConfigKeymapPresetForTest(m); got != config.KeymapPresetNvim {
+		t.Fatalf("after toggle keymap preset: got %q, want %q", got, config.KeymapPresetNvim)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Keymap preset") {
+		t.Errorf("expected keymap preset row in view, got: %q", view)
 	}
 }
 
