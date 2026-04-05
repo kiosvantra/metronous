@@ -122,6 +122,10 @@ type AppModel struct {
 	LatestVersion string
 	// CurrentVersion is the currently running version.
 	CurrentVersion string
+
+	// dataDir is the Metronous data directory (e.g. ~/.metronous/data).
+	// It is used when restarting the daemon after configuration changes.
+	dataDir string
 }
 
 func (m *AppModel) closeTrackingPopup() {
@@ -164,6 +168,7 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		config:           NewConfigModel(configPath),
 		charts:           NewChartsModel(es, bs),
 		CurrentVersion:   version,
+		dataDir:          dataDir,
 		needsClear:       true,
 		showLanding:      true,
 		landingCursor:    0,
@@ -274,6 +279,46 @@ func httpGet(url string) ([]byte, error) {
 	buf := make([]byte, 1024)
 	n, _ := resp.Body.Read(buf)
 	return buf[:n], nil
+}
+
+// restartDaemonCmd returns a command that restarts the Metronous daemon when
+// it is running as a managed system service. The command is best-effort: it
+// never prevents the TUI from functioning and reports any failure as a
+// transient status message.
+func restartDaemonCmd(dataDir string) tea.Cmd {
+	if dataDir == "" {
+		return nil
+	}
+
+	return func() tea.Msg {
+		exePath, err := os.Executable()
+		if err != nil {
+			return updateDoneMsg{msg: "config saved but could not locate metronous executable to restart daemon", isError: true}
+		}
+
+		// Check whether the daemon is running as a managed service for this
+		// data directory. When the service is not installed or stopped, this
+		// call will not contain "status: running" and we skip the restart.
+		statusCmd := exec.Command(exePath, "service", "status", "--data-dir", dataDir)
+		out, _ := statusCmd.CombinedOutput()
+		status := string(out)
+		if !strings.Contains(status, "status: running") {
+			// Service not running or not installed — nothing to restart.
+			return updateDoneMsg{msg: "config saved (daemon not running as system service)", isError: false}
+		}
+
+		stopCmd := exec.Command(exePath, "service", "stop", "--data-dir", dataDir)
+		if out, err := stopCmd.CombinedOutput(); err != nil {
+			return updateDoneMsg{msg: "config saved but failed to stop daemon: " + strings.TrimSpace(string(out)), isError: true}
+		}
+
+		startCmd := exec.Command(exePath, "service", "start", "--data-dir", dataDir)
+		if out, err := startCmd.CombinedOutput(); err != nil {
+			return updateDoneMsg{msg: "config saved but failed to start daemon: " + strings.TrimSpace(string(out)), isError: true}
+		}
+
+		return updateDoneMsg{msg: "config saved and daemon restarted", isError: false}
+	}
 }
 
 // Update handles all incoming messages and routes them to sub-models.
@@ -582,13 +627,23 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = ws.Height
 	}
 
+	// When thresholds are saved from the Config tab, attempt to restart the
+	// daemon so that runtime decisions pick up the new configuration without
+	// requiring a manual service command.
+	var daemonCmd tea.Cmd
+	if _, ok := msg.(ConfigSavedMsg); ok {
+		if m.dataDir != "" {
+			daemonCmd = restartDaemonCmd(m.dataDir)
+		}
+	}
+
 	var tCmd, sCmd, bCmd, cCmd, chCmd tea.Cmd
 	m.tracking, tCmd = m.tracking.Update(msg)
 	m.benchmarkSummary, sCmd = m.benchmarkSummary.Update(msg)
 	m.benchmark, bCmd = m.benchmark.Update(msg)
 	m.config, cCmd = m.config.Update(msg)
 	m.charts, chCmd = m.charts.Update(msg)
-	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd, chCmd)
+	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd, chCmd, daemonCmd)
 }
 
 // View renders the full dashboard.

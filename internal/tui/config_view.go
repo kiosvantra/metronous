@@ -82,6 +82,7 @@ func (m ConfigModel) Init() tea.Cmd {
 
 // Update handles key presses for navigation and value adjustment.
 func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		key := msg.String()
@@ -123,6 +124,9 @@ func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
 	case configSavedMsg:
 		m.statusMsg = "✓ Saved"
 		m.statusOK = true
+		// After a successful save, automatically reload thresholds so that all
+		// tabs see the updated configuration without requiring a manual reload.
+		cmd = m.reloadCmd()
 
 	case configReloadedMsg:
 		m.thresholds = msg.Thresholds
@@ -134,7 +138,7 @@ func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("✗ Error: %v", msg.Err)
 		m.statusOK = false
 	}
-	return m, nil
+	return m, cmd
 }
 
 // UpdateSave handles ctrl+s saves.
@@ -290,10 +294,13 @@ func (m ConfigModel) reloadCmd() tea.Cmd {
 func (m ConfigModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Threshold Configuration") + "\n\n")
+	sb.WriteString(titleStyle.Render("Configuration") + "\n\n")
 	sb.WriteString(dimStyle.Render("  ↑/↓ or j/k: move between fields") + "\n")
 	sb.WriteString(dimStyle.Render("  ←/→ or +/-: adjust value  s / ctrl+s: save  r / ctrl+r: reload") + "\n")
-	sb.WriteString(dimStyle.Render("  Keymap preset: switch between Default (numbers/arrows) and Nvim (hjkl) on the row below") + "\n\n")
+	sb.WriteString(dimStyle.Render("  Decision thresholds affect daemon recommendations; UI preferences affect only the dashboard.") + "\n\n")
+
+	// Decision thresholds section.
+	sb.WriteString(dimStyle.Render("Decision thresholds:") + "\n")
 
 	for i, f := range configFields {
 		v := m.getFieldValue(f.key)
@@ -316,6 +323,10 @@ func (m ConfigModel) View() string {
 		}
 		sb.WriteString("\n")
 	}
+
+	// UI preferences section.
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("UI preferences:") + "\n")
 
 	// Keymap preset row.
 	keymapPreset := m.thresholds.EffectiveKeymapPreset()
