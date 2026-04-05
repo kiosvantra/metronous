@@ -13,8 +13,9 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
-// benchmarkSummaryRefreshInterval matches the benchmark detailed tab refresh cadence.
-const benchmarkSummaryRefreshInterval = 2 * time.Second
+// benchmarkSummaryRefreshInterval is slower than the detailed tab because summary data
+// only changes when a new benchmark run is saved — not every 2 seconds.
+const benchmarkSummaryRefreshInterval = 30 * time.Second
 
 // benchmarkSummaryTickMsg is sent by the auto-refresh ticker.
 type benchmarkSummaryTickMsg struct{ t time.Time }
@@ -498,7 +499,11 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			}
 		}
 		isNoDataRow := func(r summaryRow) bool { return r.Runs == 0 }
-		sort.Slice(rows, func(i, j int) bool {
+		// SliceStable prevents floating-point-induced reorderings when HealthScore values
+		// are equal (or differ only in the last ULP due to non-deterministic map iteration
+		// accumulation order). The tiebreaker chain below is fully deterministic, so stable
+		// sort produces the same output on every refresh.
+		sort.SliceStable(rows, func(i, j int) bool {
 			// NO DATA placeholders always go last.
 			if isNoDataRow(rows[i]) != isNoDataRow(rows[j]) {
 				return !isNoDataRow(rows[i])
