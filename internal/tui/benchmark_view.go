@@ -1312,10 +1312,11 @@ func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []st
 		return []string{run.AgentID, "-", "-", "-", "-", "NO DATA", "-"}
 	}
 
-	model := run.RawModel
-	if model == "" {
-		model = run.Model
+	rawForDisplay := run.RawModel
+	if rawForDisplay == "" {
+		rawForDisplay = run.Model
 	}
+	model := store.NormalizeModelName(rawForDisplay)
 	if model == "" {
 		model = "-"
 	}

@@ -224,8 +224,9 @@ func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.C
 // Active model marker: matches the detailed view — the model whose most recent run has
 // run_status='active' is marked with IsActive=true. Only one model per agent is active.
 //
-// Model display: uses RawModel (with provider prefix) when available, matching the
-// detailed view's formatBenchmarkRow logic.
+// Model display: table column shows the normalized name (provider prefix stripped) via
+// formatSummaryRow(). The raw provider-prefixed name is preserved in summaryRow.RawModel
+// and shown as a dim secondary line below active rows in View().
 func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 	if m.bs == nil {
 		return nil
@@ -450,8 +451,10 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			}
 			health := computeHealthScore(avgAcc, avgP95, a.lastVerdict, avgROI, minROI)
 
-			// Determine display model name: prefer RawModel (provider prefix included)
-			// matching the detailed view's formatBenchmarkRow logic.
+			// Store the raw (provider-prefixed) model name in Model so it is available
+			// to formatSummaryRow (which normalizes it for table display) and to View()
+			// (which shows it as a dim secondary line for active rows).
+			// Fall back to the normalized key when RawModel was never recorded.
 			displayModel := a.rawModel
 			if displayModel == "" {
 				displayModel = k.model // fall back to normalized name
@@ -697,6 +700,15 @@ func (m *BenchmarkSummaryModel) View() string {
 
 		sb.WriteString(rendered)
 		sb.WriteString("\n")
+
+		// For the active model row, show the full provider-prefixed name as a dim
+		// secondary line so users can see the exact identifier sent to the API.
+		if row.IsActive && row.RawModel != "" {
+			providerLine := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(
+				fmt.Sprintf("  %s", row.RawModel))
+			sb.WriteString(providerLine)
+			sb.WriteString("\n")
+		}
 	}
 
 	// Footer.
@@ -758,7 +770,7 @@ func formatSummaryRow(r summaryRow) []string {
 	if verdict == "" {
 		verdict = "-"
 	}
-	model := r.Model
+	model := store.NormalizeModelName(r.Model)
 	if model == "" {
 		model = "-"
 	}
