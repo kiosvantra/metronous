@@ -308,8 +308,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// tab-specific shortcuts like ctrl+s / ctrl+r).
 	if key, ok := msg.(tea.KeyMsg); ok {
 		keyStr := key.String()
-		// In nvim keymap preset, map h/l to left/right for tab navigation.
-		if m.config.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
+		// In nvim keymap preset, map h/l to left/right for tab navigation on
+		// non-config tabs. The Config tab owns its own hjkl keymap for editing,
+		// so we must not hijack h/l here or they will never reach the
+		// ConfigModel.
+		if m.CurrentTab != TabConfig && m.config.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
 			switch keyStr {
 			case "h":
 				keyStr = "left"

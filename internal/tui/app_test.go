@@ -2,7 +2,10 @@ package tui_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -407,6 +410,162 @@ func TestConfigViewSaveReload(t *testing.T) {
 	view = m.View()
 	if !strings.Contains(view, "Reload") {
 		t.Errorf("expected 'Reload' in view after reload, got: %q", view)
+	}
+}
+
+// TestConfigViewSaveReloadKeymapPreset verifies that toggling the keymap preset
+// in the Config view, saving to disk, and reloading keeps the preset
+// consistent. This exercises the full AppModel -> ConfigModel pipeline so the
+// app-level keymap logic stays in sync with the config file.
+func TestConfigViewSaveReloadKeymapPreset(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Build an app model wired to a real config path (no stores needed).
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Jump straight to the Config tab.
+	updated, _ := sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Move cursor down to the keymap preset row.
+	for i := 0; i < 10; i++ {
+		updated, _ = sendKey(app, "j")
+		app = updated.(*tui.AppModel)
+	}
+
+	// Toggle the keymap preset using '='.
+	updated, _ = sendKey(app, "=")
+	app = updated.(*tui.AppModel)
+
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to be nvim after toggle, got %q", got)
+	}
+
+	// Save via ctrl+s at the app level.
+	updated, cmd := sendSpecialKey(app, tea.KeyCtrlS)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected save command from ctrl+s")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	// Reload via ctrl+r at the app level (reads from disk).
+	updated, cmd = sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from ctrl+r")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	// After a full save+reload round-trip, the effective preset should stay nvim.
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to remain nvim after save+reload, got %q", got)
+	}
+}
+
+// When the nvim keymap preset is enabled, hjkl should control editing inside
+// the Config tab instead of switching tabs at the app shell level.
+func TestConfigViewNvimPresetDoesNotSwitchTabsOnHjkl(t *testing.T) {
+	m := newTestApp(t)
+	app := m
+
+	// Jump to Config tab.
+	updated, _ := sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Toggle the keymap preset to nvim inside the Config view.
+	for i := 0; i < 10; i++ {
+		updated, _ = sendKey(app, "j")
+		app = updated.(*tui.AppModel)
+	}
+	updated, _ = sendKey(app, "=")
+	app = updated.(*tui.AppModel)
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset nvim after toggle, got %q", got)
+	}
+
+	// Pressing 'h'/'l' should NOT move us away from the Config tab; they should
+	// be forwarded to the ConfigModel instead.
+	updated, _ = sendKey(app, "l")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected to stay on TabConfig after 'l' with nvim preset, got tab %d", app.CurrentTab)
+	}
+	updated, _ = sendKey(app, "h")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected to stay on TabConfig after 'h' with nvim preset, got tab %d", app.CurrentTab)
+	}
+}
+
+// TestConfigViewReloadAppliesExternalKeymapChange verifies that editing
+// thresholds.json outside the TUI and pressing ctrl+r in the Config tab
+// correctly updates the app-level keymap preset.
+func TestConfigViewReloadAppliesExternalKeymapChange(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Write an initial thresholds file with the default preset.
+	initial := config.DefaultThresholdValues()
+	initial.KeymapPreset = config.KeymapPresetDefault
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatalf("marshal initial thresholds: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write initial thresholds: %v", err)
+	}
+
+	// Build an app model wired to this config path.
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Jump to the Config tab so ctrl+r triggers a reload.
+	updated, _ := sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Initial reload should keep the default preset.
+	updated, cmd := sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from initial ctrl+r")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetDefault {
+		t.Fatalf("expected initial keymap preset default after reload, got %q", got)
+	}
+
+	// Now edit the file externally to switch to the nvim preset.
+	updatedCfg := initial
+	updatedCfg.KeymapPreset = config.KeymapPresetNvim
+	data, err = json.Marshal(updatedCfg)
+	if err != nil {
+		t.Fatalf("marshal updated thresholds: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write updated thresholds: %v", err)
+	}
+
+	// A second reload should pick up the external change.
+	updated, cmd = sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from second ctrl+r")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset nvim after external change and reload, got %q", got)
 	}
 }
 

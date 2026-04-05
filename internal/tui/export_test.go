@@ -185,6 +185,13 @@ func SetAppKeymapPresetForTest(m *AppModel, preset config.KeymapPreset) {
 	m.config.thresholds.KeymapPreset = preset
 }
 
+// GetAppKeymapPresetForTest exposes the effective keymap preset used by the
+// AppModel so tests can assert that Config view save/reload keeps it in sync
+// with the underlying config.
+func GetAppKeymapPresetForTest(m *AppModel) config.KeymapPreset {
+	return m.config.thresholds.EffectiveKeymapPreset()
+}
+
 // TrendDirection exposes the internal trendDirection function for testing.
 func TrendDirection(verdicts []string) string {
 	return trendDirection(verdicts)
