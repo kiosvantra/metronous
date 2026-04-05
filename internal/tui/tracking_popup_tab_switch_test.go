@@ -26,7 +26,7 @@ func TestTrackingPopupClosedOnEscapeToLanding(t *testing.T) {
 	}
 
 	// Re-enter tracking.
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	app = updated.(*AppModel)
 	if app.CurrentTab != TabTracking {
 		t.Fatalf("expected CurrentTab=TabTracking")
@@ -45,7 +45,7 @@ func TestTrackingPopupClosedOnTabSwitch(t *testing.T) {
 	m.tracking.popupOpen = true
 	m.tracking.popupSessionID = "sess"
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
 	app := updated.(*AppModel)
 
 	if app.CurrentTab != TabBenchmarkSummary {

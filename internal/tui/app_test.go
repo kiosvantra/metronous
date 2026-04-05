@@ -2,13 +2,17 @@ package tui_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/store"
 	"github.com/kiosvantra/metronous/internal/tui"
 )
@@ -33,8 +37,8 @@ func newTestApp(t *testing.T) *tui.AppModel {
 
 func TestAppInitialModel(t *testing.T) {
 	m := newTestApp(t)
-	if m.CurrentTab != tui.TabTracking {
-		t.Errorf("expected initial tab to be TabTracking (0), got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected initial tab to be TabBenchmarkSummary (0), got %d", m.CurrentTab)
 	}
 }
 
@@ -49,25 +53,25 @@ func TestAppInit(t *testing.T) {
 func TestAppTabSwitchingByNumber(t *testing.T) {
 	m := newTestApp(t)
 
-	// 1 → Tracking (already there)
+	// 1 → Benchmark Summary
 	updated, _ := sendKey(m, "1")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabTracking {
-		t.Errorf("expected TabTracking after pressing 1, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected TabBenchmarkSummary after pressing 1, got %d", m.CurrentTab)
 	}
 
-	// 2 → Benchmark Summary
+	// 2 → Benchmark Detailed
 	updated, _ = sendKey(m, "2")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmarkSummary {
-		t.Errorf("expected TabBenchmarkSummary after pressing 2, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Errorf("expected TabBenchmarkDetailed after pressing 2, got %d", m.CurrentTab)
 	}
 
-	// 3 → Benchmark Detailed
+	// 3 → Tracking
 	updated, _ = sendKey(m, "3")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmarkDetailed {
-		t.Errorf("expected TabBenchmarkDetailed after pressing 3, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabTracking {
+		t.Errorf("expected TabTracking after pressing 3, got %d", m.CurrentTab)
 	}
 
 	// 4 → Charts
@@ -84,11 +88,11 @@ func TestAppTabSwitchingByNumber(t *testing.T) {
 		t.Errorf("expected TabConfig after pressing 5, got %d", m.CurrentTab)
 	}
 
-	// Back to 1 → Tracking
+	// Back to 1 → Benchmark Summary
 	updated, _ = sendKey(m, "1")
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabTracking {
-		t.Errorf("expected TabTracking after pressing 1, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected TabBenchmarkSummary after pressing 1, got %d", m.CurrentTab)
 	}
 }
 
@@ -98,18 +102,18 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	updated, _ := sendKey(m, "1")
 	m = updated.(*tui.AppModel)
 
-	// right → TabBenchmarkSummary
-	updated, _ = sendSpecialKey(m, tea.KeyRight)
-	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabBenchmarkSummary {
-		t.Errorf("expected TabBenchmarkSummary after right arrow, got %d", m.CurrentTab)
-	}
-
 	// right → TabBenchmarkDetailed
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabBenchmarkDetailed {
 		t.Errorf("expected TabBenchmarkDetailed after right arrow, got %d", m.CurrentTab)
+	}
+
+	// right → TabTracking
+	updated, _ = sendSpecialKey(m, tea.KeyRight)
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabTracking {
+		t.Errorf("expected TabTracking after right arrow, got %d", m.CurrentTab)
 	}
 
 	// right → TabCharts
@@ -122,9 +126,8 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 	// right → TabConfig
 	updated, _ = sendSpecialKey(m, tea.KeyRight)
 	m = updated.(*tui.AppModel)
-	// When on Charts, left/right should not switch tabs.
-	if m.CurrentTab != tui.TabCharts {
-		t.Errorf("expected TabCharts after right arrow, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabConfig {
+		t.Errorf("expected TabConfig after right arrow, got %d", m.CurrentTab)
 	}
 
 	// left → TabCharts
@@ -134,12 +137,48 @@ func TestAppTabSwitchingByArrowKeys(t *testing.T) {
 		t.Errorf("expected TabCharts after left arrow, got %d", m.CurrentTab)
 	}
 
-	// left → TabBenchmarkDetailed
+	// left → TabTracking
 	updated, _ = sendSpecialKey(m, tea.KeyLeft)
 	m = updated.(*tui.AppModel)
-	// When on Charts, left/right should not switch tabs.
-	if m.CurrentTab != tui.TabCharts {
-		t.Errorf("expected TabCharts after left arrow, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabTracking {
+		t.Errorf("expected TabTracking after left arrow, got %d", m.CurrentTab)
+	}
+}
+
+func TestAppTabSwitchingByNvimKeysDefaultPresetNoEffect(t *testing.T) {
+	m := newTestApp(t)
+	// Dismiss landing.
+	updated, _ := sendKey(m, "1")
+	m = updated.(*tui.AppModel)
+
+	// With default preset, 'l' should not change the tab.
+	updated, _ = sendKey(m, "l")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Fatalf("expected tab to remain TabBenchmarkSummary after 'l' with default preset, got %d", m.CurrentTab)
+	}
+}
+
+func TestAppTabSwitchingByNvimKeysWhenPresetEnabled(t *testing.T) {
+	m := newTestApp(t)
+	tui.SetAppKeymapPresetForTest(m, config.KeymapPresetNvim)
+
+	// Dismiss landing.
+	updated, _ := sendKey(m, "1")
+	m = updated.(*tui.AppModel)
+
+	// 'l' should behave like right arrow and move to the next tab.
+	updated, _ = sendKey(m, "l")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkDetailed {
+		t.Fatalf("expected TabBenchmarkDetailed after 'l' with nvim preset, got %d", m.CurrentTab)
+	}
+
+	// 'h' should behave like left arrow and move back.
+	updated, _ = sendKey(m, "h")
+	m = updated.(*tui.AppModel)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Fatalf("expected TabBenchmarkSummary after 'h' with nvim preset, got %d", m.CurrentTab)
 	}
 }
 
@@ -167,11 +206,11 @@ func TestEscReturnsToLanding(t *testing.T) {
 func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 	m := newTestApp(t)
 
-	// Left at first tab → stays at TabTracking.
+	// Left at first tab → stays at TabBenchmarkSummary.
 	updated, _ := sendSpecialKey(m, tea.KeyLeft)
 	m = updated.(*tui.AppModel)
-	if m.CurrentTab != tui.TabTracking {
-		t.Errorf("expected tab to stay at TabTracking, got %d", m.CurrentTab)
+	if m.CurrentTab != tui.TabBenchmarkSummary {
+		t.Errorf("expected tab to stay at TabBenchmarkSummary, got %d", m.CurrentTab)
 	}
 
 	// Jump to last tab (5 = Config) then press right → stays at TabConfig.
@@ -181,6 +220,46 @@ func TestAppArrowKeyDoesNotWrapBeyondBounds(t *testing.T) {
 	m = updated.(*tui.AppModel)
 	if m.CurrentTab != tui.TabConfig {
 		t.Errorf("expected tab to stay at TabConfig, got %d", m.CurrentTab)
+	}
+}
+
+func TestAppArrowSameTabPressIsNoopAndDoesNotClear(t *testing.T) {
+	m := newTestApp(t)
+
+	// Give the app a window size so View() renders a full frame.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(*tui.AppModel)
+
+	// Open the first tab from the landing screen.
+	updated, _ = sendKey(m, "1")
+	m = updated.(*tui.AppModel)
+
+	// First render should consume the pending clear.
+	_ = m.View()
+	if tui.GetAppNeedsClearForTest(m) {
+		t.Fatalf("expected needsClear to be false after initial render")
+	}
+
+	// Pressing left on the first tab should be a pure no-op, not trigger a clear.
+	updated, _ = sendSpecialKey(m, tea.KeyLeft)
+	m = updated.(*tui.AppModel)
+	if tui.GetAppNeedsClearForTest(m) {
+		t.Fatalf("expected needsClear to remain false after left arrow on first tab")
+	}
+
+	// Jump to the last tab and render once to consume its clear.
+	updated, _ = sendKey(m, "5")
+	m = updated.(*tui.AppModel)
+	_ = m.View()
+	if tui.GetAppNeedsClearForTest(m) {
+		t.Fatalf("expected needsClear to be false after render on last tab")
+	}
+
+	// Pressing right on the last tab should also be a no-op without clearing.
+	updated, _ = sendSpecialKey(m, tea.KeyRight)
+	m = updated.(*tui.AppModel)
+	if tui.GetAppNeedsClearForTest(m) {
+		t.Fatalf("expected needsClear to remain false after right arrow on last tab")
 	}
 }
 
@@ -313,6 +392,33 @@ func TestConfigViewEditsThresholdValue(t *testing.T) {
 	}
 }
 
+func TestConfigViewKeymapPresetToggle(t *testing.T) {
+	m := tui.NewConfigModel("")
+	m, _ = m.Update(tui.ConfigReloadedMsg{Thresholds: tui.DefaultThresholdValuesForTest()})
+
+	// Initial preset should be default.
+	if got := tui.GetConfigKeymapPresetForTest(m); got != config.KeymapPresetDefault {
+		t.Fatalf("initial keymap preset: got %q, want %q", got, config.KeymapPresetDefault)
+	}
+
+	// Move cursor to the keymap row (one position past the last field).
+	for i := 0; i < 10; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	}
+
+	// Press '=' to advance the preset.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("=")})
+
+	if got := tui.GetConfigKeymapPresetForTest(m); got != config.KeymapPresetNvim {
+		t.Fatalf("after toggle keymap preset: got %q, want %q", got, config.KeymapPresetNvim)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Keymap preset") {
+		t.Errorf("expected keymap preset row in view, got: %q", view)
+	}
+}
+
 func TestConfigViewSaveReload(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/thresholds.json"
@@ -344,6 +450,323 @@ func TestConfigViewSaveReload(t *testing.T) {
 	view = m.View()
 	if !strings.Contains(view, "Reload") {
 		t.Errorf("expected 'Reload' in view after reload, got: %q", view)
+	}
+}
+
+// TestConfigViewSaveReloadKeymapPreset verifies that toggling the keymap preset
+// in the Config view, saving to disk, and reloading keeps the preset
+// consistent. This exercises the full AppModel -> ConfigModel pipeline so the
+// app-level keymap logic stays in sync with the config file.
+func TestConfigViewSaveReloadKeymapPreset(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Build an app model wired to a real config path (no stores needed).
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Ensure View() renders the Config tab instead of the loading placeholder.
+	updated, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = updated.(*tui.AppModel)
+
+	// Jump straight to the Config tab.
+	updated, _ = sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Move cursor down to the keymap preset row.
+	for i := 0; i < 10; i++ {
+		updated, _ = sendKey(app, "j")
+		app = updated.(*tui.AppModel)
+	}
+
+	// Toggle the keymap preset using '='.
+	updated, _ = sendKey(app, "=")
+	app = updated.(*tui.AppModel)
+
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to be nvim after toggle, got %q", got)
+	}
+
+	// Save via ctrl+s at the app level.
+	updated, cmd := sendSpecialKey(app, tea.KeyCtrlS)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected save command from ctrl+s")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	// After ctrl+s, the Config view should show a saved status message.
+	view := app.View()
+	if !strings.Contains(view, "Saved") {
+		t.Fatalf("expected 'Saved' in Config view after ctrl+s, got: %q", view)
+	}
+
+	// Reload via ctrl+r at the app level (reads from disk).
+	updated, cmd = sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from ctrl+r")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	// After reload, the Config view should show a reload status message.
+	view = app.View()
+	if !strings.Contains(view, "Reload") {
+		t.Fatalf("expected 'Reload' in Config view after ctrl+r, got: %q", view)
+	}
+
+	// After a full save+reload round-trip, the effective preset should stay nvim.
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to remain nvim after save+reload, got %q", got)
+	}
+}
+
+// TestConfigViewPlainSaveReloadScopedToConfigTab verifies that plain 's' and
+// 'r' keys trigger save and reload only while the Config tab is active, while
+// leaving other tabs unaffected.
+func TestConfigViewPlainSaveReloadScopedToConfigTab(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Build an app model wired to a real config path (no stores needed).
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Ensure View() renders tabs instead of the loading placeholder.
+	updated, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = updated.(*tui.AppModel)
+
+	// On a non-Config tab, plain 's' and 'r' should not trigger save/reload.
+	if app.CurrentTab == tui.TabConfig {
+		t.Fatalf("expected initial tab to be non-Config, got %d", app.CurrentTab)
+	}
+
+	updated, cmd := sendKey(app, "s")
+	app = updated.(*tui.AppModel)
+	if cmd != nil {
+		t.Fatalf("expected no command from plain 's' on non-Config tab, got %#v", cmd)
+	}
+
+	updated, cmd = sendKey(app, "r")
+	app = updated.(*tui.AppModel)
+	if cmd != nil {
+		t.Fatalf("expected no command from plain 'r' on non-Config tab, got %#v", cmd)
+	}
+
+	// Jump to the Config tab.
+	updated, _ = sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected TabConfig after switching, got %d", app.CurrentTab)
+	}
+
+	// Plain 's' should trigger a save command.
+	updated, cmd = sendKey(app, "s")
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected save command from plain 's' on Config tab")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	view := app.View()
+	if !strings.Contains(view, "Saved") {
+		t.Fatalf("expected 'Saved' in Config view after plain 's', got: %q", view)
+	}
+
+	// Plain 'r' should trigger a reload command.
+	updated, cmd = sendKey(app, "r")
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from plain 'r' on Config tab")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	view = app.View()
+	if !strings.Contains(view, "Reload") {
+		t.Fatalf("expected 'Reload' in Config view after plain 'r', got: %q", view)
+	}
+}
+
+// TestConfigViewSaveKeepsPresetAcrossTabSwitch verifies that toggling the
+// keymap preset to nvim, saving via ctrl+s, switching to another tab, and
+// returning to Config keeps the nvim preset and shows a Saved status message.
+func TestConfigViewSaveKeepsPresetAcrossTabSwitch(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Build an app model wired to a real config path (no stores needed).
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Ensure View() renders the Config tab instead of the loading placeholder.
+	updated, _ := app.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	app = updated.(*tui.AppModel)
+
+	// Jump straight to the Config tab.
+	updated, _ = sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Move cursor down to the keymap preset row.
+	for i := 0; i < 10; i++ {
+		updated, _ = sendKey(app, "j")
+		app = updated.(*tui.AppModel)
+	}
+
+	// Toggle the keymap preset using '='.
+	updated, _ = sendKey(app, "=")
+	app = updated.(*tui.AppModel)
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to be nvim after toggle, got %q", got)
+	}
+
+	// Save via ctrl+s at the app level.
+	updated, cmd := sendSpecialKey(app, tea.KeyCtrlS)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected save command from ctrl+s")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	// Config view should show a saved status message.
+	view := app.View()
+	if !strings.Contains(view, "Saved") {
+		t.Fatalf("expected 'Saved' in Config view after ctrl+s, got: %q", view)
+	}
+
+	// Switch to another tab (Benchmark Summary).
+	updated, _ = sendKey(app, "1")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabBenchmarkSummary {
+		t.Fatalf("expected TabBenchmarkSummary after switching away from Config, got %d", app.CurrentTab)
+	}
+
+	// Switch back to Config.
+	updated, _ = sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected TabConfig after switching back, got %d", app.CurrentTab)
+	}
+
+	// After tab round-trip, the Config view should still show nvim preset and Saved.
+	view = app.View()
+	if !strings.Contains(view, "Nvim (hjkl navigation)") {
+		t.Fatalf("expected Config view to keep nvim preset after tab switch, got: %q", view)
+	}
+	if !strings.Contains(view, "Saved") {
+		t.Fatalf("expected 'Saved' status to remain visible after tab switch, got: %q", view)
+	}
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset to remain nvim after tab switch, got %q", got)
+	}
+}
+
+// When the nvim keymap preset is enabled, hjkl should control editing inside
+// the Config tab instead of switching tabs at the app shell level.
+func TestConfigViewNvimPresetDoesNotSwitchTabsOnHjkl(t *testing.T) {
+	m := newTestApp(t)
+	app := m
+
+	// Jump to Config tab.
+	updated, _ := sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Toggle the keymap preset to nvim inside the Config view.
+	for i := 0; i < 10; i++ {
+		updated, _ = sendKey(app, "j")
+		app = updated.(*tui.AppModel)
+	}
+	updated, _ = sendKey(app, "=")
+	app = updated.(*tui.AppModel)
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset nvim after toggle, got %q", got)
+	}
+
+	// Pressing 'h'/'l' should NOT move us away from the Config tab; they should
+	// be forwarded to the ConfigModel instead.
+	updated, _ = sendKey(app, "l")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected to stay on TabConfig after 'l' with nvim preset, got tab %d", app.CurrentTab)
+	}
+	updated, _ = sendKey(app, "h")
+	app = updated.(*tui.AppModel)
+	if app.CurrentTab != tui.TabConfig {
+		t.Fatalf("expected to stay on TabConfig after 'h' with nvim preset, got tab %d", app.CurrentTab)
+	}
+}
+
+// TestConfigViewReloadAppliesExternalKeymapChange verifies that editing
+// thresholds.json outside the TUI and pressing ctrl+r in the Config tab
+// correctly updates the app-level keymap preset.
+func TestConfigViewReloadAppliesExternalKeymapChange(t *testing.T) {
+	tdir := t.TempDir()
+	configPath := filepath.Join(tdir, "thresholds.json")
+
+	// Write an initial thresholds file with the default preset.
+	initial := config.DefaultThresholdValues()
+	initial.KeymapPreset = config.KeymapPresetDefault
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatalf("marshal initial thresholds: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write initial thresholds: %v", err)
+	}
+
+	// Build an app model wired to this config path.
+	m := tui.NewAppModel(nil, nil, configPath, filepath.Join(tdir, "data"), "", "test")
+	app := &m
+
+	// Jump to the Config tab so ctrl+r triggers a reload.
+	updated, _ := sendKey(app, "5")
+	app = updated.(*tui.AppModel)
+
+	// Initial reload should keep the default preset.
+	updated, cmd := sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from initial ctrl+r")
+	}
+	msg := cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetDefault {
+		t.Fatalf("expected initial keymap preset default after reload, got %q", got)
+	}
+
+	// Now edit the file externally to switch to the nvim preset.
+	updatedCfg := initial
+	updatedCfg.KeymapPreset = config.KeymapPresetNvim
+	data, err = json.Marshal(updatedCfg)
+	if err != nil {
+		t.Fatalf("marshal updated thresholds: %v", err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatalf("write updated thresholds: %v", err)
+	}
+
+	// A second reload should pick up the external change.
+	updated, cmd = sendSpecialKey(app, tea.KeyCtrlR)
+	app = updated.(*tui.AppModel)
+	if cmd == nil {
+		t.Fatal("expected reload command from second ctrl+r")
+	}
+	msg = cmd()
+	updated, _ = app.Update(msg)
+	app = updated.(*tui.AppModel)
+
+	if got := tui.GetAppKeymapPresetForTest(app); got != config.KeymapPresetNvim {
+		t.Fatalf("expected keymap preset nvim after external change and reload, got %q", got)
 	}
 }
 
@@ -600,8 +1023,9 @@ func TestBenchmarkDetailUnfreezeOnNavigation(t *testing.T) {
 	}
 }
 
-// TestBenchmarkViewShowsDateAndTime verifies the Time column shows date+time not just date.
-func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
+// TestBenchmarkViewShowsAgentAndModelInDetailPanel verifies that agent and model
+// data are displayed in the detail panel when the table row is selected.
+func TestBenchmarkViewShowsAgentAndModelInDetailPanel(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	// Use a fixed timestamp in the local timezone to avoid UTC conversion differences.
 	ts := time.Date(2026, 3, 15, 14, 30, 0, 0, time.Local)
@@ -618,14 +1042,20 @@ func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
 	})
 
 	view := m.View()
-	// The Time column should show the date portion (YYYY-MM-DD).
-	if !strings.Contains(view, "2026-03-15") {
-		t.Errorf("expected date '2026-03-15' in view, got: %q", view)
+	// The table should show agent and model data.
+	if !strings.Contains(view, "time-agent") {
+		t.Errorf("expected agent 'time-agent' in view, got: %q", view)
 	}
-	// The Time column should show the hour portion (HH:MM) — time.Local is preserved.
-	expectedTime := ts.Format("15:04")
-	if !strings.Contains(view, expectedTime) {
-		t.Errorf("expected time %q in view, got: %q", expectedTime, view)
+	if !strings.Contains(view, "gpt-4") {
+		t.Errorf("expected model 'gpt-4' in view, got: %q", view)
+	}
+	// Detail panel should be rendered with all key fields including RunAt timestamp.
+	if !strings.Contains(view, "Decision Rationale") {
+		t.Errorf("expected Decision Rationale section in view, got: %q", view)
+	}
+	// Verify RunAt is displayed in the detail panel (format: YYYY-MM-DD HH:MM).
+	if !strings.Contains(view, "2026-03-15 14:30") {
+		t.Errorf("expected RunAt timestamp '2026-03-15 14:30' in detail panel, got: %q", view)
 	}
 }
 
@@ -688,8 +1118,13 @@ func TestTrendDirection(t *testing.T) {
 		{"switch to keep is improving", []string{"SWITCH", "KEEP"}, "↑ improving"},
 		{"keep to switch is degrading", []string{"KEEP", "SWITCH"}, "↓ degrading"},
 		{"keep to keep is stable", []string{"KEEP", "KEEP"}, "→ stable"},
-		{"switch to insufficient_data is neutral", []string{"SWITCH", "INSUFFICIENT_DATA"}, "→ stable"},
-		{"insufficient_data to keep is neutral", []string{"INSUFFICIENT_DATA", "KEEP"}, "→ stable"},
+		// If the last verdict is INSUFFICIENT_DATA, direction is unknown.
+		{"switch to insufficient_data is unknown", []string{"SWITCH", "INSUFFICIENT_DATA"}, "→ unknown"},
+		// If previous verdicts are all INSUFFICIENT_DATA, no baseline — unknown.
+		{"insufficient_data to keep no baseline is unknown", []string{"INSUFFICIENT_DATA", "KEEP"}, "→ unknown"},
+		// If last is valid and there is a prior valid verdict, compare normally.
+		{"keep then insufficient then keep is stable", []string{"KEEP", "INSUFFICIENT_DATA", "KEEP"}, "→ stable"},
+		{"switch then insufficient then keep is improving", []string{"SWITCH", "INSUFFICIENT_DATA", "KEEP"}, "↑ improving"},
 		{"empty slice is stable", []string{}, "→ stable"},
 		{"single verdict is stable", []string{"KEEP"}, "→ stable"},
 	}
@@ -1206,9 +1641,9 @@ func TestAppTabSwitchingFiveTabs(t *testing.T) {
 		wantTab tui.Tab
 		label   string
 	}{
-		{"1", tui.TabTracking, "TabTracking"},
-		{"2", tui.TabBenchmarkSummary, "TabBenchmarkSummary"},
-		{"3", tui.TabBenchmarkDetailed, "TabBenchmarkDetailed"},
+		{"1", tui.TabBenchmarkSummary, "TabBenchmarkSummary"},
+		{"2", tui.TabBenchmarkDetailed, "TabBenchmarkDetailed"},
+		{"3", tui.TabTracking, "TabTracking"},
 		{"4", tui.TabCharts, "TabCharts"},
 		{"5", tui.TabConfig, "TabConfig"},
 	}
@@ -1217,6 +1652,53 @@ func TestAppTabSwitchingFiveTabs(t *testing.T) {
 		m = updated.(*tui.AppModel)
 		if m.CurrentTab != tc.wantTab {
 			t.Errorf("key %q: expected %s (%d), got %d", tc.key, tc.label, tc.wantTab, m.CurrentTab)
+		}
+	}
+}
+
+// TestPressingCurrentTabKeyIsNoOp verifies that pressing the numeric key for the
+// currently active tab is a no-op and does not blank the dashboard.
+func TestPressingCurrentTabKeyIsNoOp(t *testing.T) {
+	m := newTestApp(t)
+
+	// Ensure View() has a non-zero width so tabs render.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(*tui.AppModel)
+
+	cases := []struct {
+		key     string
+		wantTab tui.Tab
+		needle  string
+	}{
+		{"1", tui.TabBenchmarkSummary, "Benchmark History Summary"},
+		{"2", tui.TabBenchmarkDetailed, "Benchmark Detailed"},
+		{"3", tui.TabTracking, "Tracking"},
+		{"4", tui.TabCharts, "Charts"},
+		{"5", tui.TabConfig, "Config"},
+	}
+
+	for _, tc := range cases {
+		// Navigate to the target tab.
+		updated, _ = sendKey(m, tc.key)
+		m = updated.(*tui.AppModel)
+		if m.CurrentTab != tc.wantTab {
+			t.Fatalf("setup: key %q should select %v, got %v", tc.key, tc.wantTab, m.CurrentTab)
+		}
+		viewBefore := m.View()
+		if !strings.Contains(viewBefore, tc.needle) {
+			t.Fatalf("setup: view for key %q did not contain %q; got: %q", tc.key, tc.needle, viewBefore)
+		}
+
+		// Press the same key again; this should be a no-op and the view must
+		// remain populated (not blanked out).
+		updated, _ = sendKey(m, tc.key)
+		m = updated.(*tui.AppModel)
+		if m.CurrentTab != tc.wantTab {
+			t.Errorf("after second %q: expected tab %v, got %v", tc.key, tc.wantTab, m.CurrentTab)
+		}
+		viewAfter := m.View()
+		if !strings.Contains(viewAfter, tc.needle) {
+			t.Errorf("after second %q: view lost expected content %q; got: %q", tc.key, tc.needle, viewAfter)
 		}
 	}
 }
@@ -1237,7 +1719,7 @@ func TestAppTabBarContainsSummaryAndDetailed(t *testing.T) {
 
 // TestBenchmarkSummaryViewShowsTitle verifies the summary view renders its title.
 func TestBenchmarkSummaryViewShowsTitle(t *testing.T) {
-	m := tui.NewBenchmarkSummaryModel(nil)
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
 	// Inject synthetic rows directly via the data message.
 	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{
 		Rows: []tui.SummaryRowForTest{
@@ -1245,14 +1727,14 @@ func TestBenchmarkSummaryViewShowsTitle(t *testing.T) {
 		},
 	})
 	view := m.View()
-	if !strings.Contains(view, "Benchmark Summary") {
-		t.Errorf("expected 'Benchmark Summary' title in view, got: %q", view)
+	if !strings.Contains(view, "Benchmark History Summary") {
+		t.Errorf("expected 'Benchmark History Summary' title in view, got: %q", view)
 	}
 }
 
 // TestBenchmarkSummaryViewShowsEmptyState verifies the empty-state message.
 func TestBenchmarkSummaryViewShowsEmptyState(t *testing.T) {
-	m := tui.NewBenchmarkSummaryModel(nil)
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
 	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: nil})
 	view := m.View()
 	if !strings.Contains(view, "No benchmark runs yet") {
@@ -1262,7 +1744,7 @@ func TestBenchmarkSummaryViewShowsEmptyState(t *testing.T) {
 
 // TestBenchmarkSummaryCursorNavigation verifies ↑/↓ moves the cursor.
 func TestBenchmarkSummaryCursorNavigation(t *testing.T) {
-	m := tui.NewBenchmarkSummaryModel(nil)
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
 	rows := []tui.SummaryRowForTest{
 		{AgentID: "agent-a", Model: "gpt-4", Runs: 2},
 		{AgentID: "agent-b", Model: "gpt-4", Runs: 1},
@@ -1295,7 +1777,7 @@ func TestBenchmarkSummaryCursorNavigation(t *testing.T) {
 
 // TestBenchmarkSummaryViewRendersAgentRows verifies agent rows appear in the view.
 func TestBenchmarkSummaryViewRendersAgentRows(t *testing.T) {
-	m := tui.NewBenchmarkSummaryModel(nil)
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
 	rows := []tui.SummaryRowForTest{
 		{AgentID: "sdd-orchestrator", Model: "claude-sonnet", Runs: 5},
 		{AgentID: "sdd-apply", Model: "gpt-4-mini", Runs: 3},
@@ -1310,8 +1792,204 @@ func TestBenchmarkSummaryViewRendersAgentRows(t *testing.T) {
 	}
 }
 
+// TestBenchmarkSummaryActiveModelMarker verifies that IsActive=true is set
+// only on the model whose most recent run has run_status='active', mirroring
+// the detailed view's currentModelByAgent logic.
+func TestBenchmarkSummaryActiveModelMarker(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		// agent-a: two models; gpt-4-turbo is active (most recent, status=active)
+		{
+			AgentID:    "agent-a",
+			Model:      "gpt-4",
+			RunAt:      now.Add(-48 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 100,
+			Accuracy:   0.90,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusSuperseded,
+		},
+		{
+			AgentID:    "agent-a",
+			Model:      "gpt-4-turbo",
+			RawModel:   "openai/gpt-4-turbo",
+			RunAt:      now.Add(-2 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 150,
+			Accuracy:   0.95,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+		// agent-b: single model, active
+		{
+			AgentID:    "agent-b",
+			Model:      "claude-3",
+			RawModel:   "anthropic/claude-3",
+			RunAt:      now.Add(-24 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 80,
+			Accuracy:   0.88,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+
+	// Build a map for easy lookup.
+	byAgentModel := make(map[string]tui.SummaryRowForTest)
+	for _, r := range rows {
+		byAgentModel[r.AgentID+"/"+r.Model] = r
+	}
+
+	// agent-a: gpt-4-turbo (display via RawModel) should be active; gpt-4 should not.
+	activeRow, ok := byAgentModel["agent-a/openai/gpt-4-turbo"]
+	if !ok {
+		// RawModel used as Model — look up by normalized key as well.
+		for _, r := range rows {
+			if r.AgentID == "agent-a" && tui.GetSummaryRowIsActive(r) {
+				activeRow = r
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		t.Fatal("no active row found for agent-a")
+	}
+	if !tui.GetSummaryRowIsActive(activeRow) {
+		t.Errorf("agent-a active model row: expected IsActive=true, got false")
+	}
+	if tui.GetSummaryRowRawModel(activeRow) != "openai/gpt-4-turbo" {
+		t.Errorf("agent-a active row: expected RawModel=openai/gpt-4-turbo, got %q", tui.GetSummaryRowRawModel(activeRow))
+	}
+
+	// The superseded gpt-4 row for agent-a must NOT be active.
+	for _, r := range rows {
+		if r.AgentID == "agent-a" && tui.GetSummaryRowIsActive(r) {
+			continue // already verified the active one above
+		}
+		if r.AgentID == "agent-a" && r.Model != activeRow.Model && tui.GetSummaryRowIsActive(r) {
+			t.Errorf("agent-a non-active model row should have IsActive=false")
+		}
+	}
+
+	// agent-b: its only model must be active.
+	var agentBRow *tui.SummaryRowForTest
+	for i := range rows {
+		if rows[i].AgentID == "agent-b" {
+			agentBRow = &rows[i]
+			break
+		}
+	}
+	if agentBRow == nil {
+		t.Fatal("no row found for agent-b")
+	}
+	if !tui.GetSummaryRowIsActive(*agentBRow) {
+		t.Errorf("agent-b single model row: expected IsActive=true, got false")
+	}
+}
+
+// TestBenchmarkSummaryWeeklyOnlyAggregation verifies that intraweek runs are
+// excluded from metric averages but the active model is still determined from
+// the most recent run regardless of kind.
+func TestBenchmarkSummaryWeeklyOnlyAggregation(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		// Weekly run with lower accuracy.
+		{
+			AgentID:    "agent-x",
+			Model:      "model-a",
+			RunAt:      now.Add(-72 * time.Hour),
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 200,
+			Accuracy:   0.80,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+		// Intraweek run (more recent) with higher accuracy — should NOT shift the avg.
+		{
+			AgentID:    "agent-x",
+			Model:      "model-a",
+			RunAt:      now.Add(-1 * time.Hour),
+			RunKind:    store.RunKindIntraweek,
+			SampleSize: 200,
+			Accuracy:   0.99,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 summary row, got %d", len(rows))
+	}
+	r := rows[0]
+
+	// Weighted avg should only include the weekly run (0.80), not the intraweek (0.99).
+	if r.AvgAccuracy != 0.80 {
+		t.Errorf("expected AvgAccuracy=0.80 (weekly-only), got %.4f", r.AvgAccuracy)
+	}
+
+	// Run count should be 1 (weekly only).
+	if r.Runs != 1 {
+		t.Errorf("expected Runs=1 (weekly-only count), got %d", r.Runs)
+	}
+}
+
+// TestBenchmarkSummaryRawModelDisplay verifies that the Model field in the
+// summary row uses RawModel (with provider prefix) when available, matching
+// the detailed view's formatBenchmarkRow logic.
+func TestBenchmarkSummaryRawModelDisplay(t *testing.T) {
+	now := time.Now()
+	runs := []store.BenchmarkRun{
+		{
+			AgentID:    "agent-z",
+			Model:      "claude-sonnet-4-6",
+			RawModel:   "opencode/claude-sonnet-4-6",
+			RunAt:      now,
+			RunKind:    store.RunKindWeekly,
+			SampleSize: 100,
+			Accuracy:   0.95,
+			Verdict:    store.VerdictKeep,
+			Status:     store.RunStatusActive,
+		},
+	}
+
+	rows := tui.AggregateSummaryRowsForTest(runs)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	r := rows[0]
+
+	// Model should equal RawModel when RawModel is set.
+	if r.Model != "opencode/claude-sonnet-4-6" {
+		t.Errorf("expected Model=opencode/claude-sonnet-4-6, got %q", r.Model)
+	}
+	if tui.GetSummaryRowRawModel(r) != "opencode/claude-sonnet-4-6" {
+		t.Errorf("expected RawModel=opencode/claude-sonnet-4-6, got %q", tui.GetSummaryRowRawModel(r))
+	}
+}
+
+// TestBenchmarkSummaryActiveMarkerInView verifies that the ● marker appears in
+// the rendered view for active rows and is absent for superseded rows.
+func TestBenchmarkSummaryActiveMarkerInView(t *testing.T) {
+	m := tui.NewBenchmarkSummaryModel(nil, nil)
+	rows := []tui.SummaryRowForTest{
+		{AgentID: "agent-active", Model: "model-a", IsActive: true, Runs: 3},
+		{AgentID: "agent-old", Model: "model-b", IsActive: false, Runs: 2},
+	}
+	m, _ = m.Update(tui.BenchmarkSummaryDataMsg{Rows: rows})
+	view := m.View()
+
+	// The active row should have the ● marker somewhere in the view.
+	if !strings.Contains(view, "●") {
+		t.Errorf("expected ● marker in view for active row, got: %q", view)
+	}
+}
+
 // TestChartsPanelsAndNavigation verifies the Charts tab renders the cost chart
-// plus summary cards and keeps month/day navigation working.
+// plus summary cards and keeps day/month navigation working with k/l.
 func TestChartsPanelsAndNavigation(t *testing.T) {
 	monthStart := time.Date(time.Now().Year(), time.Now().Month(), 1, 0, 0, 0, 0, time.Local)
 	m := tui.NewChartsModel(nil, nil)
@@ -1332,6 +2010,7 @@ func TestChartsPanelsAndNavigation(t *testing.T) {
 		t.Fatalf("expected performance selection to be populated, got %v", got)
 	}
 
+	// Day navigation within the current month.
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	if tui.GetChartsCursor(m) != 1 {
 		t.Fatalf("expected cursor=1 after l, got %d", tui.GetChartsCursor(m))
@@ -1343,13 +2022,27 @@ func TestChartsPanelsAndNavigation(t *testing.T) {
 	}
 
 	originalMonth := tui.GetChartsMonthStart(m)
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
-	if !tui.GetChartsMonthStart(m).Before(originalMonth) {
-		t.Fatalf("expected month to move backward with left arrow")
+	// Drive the cursor to the last day of the month, then use l/k to move
+	// across month boundaries.
+	daysInMonth := time.Date(monthStart.Year(), monthStart.Month()+1, 0, 0, 0, 0, 0, monthStart.Location()).Day()
+	for i := 0; i < daysInMonth-1; i++ {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 	}
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if tui.GetChartsCursor(m) != daysInMonth-1 {
+		t.Fatalf("expected cursor=%d at last day, got %d", daysInMonth-1, tui.GetChartsCursor(m))
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if !tui.GetChartsMonthStart(m).After(originalMonth) {
+		t.Fatalf("expected month to move forward when pressing l at last day")
+	}
+	if tui.GetChartsCursor(m) != 0 {
+		t.Fatalf("expected cursor=0 after moving to next month, got %d", tui.GetChartsCursor(m))
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
 	if !sameMonthForTest(tui.GetChartsMonthStart(m), originalMonth) {
-		t.Fatalf("expected month to return after right arrow")
+		t.Fatalf("expected month to return after pressing k at first day")
 	}
 
 	view := m.View()

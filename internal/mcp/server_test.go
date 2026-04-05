@@ -471,11 +471,19 @@ func TestHTTPIngestMethodNotAllowed(t *testing.T) {
 		errCh <- srv.ServeWithHealth(ctx)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
-
-	port, err := srv.ReadPortFile()
-	if err != nil {
-		t.Fatalf("ReadPortFile: %v", err)
+	// Poll for mcp.port instead of a fixed sleep to avoid flakes on slow CI.
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)

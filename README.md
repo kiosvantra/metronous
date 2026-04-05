@@ -13,31 +13,31 @@ Metronous tracks every tool call, session, and cost from your OpenCode agents �
 ## What it does
 
 - **Tracks** agent sessions, tool calls, tokens, and cost in real-time
-- **Benchmarks** each agent with a defined mission against its performance criteria
-- **Recommends** model switches with estimated cost savings
-- **Visualizes** everything in a terminal dashboard (TUI)
+- **Benchmarks** each agent against accuracy and ROI thresholds
+- **Recommends** model switches with data-driven reasoning
+- **Visualizes** everything in a 5-tab terminal dashboard (TUI)
 
 ## Architecture
 
-> For component details and protocols, see [docs/architecture.md](docs/architecture.md).  
-> For benchmark methodology, see [docs/how-it-works.md](docs/how-it-works.md).
-
 ```
-OpenCode → metronous mcp (shim) → HTTP → metronous daemon (system service) → SQLite
-                                                                        ↓
-                                                              ./metronous dashboard
+OpenCode → metronous-plugin.ts → HTTP POST /ingest → metronous daemon → SQLite
+                                                              ↓
+                                                   metronous dashboard (TUI)
 ```
 
-- **Shim (metronous mcp)**: stdio↔HTTP bridge launched by OpenCode plugin, forwards MCP calls to the daemon
-- **Daemon (metronous)**: Long-lived system service (systemd on Linux, Windows SCM on Windows) that handles telemetry ingestion, storage, and weekly benchmarks
-- **HTTP Endpoint**: Dynamic port (written to `~/.metronous/data/mcp.port`) for shim-to-daemon communication
-- **TUI Dashboard**: 4-tab terminal UI (Tracking / Benchmark Summary / Benchmark Detailed / Config)
+- **Plugin (`metronous-plugin.ts`)**: OpenCode plugin that captures agent events and forwards them to the daemon via HTTP. Accumulates cost from `step-finish` events and persists session cost to `~/.metronous/data/session_costs.json` across restarts.
+- **MCP shim (`metronous mcp`)**: stdio↔HTTP bridge launched by OpenCode as an MCP server. Reads the daemon port from `~/.metronous/data/mcp.port` and forwards events.
+- **Daemon (`metronous server --daemon-mode`)**: Long-lived background service (systemd on Linux) that ingests events, stores them in SQLite, and runs weekly benchmarks at Monday 02:00 local time.
+- **TUI Dashboard**: 5-tab terminal UI with live tracking, benchmark results, cost charts, and config editing.
+
+For full component details see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).  
+For benchmark methodology see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Prerequisites
 
 1. **[OpenCode](https://opencode.ai) installed** — `curl -fsSL https://opencode.ai/install | bash`
 
-Metronous works with OpenCode's built-in agents out of the box — no custom `opencode.json` required. If you have one, Metronous will patch it automatically. If not, it will create one with the MCP shim configured and you can add providers and agents to it later.
+Metronous works with OpenCode's built-in agents out of the box. If you have an `opencode.json`, Metronous will patch it automatically. If not, it will create one and you can add providers and agents to it later.
 
 Go 1.22+ is only required for source builds and `go install`.
 
@@ -45,9 +45,9 @@ Go 1.22+ is only required for source builds and `go install`.
 
 ### Support matrix
 
-- **Linux**: official install flow
+- **Linux**: official install flow (one command)
+- **macOS**: official install flow (one command)
 - **Windows**: experimental/manual
-- **macOS**: manual CLI only
 
 ### Linux (recommended — one command)
 
@@ -82,8 +82,6 @@ go install github.com/kiosvantra/metronous/cmd/metronous@latest
 # Ensure the installed binary is on your PATH, then run:
 metronous install
 ```
-
-If you use `GOBIN`, run the binary from that directory instead of `GOPATH/bin`.
 
 ### Manual/source build
 
@@ -122,15 +120,17 @@ Run the elevated PowerShell session as the same Windows user account that runs O
 
 Windows support is currently experimental. The native service/install flow is still being hardened, so Linux is the only officially supported installer path.
 
-### macOS status
+### macOS (one command)
 
 ```bash
-go build -o metronous ./cmd/metronous
-./metronous init
-./metronous server --data-dir ~/.metronous/data --daemon-mode
+curl -fsSL https://github.com/kiosvantra/metronous/releases/latest/download/install.sh | bash
 ```
 
-macOS currently supports the CLI only. `metronous install`, automatic OpenCode patching, and automatic plugin installation are not supported on macOS.
+Same as Linux — downloads the latest release, verifies the checksum, installs the binary to `~/.local/bin`, and runs `metronous install` to set up the daemon and configure OpenCode automatically.
+
+Supports both Intel (amd64) and Apple Silicon (arm64).
+
+> Do not run with `sudo`. Must run as the same normal user that runs OpenCode.
 
 ### Windows service notes
 
@@ -138,14 +138,14 @@ macOS currently supports the CLI only. `metronous install`, automatic OpenCode p
 & "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" install
 ```
 
-> **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service. Use `& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service status` or `sc query metronous` to verify.
+> **Note:** `metronous install` on Windows requires an elevated terminal (Run as Administrator) to register the Windows service.
 
 For manual control:
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service start     # Start the service
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service stop      # Stop the service
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service status    # Check service status
-& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service uninstall # Remove the service
+& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service start
+& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service stop
+& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service status
+& "$env:LOCALAPPDATA\Programs\Metronous\metronous.exe" service uninstall
 ```
 
 ### Configure OpenCode (automatically done by `metronous install` on Linux)
@@ -167,17 +167,43 @@ Then restart OpenCode and it will show **"Metronous Connected"**.
 metronous dashboard
 ```
 
-- **[1] Tracking** — Real-time event stream with tokens and cost per tool call
-- **[2] Benchmark Summary** — Aggregated benchmark table with verdicts and recommendations
-- **[3] Benchmark Detailed** — Per-agent run history grouped into Sunday-bounded cycles (freeze detail with Enter)
-- **[4] Charts** — Monthly stacked cost chart with tooltip navigation plus Performance/Responsibility summary cards
-- **[5] Config** — Edit performance thresholds (saved to `~/.metronous/thresholds.json`)
+The dashboard has five tabs (press the number key to switch):
 
-For TUI navigation keys, see [docs/tui-controls.md](docs/tui-controls.md).
+| # | Tab | Description |
+|---|-----|-------------|
+| 1 | **Benchmark History Summary** | Weighted historical view of all (agent, model) pairs active in the last 4 weekly cycles. Cascade sort: active model first (marked `●`), superseded models below. Verdict shown only for the active model. |
+| 2 | **Benchmark Detailed** | Per-run history grouped into Sunday-bounded run cycles. Press `Enter` to freeze/unfreeze the detail panel. PgUp/PgDn to navigate cycles. Press `F5` to trigger an intraweek benchmark run. |
+| 3 | **Tracking** | Real-time session stream (last 20 sessions, refreshes every 2s). Press `Enter` on a session to open the Session Timeline popup showing per-event cost breakdown. |
+| 4 | **Charts** | Monthly cost chart by model (log scale, stacked bars) with a day tooltip. Also shows Performance and Responsibility top-3 cards. `←`/`→` to navigate months, `k`/`l` or mouse to move the day cursor. |
+| 5 | **Config** | Edit performance thresholds. Changes are saved to `~/.metronous/thresholds.json` and propagated live to the benchmark engine. |
+
+For keyboard navigation see [docs/tui-controls.md](docs/tui-controls.md).
+
+### Session Timeline popup (Tracking tab)
+
+Press `Enter` on any session row in the Tracking tab to open a popup with the full event timeline for that session. The popup shows:
+
+| Column | Meaning |
+|--------|---------|
+| `Spent(acc)` | Accumulated cost up to this event (cumulative snapshot stored in the DB) |
+| `Spent(step)` | Delta between consecutive events = per-LLM-call cost (matches provider billing) |
+
+`Spent(step)` is the most useful column for validating costs: each entry corresponds to one LLM request and its value should match what the provider charges per call.
+
+### Plugin cost tracking
+
+The plugin computes session cost by **summing** the `cost` field from every `step-finish` event emitted by OpenCode's `message.part.updated` hook. This gives the actual per-request cost that accumulates across the session.
+
+Key behaviors:
+- Cost is persisted to `~/.metronous/data/session_costs.json` so restarts mid-session do not lose accumulated cost.
+- `lastActiveModel` only updates when the model string has a provider prefix (e.g. `opencode/claude-sonnet-4-6`). Bare model names like `claude-sonnet-4-6` are never used to downgrade a known provider-prefixed model.
+- NaN and non-finite values in cost and token fields are silently dropped.
 
 ### Manual benchmark
 
 ```bash
+# Via TUI: press F5 on the Benchmark Detailed tab
+# Via CLI:
 METRONOUS_DATA_DIR=~/.metronous/data go run cmd/run-benchmark/main.go
 ```
 
@@ -188,24 +214,51 @@ All data lives in `~/.metronous/`:
 ```
 ~/.metronous/
 ├── data/
-│   ├── tracking.db      # Event telemetry (SQLite)
-│   ├── benchmark.db     # Benchmark run history (SQLite)
-│   ├── mcp.port         # Dynamic HTTP port (runtime)
-│   └── metronous.pid    # Server PID (runtime)
-└── thresholds.json      # Performance thresholds (editable via TUI)
+│   ├── tracking.db          # Event telemetry (SQLite, WAL mode)
+│   ├── benchmark.db         # Benchmark run history (SQLite)
+│   ├── mcp.port             # Dynamic HTTP port (runtime)
+│   ├── metronous.pid        # Server PID (runtime)
+│   ├── session_costs.json   # Persisted session costs across plugin restarts
+│   └── plugin.log           # Plugin debug log (when METRONOUS_DEBUG=true)
+└── thresholds.json          # Performance thresholds (editable via TUI)
 ```
+
+## Config thresholds
+
+The Config tab (`5`) exposes three active fields:
+
+| Field | Default | Effect |
+|-------|---------|--------|
+| **Min Accuracy** | 0.85 | Accuracy below this triggers `SWITCH` |
+| **Min ROI Score** | 0.05 | ROI below this triggers `SWITCH` (paid models only) |
+| **Max Cost/Session** | $0.50 | Reference for cost semaphore color in the Tracking tab; also used for urgent spike detection |
+
+ROI = `accuracy / avg_cost_per_session`. Higher ROI means more accurate output per dollar spent.
+
+For the full threshold schema and urgent triggers see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+## Benchmark methodology
+
+- **Accuracy** = `(total_events - error_events) / total_events`
+- **ROI** = `accuracy / cost_per_session` where cost_per_session = `sum of MAX(cost_usd) per session_id`
+- **Health score** = 60 pts accuracy + 25 pts verdict + 15 pts ROI (0–100 scale)
+- **Verdicts**: `KEEP` / `SWITCH` / `URGENT_SWITCH` / `INSUFFICIENT_DATA`
+- Minimum sample size: **50 events** (below this → `INSUFFICIENT_DATA`)
+- `URGENT_SWITCH` triggers when accuracy < 0.60 or error rate > 30%
+
+For full methodology details see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Agents tracked
 
-Metronous automatically discovers all agents from your OpenCode configuration:
+Metronous automatically discovers all agents from events in the tracking database:
 
-- **Built-in agents**: `build`, `plan`, `general`, `explore`  
-- **Custom agents**: any agent defined in `opencode.json` or `~/.config/opencode/agents/*.md` (at global or project level), with type `primary`, `subagent`, or `all`
+- **Built-in agents**: `build`, `plan`, `general`, `explore`
+- **Custom agents**: any agent defined in `opencode.json` or `~/.config/opencode/agents/*.md`
 
-For benchmarking, Metronous requires each agent to have a **mission** defined (via the `description` field in `opencode.json` or YAML frontmatter in the agent's markdown file). Here's an example with the Gentle AI SDD agents:
+For benchmarking, each agent is evaluated independently per model used. Here is an example set from the Gentle AI SDD ecosystem:
 
-| Agent | Mission |
-|-------|---------|
+| Agent | Role |
+|-------|------|
 | `sdd-orchestrator` | Coordinates sub-agents, never does work inline |
 | `sdd-apply` | Implements code changes from task definitions |
 | `sdd-explore` | Investigates codebase and thinks through ideas |

@@ -1,5 +1,5 @@
 project_name: metronous
-version: 1
+version: 2
 archives:
   - format: tar.gz
     format_overrides:
@@ -30,6 +30,7 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+      - darwin
       - windows
     goarch:
       - amd64

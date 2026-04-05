@@ -23,6 +23,12 @@ import (
 	"github.com/kiosvantra/metronous/internal/version"
 )
 
+// updateDoneMsg is sent when a self-update command completes.
+type updateDoneMsg struct {
+	msg     string
+	isError bool
+}
+
 // UpdateCheckMsg is sent when the background update check completes.
 type UpdateCheckMsg struct {
 	Available     bool
@@ -33,9 +39,9 @@ type UpdateCheckMsg struct {
 type Tab int
 
 const (
-	TabTracking          Tab = iota // 0 — real-time event stream
-	TabBenchmarkSummary             // 1 — aggregated benchmark summary
-	TabBenchmarkDetailed            // 2 — per-run benchmark history
+	TabBenchmarkSummary  Tab = iota // 0 — aggregated benchmark summary
+	TabBenchmarkDetailed            // 1 — per-run benchmark history
+	TabTracking                     // 2 — real-time event stream
 	TabCharts                       // 3 — cost charts
 	TabConfig                       // 4 — threshold editor
 )
@@ -48,9 +54,9 @@ const numTabs = 5
 
 // tabNames are the display labels for each tab (1-indexed for humans).
 var tabNames = [numTabs]string{
-	"[1] Tracking",
-	"[2] Benchmark Summary",
-	"[3] Benchmark Detailed",
+	"[1] Benchmark History Summary",
+	"[2] Benchmark Detailed",
+	"[3] Tracking",
 	"[4] Charts",
 	"[5] Config",
 }
@@ -116,6 +122,10 @@ type AppModel struct {
 	LatestVersion string
 	// CurrentVersion is the currently running version.
 	CurrentVersion string
+
+	// dataDir is the Metronous data directory (e.g. ~/.metronous/data).
+	// It is used when restarting the daemon after configuration changes.
+	dataDir string
 }
 
 func (m *AppModel) closeTrackingPopup() {
@@ -146,21 +156,23 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 			thresholds = &defaults
 		}
 		engine := decision.NewDecisionEngine(thresholds)
-		iwr = runner.NewRunner(es, bs, engine, dataDir, nil)
+		agentModelLookup := config.LoadDefaultAgentModelLookup(nil)
+		iwr = runner.NewRunnerWithModelLookup(es, bs, engine, dataDir, nil, agentModelLookup)
 	}
 
 	return AppModel{
-		CurrentTab:       TabTracking,
+		CurrentTab:       TabBenchmarkSummary,
 		tracking:         NewTrackingModel(es),
-		benchmarkSummary: NewBenchmarkSummaryModel(bs),
+		benchmarkSummary: NewBenchmarkSummaryModel(bs, iwr),
 		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
 		config:           NewConfigModel(configPath),
 		charts:           NewChartsModel(es, bs),
 		CurrentVersion:   version,
+		dataDir:          dataDir,
 		needsClear:       true,
 		showLanding:      true,
 		landingCursor:    0,
-		landingQuitIndex: 5,
+		landingQuitIndex: 6,
 		UpdateAvailable:  false,
 		LatestVersion:    "",
 	}
@@ -269,6 +281,46 @@ func httpGet(url string) ([]byte, error) {
 	return buf[:n], nil
 }
 
+// restartDaemonCmd returns a command that restarts the Metronous daemon when
+// it is running as a managed system service. The command is best-effort: it
+// never prevents the TUI from functioning and reports any failure as a
+// transient status message.
+func restartDaemonCmd(dataDir string) tea.Cmd {
+	if dataDir == "" {
+		return nil
+	}
+
+	return func() tea.Msg {
+		exePath, err := os.Executable()
+		if err != nil {
+			return updateDoneMsg{msg: "config saved but could not locate metronous executable to restart daemon", isError: true}
+		}
+
+		// Check whether the daemon is running as a managed service for this
+		// data directory. When the service is not installed or stopped, this
+		// call will not contain "status: running" and we skip the restart.
+		statusCmd := exec.Command(exePath, "service", "status", "--data-dir", dataDir)
+		out, _ := statusCmd.CombinedOutput()
+		status := string(out)
+		if !strings.Contains(status, "status: running") {
+			// Service not running or not installed — nothing to restart.
+			return updateDoneMsg{msg: "config saved (daemon not running as system service)", isError: false}
+		}
+
+		stopCmd := exec.Command(exePath, "service", "stop", "--data-dir", dataDir)
+		if out, err := stopCmd.CombinedOutput(); err != nil {
+			return updateDoneMsg{msg: "config saved but failed to stop daemon: " + strings.TrimSpace(string(out)), isError: true}
+		}
+
+		startCmd := exec.Command(exePath, "service", "start", "--data-dir", dataDir)
+		if out, err := startCmd.CombinedOutput(); err != nil {
+			return updateDoneMsg{msg: "config saved but failed to start daemon: " + strings.TrimSpace(string(out)), isError: true}
+		}
+
+		return updateDoneMsg{msg: "config saved and daemon restarted", isError: false}
+	}
+}
+
 // Update handles all incoming messages and routes them to sub-models.
 //
 // Key events are handled by the app first (tab switching, quit) and then
@@ -280,6 +332,16 @@ func httpGet(url string) ([]byte, error) {
 // they are not active. Each sub-model already ignores messages it does not
 // understand via the default case in its own Update switch.
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle self-update result.
+	if ud, ok := msg.(updateDoneMsg); ok {
+		if ud.isError {
+			m.StatusMsg = "✗ " + ud.msg
+		} else {
+			m.StatusMsg = "✓ " + ud.msg
+		}
+		return m, nil
+	}
+
 	// Handle update check result
 	if um, ok := msg.(UpdateCheckMsg); ok {
 		m.UpdateAvailable = um.Available
@@ -290,7 +352,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle app-level key events first (tab switching, quit, and
 	// tab-specific shortcuts like ctrl+s / ctrl+r).
 	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
+		keyStr := key.String()
+		// In nvim keymap preset, map h/l to left/right for tab navigation on
+		// non-config tabs. The Config tab owns its own hjkl keymap for editing,
+		// so we must not hijack h/l here or they will never reach the
+		// ConfigModel.
+		if m.CurrentTab != TabConfig && m.config.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
+			switch keyStr {
+			case "h":
+				keyStr = "left"
+			case "l":
+				keyStr = "right"
+			}
+		}
+
+		switch keyStr {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 
@@ -317,42 +393,57 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				updateCmd := exec.Command(exePath, "self-update")
-				updateCmd.Stdout = os.Stdout
-				updateCmd.Stderr = os.Stderr
-				err := updateCmd.Run()
+				out, err := updateCmd.CombinedOutput()
+				outStr := strings.TrimSpace(string(out))
 				if err != nil {
-					m.StatusMsg = "Update failed: " + err.Error()
-				} else {
-					m.StatusMsg = "Update complete! Close and reopen the dashboard."
+					return updateDoneMsg{msg: "Update failed: " + outStr, isError: true}
 				}
-				return nil
+				if strings.Contains(outStr, "Already up to date") {
+					return updateDoneMsg{msg: "Already up to date — no update needed.", isError: false}
+				}
+				return updateDoneMsg{msg: "Update complete! Restart the dashboard to use the new version.", isError: false}
 			}
 
 		case "1":
-			m.CurrentTab = TabTracking
+			// Pressing the key for the currently active tab should be a no-op
+			// so that the dashboard does not flash or re-clear the screen.
+			if !m.showLanding && m.CurrentTab == TabBenchmarkSummary {
+				return m, nil
+			}
+			if m.CurrentTab == TabTracking {
+				m.closeTrackingPopup()
+			}
+			m.CurrentTab = TabBenchmarkSummary
 			m.landingCursor = 0
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "2":
+			if !m.showLanding && m.CurrentTab == TabBenchmarkDetailed {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
-			m.CurrentTab = TabBenchmarkSummary
+			m.CurrentTab = TabBenchmarkDetailed
 			m.landingCursor = 1
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "3":
-			if m.CurrentTab == TabTracking {
-				m.closeTrackingPopup()
+			if !m.showLanding && m.CurrentTab == TabTracking {
+				return m, nil
 			}
-			m.CurrentTab = TabBenchmarkDetailed
+			m.closeTrackingPopup()
+			m.CurrentTab = TabTracking
 			m.landingCursor = 2
 			m.showLanding = false
 			m.needsClear = true
 			return m, nil
 		case "4":
+			if !m.showLanding && m.CurrentTab == TabCharts {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
@@ -362,6 +453,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "5":
+			if !m.showLanding && m.CurrentTab == TabConfig {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
@@ -372,7 +466,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "left":
-			// Allow Charts tab to handle month navigation with arrow keys.
 			if m.showLanding {
 				if m.landingCursor > 0 {
 					m.landingCursor--
@@ -382,8 +475,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.CurrentTab == TabCharts {
-				break
+			// When already on the first tab, treating a left-arrow press as a
+			// full tab switch causes the dashboard to clear and appear blank until
+			// another view change happens. Make it a no-op instead.
+			if m.CurrentTab == TabBenchmarkSummary {
+				return m, nil
 			}
 			oldTab := m.CurrentTab
 			if m.CurrentTab > 0 {
@@ -397,7 +493,6 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "right":
-			// Allow Charts tab to handle month navigation with arrow keys.
 			if m.showLanding {
 				max := m.landingQuitIndex
 				if m.landingCursor < max {
@@ -408,8 +503,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.CurrentTab == TabCharts {
-				break
+			// When already on the last tab, treating a right-arrow press as a
+			// full tab switch causes the dashboard to clear and appear blank until
+			// another view change happens. Make it a no-op instead.
+			if int(m.CurrentTab) >= numTabs-1 {
+				return m, nil
 			}
 			oldTab := m.CurrentTab
 			if int(m.CurrentTab) < numTabs-1 {
@@ -426,15 +524,19 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showLanding {
 				if m.landingCursor > 0 {
 					m.landingCursor--
-					m.CurrentTab = Tab(m.landingCursor)
+					if m.landingCursor < numTabs {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
 				}
 				return m, nil
 			}
 		case "down", "j":
 			if m.showLanding {
-				if m.landingCursor < numTabs-1 {
+				if m.landingCursor < m.landingQuitIndex {
 					m.landingCursor++
-					m.CurrentTab = Tab(m.landingCursor)
+					if m.landingCursor < numTabs {
+						m.CurrentTab = Tab(m.landingCursor)
+					}
 				}
 				return m, nil
 			}
@@ -443,6 +545,26 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showLanding {
 				if m.landingCursor == m.landingQuitIndex {
 					return m, tea.Quit
+				}
+				// Update option (index 5).
+				if m.landingCursor == m.landingQuitIndex-1 {
+					exePath, err := os.Executable()
+					if err != nil {
+						m.StatusMsg = "Error: could not find executable"
+						return m, nil
+					}
+					return m, func() tea.Msg {
+						updateCmd := exec.Command(exePath, "self-update")
+						out, err := updateCmd.CombinedOutput()
+						outStr := strings.TrimSpace(string(out))
+						if err != nil {
+							return updateDoneMsg{msg: "Update failed: " + outStr, isError: true}
+						}
+						if strings.Contains(outStr, "Already up to date") {
+							return updateDoneMsg{msg: "Already up to date — no update needed.", isError: false}
+						}
+						return updateDoneMsg{msg: "Update complete! Restart the dashboard to use the new version.", isError: false}
+					}
 				}
 				m.CurrentTab = Tab(m.landingCursor)
 				m.showLanding = false
@@ -465,6 +587,20 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, cmd
 			}
 			return m, nil
+
+		case "s":
+			if m.CurrentTab == TabConfig {
+				var cmd tea.Cmd
+				m.config, cmd = m.config.UpdateSave(key)
+				return m, cmd
+			}
+
+		case "r":
+			if m.CurrentTab == TabConfig {
+				var cmd tea.Cmd
+				m.config, cmd = m.config.UpdateReload(key)
+				return m, cmd
+			}
 		}
 
 		// Unknown key — forward only to the active sub-model.
@@ -491,13 +627,23 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Height = ws.Height
 	}
 
+	// When thresholds are saved from the Config tab, attempt to restart the
+	// daemon so that runtime decisions pick up the new configuration without
+	// requiring a manual service command.
+	var daemonCmd tea.Cmd
+	if _, ok := msg.(ConfigSavedMsg); ok {
+		if m.dataDir != "" {
+			daemonCmd = restartDaemonCmd(m.dataDir)
+		}
+	}
+
 	var tCmd, sCmd, bCmd, cCmd, chCmd tea.Cmd
 	m.tracking, tCmd = m.tracking.Update(msg)
 	m.benchmarkSummary, sCmd = m.benchmarkSummary.Update(msg)
 	m.benchmark, bCmd = m.benchmark.Update(msg)
 	m.config, cCmd = m.config.Update(msg)
 	m.charts, chCmd = m.charts.Update(msg)
-	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd, chCmd)
+	return m, tea.Batch(tCmd, sCmd, bCmd, cCmd, chCmd, daemonCmd)
 }
 
 // View renders the full dashboard.
@@ -554,13 +700,17 @@ func (m *AppModel) View() string {
 	if m.showLanding {
 		hint = statusBarStyle.Render("1/2/3/4/5 or ↑/↓: select  Enter: open/quit  q: quit")
 	} else {
-		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  ctrl+s: save  ctrl+r: reload  u: update")
+		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  u: update")
 	}
 
-	if m.showLanding {
-		return prefix + fmt.Sprintf("%s\n%s\n%s", banner, content, hint)
+	statusLine := ""
+	if m.StatusMsg != "" {
+		statusLine = lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Render("  "+m.StatusMsg) + "\n"
 	}
-	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s", tabBar, banner, content, hint)
+	if m.showLanding {
+		return prefix + fmt.Sprintf("%s\n%s\n%s%s", banner, content, statusLine, hint)
+	}
+	return prefix + fmt.Sprintf("%s\n%s\n%s\n%s%s", tabBar, banner, content, statusLine, hint)
 }
 
 func (m *AppModel) renderLanding() string {
@@ -592,18 +742,25 @@ func (m *AppModel) renderLanding() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(cyan).Render("METRONOUS")
 	sub := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Local AI agent telemetry, benchmarking, and model calibration for OpenCode agents.")
 
-	// Menu.
-	entries := []struct {
+	// Menu entries — plain strings, no pre-styled content.
+	type menuEntry struct {
 		idx  int
 		name string
-		tab  Tab
-	}{
-		{0, "Tracking", TabTracking},
-		{1, "Benchmark Summary", TabBenchmarkSummary},
-		{2, "Benchmark Detailed", TabBenchmarkDetailed},
-		{3, "Charts", TabCharts},
-		{4, "Config", TabConfig},
-		{5, "Quit", TabTracking},
+	}
+	var updateStatus string
+	if m.UpdateAvailable {
+		updateStatus = fmt.Sprintf("Update  (%s available)", m.LatestVersion)
+	} else {
+		updateStatus = "Update  (up to date)"
+	}
+	entries := []menuEntry{
+		{0, "Benchmark History Summary"},
+		{1, "Benchmark Detailed"},
+		{2, "Tracking"},
+		{3, "Charts"},
+		{4, "Config"},
+		{5, updateStatus},
+		{6, "Quit"},
 	}
 
 	menuLines := make([]string, 0, len(entries))
@@ -612,10 +769,15 @@ func (m *AppModel) renderLanding() string {
 		style := mutedStyle
 		if e.idx == m.landingCursor {
 			bullet = "▶"
-			style = cursorStyle
+			if e.idx == 5 && m.UpdateAvailable {
+				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+			} else {
+				style = cursorStyle
+			}
+		} else if e.idx == 5 && m.UpdateAvailable {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
 		}
-		label := fmt.Sprintf("%s %s", bullet, e.name)
-		menuLines = append(menuLines, style.Render(label))
+		menuLines = append(menuLines, style.Render(fmt.Sprintf("%s %s", bullet, e.name)))
 	}
 
 	footer := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Originally developed within the Gentle AI ecosystem. Press Enter to open; select Quit to exit.")
@@ -625,8 +787,30 @@ func (m *AppModel) renderLanding() string {
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 1)
 
+	// Version label top-right inside the frame.
+	versionLine := ""
+	if m.CurrentVersion != "" {
+		versionLabel := "v" + m.CurrentVersion
+		vStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		if m.Width > 0 {
+			// Right-align within the available width (subtract frame borders+padding).
+			innerW := m.Width - 4
+			pad := innerW - lipgloss.Width(versionLabel)
+			if pad < 0 {
+				pad = 0
+			}
+			versionLine = strings.Repeat(" ", pad) + vStyle.Render(versionLabel)
+		} else {
+			versionLine = vStyle.Render(versionLabel)
+		}
+	}
+
 	// Use the frame width as a soft constraint.
-	content := strings.Join([]string{
+	contentParts := []string{}
+	if versionLine != "" {
+		contentParts = append(contentParts, versionLine)
+	}
+	contentParts = append(contentParts,
 		art,
 		"",
 		title,
@@ -636,7 +820,8 @@ func (m *AppModel) renderLanding() string {
 		strings.Join(menuLines, "\n"),
 		"",
 		footer,
-	}, "\n")
+	)
+	content := strings.Join(contentParts, "\n")
 
 	return frame.Render(content)
 }

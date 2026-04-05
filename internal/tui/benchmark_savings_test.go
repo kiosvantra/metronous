@@ -6,6 +6,31 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 )
 
+func TestFormatDuration(t *testing.T) {
+	cases := []struct {
+		ms   float64
+		want string
+	}{
+		{0, "0.0s"},
+		{-5, "0.0s"},
+		{1500, "1.5s"},
+		{42300, "42.3s"},
+		{59999, "60.0s"},
+		{60000, "1m 0s"},
+		{90000, "1m 30s"},
+		{1455000, "24m 15s"},
+		{3599999, "59m 59s"},
+		{3600000, "1h 0m"},
+		{5003000, "1h 23m"},
+	}
+	for _, c := range cases {
+		got := formatDuration(c.ms)
+		if got != c.want {
+			t.Errorf("formatDuration(%.0f) = %q, want %q", c.ms, got, c.want)
+		}
+	}
+}
+
 func TestComputeSavings(t *testing.T) {
 	pricing := map[string]float64{
 		"m1":   10,

@@ -76,33 +76,31 @@ func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics
 // For free models or when cost data is unreliable, ROI failures do not drive the
 // recommendation — only quality failures (accuracy, latency, tool success) do.
 //
-// Heuristic:
-//   - Accuracy or error-rate failures → recommend a stronger/smarter model
-//   - Latency failures                → recommend a faster/cheaper model
-//   - ROI failure (paid + reliable)   → recommend a faster/cheaper model
-//   - Both accuracy and latency fail  → accuracy takes precedence (correctness first)
+// Heuristic (accuracy-first, cost second):
+//   - Accuracy failure → recommend a stronger/smarter model (AccuracyModel)
+//   - ROI failure (paid model, reliable cost data) → recommend a cheaper model (PerformanceModel)
+//   - Note: latency is not used as a trigger — current duration_ms data is noisy
 func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations, root *config.Thresholds) string {
 	if vt != store.VerdictSwitch && vt != store.VerdictUrgentSwitch {
 		return ""
 	}
 
 	accuracyFailed := m.Accuracy < thresholds.MinAccuracy
-	latencyFailed := m.P95LatencyMs > float64(thresholds.MaxLatencyP95Ms)
 
 	// ROI is only considered when the model is paid AND cost data is reliable.
 	roiFailed := roiActive(m.Model, m, root) && m.ROIScore < thresholds.MinROIScore
 
-	// Accuracy issues require a stronger model regardless of other failures.
+	// Accuracy issues require a stronger/smarter model.
 	if accuracyFailed {
 		return models.AccuracyModel
 	}
 
-	// Latency or cost/ROI issues → cheaper, faster model.
-	if latencyFailed || roiFailed {
+	// ROI failure → cheaper model that delivers similar accuracy at lower cost.
+	if roiFailed {
 		return models.PerformanceModel
 	}
 
-	// Fallback for other switch triggers (tool success rate, etc.).
+	// Fallback.
 	return models.DefaultModel
 }
 

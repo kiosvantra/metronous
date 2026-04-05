@@ -103,7 +103,7 @@ database:
   benchmark_path: %s
 
 scheduler:
-  benchmark_schedule: "0 0 2 * * 0"
+  benchmark_schedule: "0 0 2 * * 1"
   window_days: 7
 
 log:

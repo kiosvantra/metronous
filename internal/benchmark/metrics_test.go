@@ -217,8 +217,8 @@ func TestAggregateMetricsWithSession(t *testing.T) {
 		t.Errorf("TotalCostUSD: got %f, want 0.50", m.TotalCostUSD)
 	}
 	// cost_per_session = 0.50 / 2 = 0.25
-	// ROI = tool_success_rate / cost_per_session = 1.0 / 0.25 = 4.0
-	wantROI := 1.0 / 0.25
+	// ROI = accuracy / cost_per_session = (2/3) / 0.25 = ~2.666
+	wantROI := m.Accuracy / 0.25
 	if m.ROIScore != wantROI {
 		t.Errorf("ROIScore: got %f, want %f (1.0/0.25)", m.ROIScore, wantROI)
 	}

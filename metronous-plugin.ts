@@ -73,24 +73,89 @@ interface SessionState {
   totalCostUsd: number
   promptTokens: number
   completionTokens: number
+  /** MAX cost seen in the current model segment — segment total when idle */
+  lastStepCost: number
+  /** Last tokens.total seen — used to detect model switches (resets to small value) */
+  lastStepTokensTotal: number
+  /** Accumulated cost from completed segments (before current segment) */
+  completedSegmentsCost: number
+  /** The last model actively used in this session (updated on every chat.params) */
+  lastActiveModel: string
+  /** Timestamp of the last idle event — used to decide when to evict from memory */
+  lastIdleAt: number
+}
+
+/**
+ * normalizeModel preserves the full provider/model string (e.g. "opencode/claude-sonnet-4-6")
+ * so that different providers of the same base model can be compared independently.
+ * Only cleans up edge cases like empty strings or undefined.
+ */
+function normalizeModel(model: string): string {
+  if (!model || model === "undefined/undefined") return "unknown"
+  return model
 }
 
 const sessions = new Map<string, SessionState>()
 
+// Persist accumulated cost to disk so restarts don't lose progress.
+const COST_CACHE_FILE = `${METRONOUS_DATA_DIR}/session_costs.json`
+
+function loadCostCache(): Record<string, number> {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (!fs.existsSync(COST_CACHE_FILE)) return {}
+    const parsed = JSON.parse(fs.readFileSync(COST_CACHE_FILE, "utf8"))
+    if (!(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))) return {}
+    const validated: Record<string, number> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value)) validated[key] = value
+    }
+    return validated
+  } catch (err) {
+    logError("loadCostCache failed:", err)
+    return {}
+  }
+}
+
+function saveCostCache(sessionId: string, cost: number) {
+  try {
+    if (!Number.isFinite(cost)) {
+      logError("saveCostCache: refusing to write non-finite cost:", cost)
+      return
+    }
+    const fs = require("fs") as typeof import("fs")
+    costCache[sessionId] = cost
+    fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(costCache))
+  } catch (err) {
+    logError("saveCostCache failed:", err)
+  }
+}
+
+const costCache = loadCostCache()
+
 function getOrCreateSession(sessionId: string, agentId = "opencode", model = "unknown"): SessionState {
   if (!sessions.has(sessionId)) {
+    const normalizedModel = normalizeModel(model)
+    const hasProviderPrefix = normalizedModel.includes("/")
+    // Restore cost from disk cache if OpenCode was restarted mid-session
+    const restoredCost = costCache[sessionId] ?? 0
     sessions.set(sessionId, {
       startTime: Date.now(),
-      model,
+      model: hasProviderPrefix ? normalizedModel : "unknown",
       agentId,
       toolCalls: 0,
       successfulToolCalls: 0,
       errors: 0,
       reworkCount: 0,
       recentTools: new Map(),
-      totalCostUsd: 0,
+      totalCostUsd: restoredCost,
       promptTokens: 0,
       completionTokens: 0,
+      lastStepCost: 0,
+      lastStepTokensTotal: 0,
+      completedSegmentsCost: 0,
+      lastActiveModel: hasProviderPrefix ? normalizedModel : "unknown",
+      lastIdleAt: 0,
     })
   }
   return sessions.get(sessionId)!
@@ -196,20 +261,29 @@ async function waitForServer(agentId: string): Promise<void> {
   logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session (tried ${attempt} times)`)
 }
 
+// MAX_RECONNECT_ATTEMPTS is how many times httpPost will try to re-read the
+// port file and retry after an ECONNREFUSED before giving up on this payload.
+const MAX_RECONNECT_ATTEMPTS = 3
+const RECONNECT_DELAY_MS = 500
+
 // httpPost sends a JSON payload to POST /ingest on the server.
+// On ECONNREFUSED it re-reads mcp.port (the daemon may have restarted and
+// changed ports) and retries up to MAX_RECONNECT_ATTEMPTS times.
 async function httpPost(payload: object): Promise<void> {
   if (!serverPort) {
     log("httpPost: serverPort is null, dropping event")
     return
   }
-  try {
-    const http = require("http") as typeof import("http")
-    const body = JSON.stringify(payload)
-    await new Promise<void>((resolve) => {
+  const http = require("http") as typeof import("http")
+  const body = JSON.stringify(payload)
+
+  for (let attempt = 0; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+    const port = serverPort!
+    const success = await new Promise<boolean>((resolve) => {
       const req = http.request(
         {
           hostname: "127.0.0.1",
-          port: serverPort,
+          port,
           path: "/ingest",
           method: "POST",
           headers: {
@@ -220,21 +294,43 @@ async function httpPost(payload: object): Promise<void> {
         (res) => {
           // Drain the response body so Node.js doesn't leak the socket.
           res.resume()
-          res.on("end", resolve)
+          res.on("end", () => resolve(true))
         }
       )
       req.setTimeout(5000, () => {
         req.destroy()
-        resolve()
+        resolve(false)
       })
-      req.on("error", (err) => {
-        logError("HTTP ingest error:", err.message)
-        resolve()
+      req.on("error", (err: Error & { code?: string }) => {
+        if (err.code === "ECONNREFUSED") {
+          // Daemon restarted — invalidate cached port so we re-read the file.
+          log(`httpPost: ECONNREFUSED on port ${port} — will re-read mcp.port (attempt ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS})`)
+          serverPort = null
+          serverReady = false
+        } else {
+          logError("HTTP ingest error:", err.message)
+        }
+        resolve(false)
       })
       req.end(body)
     })
-  } catch (err) {
-    logError("httpPost error:", (err as Error).message)
+
+    if (success) return
+
+    if (attempt < MAX_RECONNECT_ATTEMPTS) {
+      // Wait briefly then re-read the port file.
+      await sleep(RECONNECT_DELAY_MS)
+      const newPort = readPortFile()
+      if (newPort !== null) {
+        serverPort = newPort
+        serverReady = true
+        log(`httpPost: reconnected to daemon on new port ${newPort}`)
+      } else {
+        log("httpPost: mcp.port not available yet, will retry")
+      }
+    } else {
+      logError(`httpPost: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`)
+    }
   }
 }
 
@@ -242,14 +338,29 @@ async function callIngest(payload: object): Promise<void> {
   const eventType = (payload as { event_type?: string }).event_type
 
   if (!serverReady) {
-    // Buffer the event; it will be flushed once the server is ready.
-    if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
-      preReadyQueue.shift() // drop oldest to bound memory
-      writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
+    // Daemon may have restarted — try to re-read the port file before buffering.
+    const port = readPortFile()
+    if (port !== null) {
+      serverPort = port
+      serverReady = true
+      log(`callIngest: daemon recovered on port ${port}, flushing pre-ready queue`)
+      // Flush any buffered events first.
+      if (preReadyQueue.length > 0) {
+        const queued = preReadyQueue.splice(0)
+        for (const buffered of queued) {
+          await httpPost(buffered)
+        }
+      }
+    } else {
+      // Still not ready — buffer the event.
+      if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
+        preReadyQueue.shift() // drop oldest to bound memory
+        writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
+      }
+      log(`Not ready yet, buffering ${eventType}`)
+      preReadyQueue.push(payload)
+      return
     }
-    log(`Not ready yet, buffering ${eventType}`)
-    preReadyQueue.push(payload)
-    return
   }
 
   log(`Sending ingest via HTTP: ${eventType}`)
@@ -294,10 +405,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
           : rawAgent?.name ?? rawAgent?.id ?? (rawAgent ? JSON.stringify(rawAgent) : null)
         const agentName = envAgentId ?? resolvedAgent ?? "opencode"
 
-        // Build model string: "providerID/modelID" (e.g. "opencode/claude-sonnet-4-6")
-        const modelStr = input.model
+        // Build model string and normalize to strip provider prefixes.
+        const rawModelStr = input.model
           ? `${input.model.providerID}/${input.model.modelID}`
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         // Update current agent for sessions not yet seen
         if (!envAgentId && resolvedAgent) {
@@ -306,9 +418,13 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
         const isNewSession = !sessions.has(sessionId)
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        // Update model/agent if the session already existed with defaults
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        // Update model/agent if the session already existed with defaults.
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always track the last active model (may change mid-session).
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         log(`chat.message — session: ${sessionId}, agent: ${agentName}, model: ${modelStr}`)
 
@@ -342,19 +458,24 @@ export const plugin: Plugin = async ({ directory, client }) => {
         // Model may have .id (short: "claude-sonnet-4-6") and also .providerID/.modelID
         // Prefer building the full "providerID/modelID" string; fall back to .id
         const rawModel = input.model as any
-        const modelStr = rawModel
+        const rawModelStr = rawModel
           ? (rawModel.providerID && rawModel.modelID
               ? `${rawModel.providerID}/${rawModel.modelID}`
               : rawModel.id ?? "unknown")
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         if (!envAgentId && resolvedAgent) {
           currentAgentId = resolvedAgent
         }
 
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always update lastActiveModel — chat.params fires before every LLM call.
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         // Debug: log raw agent/model shapes to help diagnose future issues
         log("CHAT_PARAMS", JSON.stringify({ rawAgent, rawModel, agentName, modelStr }))
@@ -401,6 +522,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
           tool_name: toolName,
           tool_success: success,
           duration_ms: (output?.metadata as any)?.durationMs ?? 0,
+          // This is a lagging snapshot from the previous step-finish, not the current step's cost.
           cost_usd: state.totalCostUsd,
           prompt_tokens: state.promptTokens,
           completion_tokens: state.completionTokens,
@@ -425,18 +547,18 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!sessionId) return
           const state = sessions.get(sessionId)
           if (!state) return
-          // step-finish.cost and tokens are CUMULATIVE totals for the session
-          // Always take the latest (highest) value — it already includes all previous steps
-          if ((part.cost ?? 0) > state.totalCostUsd) {
-            state.totalCostUsd = part.cost ?? 0
-          }
-          if ((part.tokens?.input ?? 0) > state.promptTokens) {
-            state.promptTokens = part.tokens?.input ?? 0
-          }
-          if ((part.tokens?.output ?? 0) > state.completionTokens) {
-            state.completionTokens = part.tokens?.output ?? 0
-          }
-          log(`step-finish — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
+          // step-finish.cost is the per-step cost reported by the OpenCode runtime.
+          // Accumulate it so "spent" matches the real request-level usage.
+          const rawCost = part.cost
+          const newCost = Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0
+          if (typeof rawCost === "number" && (!Number.isFinite(rawCost) || rawCost < 0)) logError("step-finish cost was negative:", rawCost)
+          const newTokensTotal = part.tokens?.total ?? 0
+          state.totalCostUsd += newCost
+          state.lastStepTokensTotal = newTokensTotal
+          state.promptTokens += Number.isFinite(part.tokens?.input) ? part.tokens!.input : 0
+          state.completionTokens += Number.isFinite(part.tokens?.output) ? part.tokens!.output : 0
+          saveCostCache(sessionId, state.totalCostUsd)
+          log(`step-finish — stepCost=$${newCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
 
         if (event.type === "session.idle") {
@@ -448,39 +570,19 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Snapshot duration BEFORE any await to avoid wall-clock inflation.
           const durationMs = Date.now() - state.startTime
 
-          // Reconcile via client.session.messages() — correct path param is { id: sessionId }
-          try {
-            const result = await client.session.messages({ path: { id: sessionId } })
-            writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
-            const messages = (result as any)?.data ?? []
-            let costMax = 0, promptMax = 0, completionMax = 0
-            for (const msg of messages) {
-              for (const part of (msg.parts ?? [])) {
-                if (part?.type === "step-finish") {
-                  // step-finish.cost and tokens are CUMULATIVE — take MAX across all messages
-                  // (the last step-finish holds the true session total)
-                  costMax = Math.max(costMax, part.cost ?? 0)
-                  promptMax = Math.max(promptMax, part.tokens?.input ?? 0)
-                  completionMax = Math.max(completionMax, part.tokens?.output ?? 0)
-                }
-              }
-            }
-            if (costMax > 0 || promptMax > 0) {
-              state.totalCostUsd = costMax
-              state.promptTokens = promptMax
-              state.completionTokens = completionMax
-            }
-            log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
-          } catch (e) {
-            log(`Could not reconcile messages: ${e}`)
-          }
+          // Cost is accumulated in real-time from step-finish events (message.part.updated).
+          // Also save on idle so the cache always reflects the latest complete cost.
+          saveCostCache(sessionId, state.totalCostUsd)
+          log(`Session idle — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
 
           const quality = calculateQualityProxy(state)
+          // Use lastActiveModel (the model active at session end) for the complete event.
+          const completeModel = state.lastActiveModel
           await callIngest({
             agent_id: state.agentId,
             event_type: "complete",
             session_id: sessionId,
-            model: state.model,
+            model: completeModel,
             cost_usd: state.totalCostUsd,
             prompt_tokens: state.promptTokens,
             completion_tokens: state.completionTokens,
@@ -489,7 +591,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
             duration_ms: durationMs,
             timestamp: now(),
           })
-          sessions.delete(sessionId)
+
+          // Keep the session in memory indefinitely.
+          // The user may return to the same session after minutes, hours, or days.
+          // The map is reset naturally when OpenCode restarts — no manual eviction needed.
+          state.lastIdleAt = Date.now()
         }
 
         if (event.type === "session.error") {

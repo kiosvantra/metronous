@@ -21,22 +21,28 @@ func GetBenchmarkSummaryRows(m BenchmarkSummaryModel) []summaryRow {
 
 // ComputeHealthScoreForTest exposes computeHealthScore for unit testing.
 func ComputeHealthScoreForTest(accuracy, p95Ms float64, verdict store.VerdictType) float64 {
-	return computeHealthScore(accuracy, p95Ms, verdict)
+	return computeHealthScore(accuracy, p95Ms, verdict, 0, defaultChartMinROI)
 }
 
 // AggregateSummaryRowsForTest runs the same aggregation logic as fetchSummary
 // over a provided slice of BenchmarkRuns and returns the computed summaryRows.
-// This allows unit tests to verify INSUFFICIENT_DATA filtering without a live store.
+// This allows unit tests to verify INSUFFICIENT_DATA filtering, weekly-only
+// aggregation, active model marking, and RawModel display without a live store.
 func AggregateSummaryRowsForTest(runs []store.BenchmarkRun) []summaryRow {
 	type key struct{ agent, model string }
 	type agg struct {
+		rawModel     string
 		runs         int
 		totalSamples int
 		sumAccuracy  float64
 		sumP95       float64
 		lastCostUSD  float64
 		lastVerdict  store.VerdictType
-		lastRunAt    time.Time
+		lastRunAt    time.Time // most recent non-insufficient run (for verdict/cost display)
+		mostRecentAt time.Time // actual most recent run (for active-model tiebreaking)
+		lastStatus   store.RunStatus
+		lastAccuracy float64
+		lastP95      float64
 	}
 	aggMap := make(map[key]*agg)
 
@@ -44,34 +50,69 @@ func AggregateSummaryRowsForTest(runs []store.BenchmarkRun) []summaryRow {
 		if r.RunAt.IsZero() {
 			continue
 		}
-		k := key{r.AgentID, r.Model}
+		k := key{r.AgentID, store.NormalizeModelName(r.Model)}
 		a := aggMap[k]
 		if a == nil {
 			a = &agg{}
 			aggMap[k] = a
 		}
 
+		isWeekly := r.RunKind == store.RunKindWeekly || r.RunKind == ""
 		isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
-		if !isInsufficient {
+		if isWeekly && !isInsufficient {
 			samples := r.SampleSize
 			if samples <= 0 {
 				samples = 1
 			}
 			a.totalSamples += samples
 			a.sumAccuracy += r.Accuracy * float64(samples)
-			a.sumP95 += r.P95LatencyMs * float64(samples)
+			turnMs := r.AvgTurnMs
+			if turnMs <= 0 {
+				turnMs = r.AvgLatencyMs
+			}
+			a.sumP95 += turnMs * float64(samples)
 		}
-		a.runs++
+		if isWeekly {
+			a.runs++
+		}
 
-		if r.RunAt.After(a.lastRunAt) {
-			if !isInsufficient {
+		if r.RunAt.After(a.mostRecentAt) || a.mostRecentAt.IsZero() {
+			a.mostRecentAt = r.RunAt
+			a.lastStatus = r.Status
+			if r.RawModel != "" {
+				a.rawModel = r.RawModel
+			}
+			a.lastAccuracy = r.Accuracy
+			turnMs := r.AvgTurnMs
+			if turnMs <= 0 {
+				turnMs = r.AvgLatencyMs
+			}
+			a.lastP95 = turnMs
+		}
+
+		if !isInsufficient {
+			if r.RunAt.After(a.lastRunAt) || a.lastRunAt.IsZero() {
 				a.lastRunAt = r.RunAt
 				a.lastVerdict = r.Verdict
 				a.lastCostUSD = r.TotalCostUSD
-			} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+			}
+		} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+			if r.RunAt.After(a.lastRunAt) || a.lastRunAt.IsZero() {
 				a.lastRunAt = r.RunAt
 				a.lastVerdict = r.Verdict
 				a.lastCostUSD = r.TotalCostUSD
+			}
+		}
+	}
+
+	// Determine active model per agent using mostRecentAt for accurate tiebreaking.
+	activeModelByAgent := make(map[string]string)
+	activeRunAtByAgent := make(map[string]time.Time)
+	for k, a := range aggMap {
+		if a.lastStatus == store.RunStatusActive {
+			if prev, ok := activeRunAtByAgent[k.agent]; !ok || a.mostRecentAt.After(prev) {
+				activeModelByAgent[k.agent] = k.model
+				activeRunAtByAgent[k.agent] = a.mostRecentAt
 			}
 		}
 	}
@@ -83,14 +124,23 @@ func AggregateSummaryRowsForTest(runs []store.BenchmarkRun) []summaryRow {
 		if a.totalSamples > 0 {
 			avgAcc = a.sumAccuracy / float64(a.totalSamples)
 			avgP95 = a.sumP95 / float64(a.totalSamples)
+		} else {
+			avgAcc = a.lastAccuracy
+			avgP95 = a.lastP95
 		}
-		health := computeHealthScore(avgAcc, avgP95, a.lastVerdict)
+		health := computeHealthScore(avgAcc, avgP95, a.lastVerdict, 0, defaultChartMinROI)
+		displayModel := a.rawModel
+		if displayModel == "" {
+			displayModel = k.model
+		}
 		rows = append(rows, summaryRow{
 			AgentID:      k.agent,
-			Model:        k.model,
+			Model:        displayModel,
+			RawModel:     a.rawModel,
+			IsActive:     activeModelByAgent[k.agent] == k.model,
 			Runs:         a.runs,
 			AvgAccuracy:  avgAcc,
-			AvgP95Ms:     avgP95,
+			AvgTurnMs:    avgP95,
 			TotalCostUSD: a.lastCostUSD,
 			HealthScore:  health,
 			LastVerdict:  a.lastVerdict,
@@ -98,6 +148,16 @@ func AggregateSummaryRowsForTest(runs []store.BenchmarkRun) []summaryRow {
 		})
 	}
 	return rows
+}
+
+// GetSummaryRowIsActive returns the IsActive field of a summaryRow for tests.
+func GetSummaryRowIsActive(r summaryRow) bool {
+	return r.IsActive
+}
+
+// GetSummaryRowRawModel returns the RawModel field of a summaryRow for tests.
+func GetSummaryRowRawModel(r summaryRow) string {
+	return r.RawModel
 }
 
 // SummaryRowForTest is the exported name for the internal summaryRow struct.
@@ -111,6 +171,32 @@ type TrackingSessionEventsMsg = trackingSessionEventsMsg
 // Exposed so external tests can inject realistic data.
 func DefaultThresholdValuesForTest() config.Thresholds {
 	return config.DefaultThresholdValues()
+}
+
+// GetConfigKeymapPresetForTest exposes the effective keymap preset for
+// a ConfigModel so external tests can assert on it.
+func GetConfigKeymapPresetForTest(m ConfigModel) config.KeymapPreset {
+	return m.thresholds.EffectiveKeymapPreset()
+}
+
+// SetAppKeymapPresetForTest allows external tests to force a keymap preset
+// on the AppModel without needing to load thresholds from disk.
+func SetAppKeymapPresetForTest(m *AppModel, preset config.KeymapPreset) {
+	m.config.thresholds.KeymapPreset = preset
+}
+
+// GetAppKeymapPresetForTest exposes the effective keymap preset used by the
+// AppModel so tests can assert that Config view save/reload keeps it in sync
+// with the underlying config.
+func GetAppKeymapPresetForTest(m *AppModel) config.KeymapPreset {
+	return m.config.thresholds.EffectiveKeymapPreset()
+}
+
+// GetAppNeedsClearForTest exposes the internal needsClear flag so tests can
+// assert that same-tab navigation key presses are treated as no-ops and do
+// not trigger a full screen clear.
+func GetAppNeedsClearForTest(m *AppModel) bool {
+	return m.needsClear
 }
 
 // TrendDirection exposes the internal trendDirection function for testing.

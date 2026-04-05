@@ -53,6 +53,8 @@ type ChartsModel struct {
 	totalsByCost                 map[string]float64
 
 	cursorDayIndex int // 0-based within the selected month
+
+	minROI float64 // from thresholds config — used for health score computation
 }
 
 func daysInMonth(monthStart time.Time) int {
@@ -106,7 +108,11 @@ func totalsByCost(rows []store.DailyCostByModelRow) map[string]float64 {
 	return totals
 }
 
-func rankModelsByPerformance(summaries []store.BenchmarkModelSummary, active map[string]struct{}, limit int) []string {
+// defaultChartMinROI is the reference ROI used when the full config is not available.
+// Matches config.DefaultThresholdValues().Defaults.MinROIScore.
+const defaultChartMinROI = 0.05
+
+func rankModelsByPerformance(summaries []store.BenchmarkModelSummary, active map[string]struct{}, limit int, minROI float64) []string {
 	type item struct {
 		model string
 		score float64
@@ -119,7 +125,7 @@ func rankModelsByPerformance(summaries []store.BenchmarkModelSummary, active map
 		}
 		items = append(items, item{
 			model: s.Model,
-			score: computeHealthScore(s.AvgAccuracy, s.AvgP95Ms, s.LastVerdict),
+			score: computeHealthScore(s.AvgAccuracy, s.AvgP95Ms, s.LastVerdict, 0, minROI),
 			cost:  s.TotalCostUSD,
 		})
 	}
@@ -181,6 +187,8 @@ type chartModelStats struct {
 	TotalSamples        int
 	SumAccuracy         float64
 	SumP95              float64
+	SumROI              float64
+	ROISamples          int
 	LastVerdict         store.VerdictType
 	LastRunAt           time.Time
 	HealthScore         float64
@@ -296,16 +304,26 @@ func responsibilityWeightForAgent(agentID string) float64 {
 	}
 }
 
-func aggregateChartsModelStats(runs []store.BenchmarkRun) map[string]*chartModelStats {
+func aggregateChartsModelStats(runs []store.BenchmarkRun, minROI float64) map[string]*chartModelStats {
 	stats := make(map[string]*chartModelStats)
 	for _, run := range runs {
 		if run.Model == "" || run.RunAt.IsZero() {
 			continue
 		}
-		s := stats[run.Model]
+		// Fix 1: skip superseded runs — only active runs contribute to scores.
+		if run.Status != store.RunStatusActive {
+			continue
+		}
+		// Fix 4: prefer RawModel (with provider prefix) for consistency with other views.
+		rawName := run.RawModel
+		if rawName == "" {
+			rawName = run.Model
+		}
+		model := store.NormalizeModelName(rawName)
+		s := stats[model]
 		if s == nil {
-			s = &chartModelStats{Model: run.Model}
-			stats[run.Model] = s
+			s = &chartModelStats{Model: model}
+			stats[model] = s
 		}
 
 		s.Runs++
@@ -317,7 +335,13 @@ func aggregateChartsModelStats(runs []store.BenchmarkRun) map[string]*chartModel
 			}
 			s.TotalSamples += samples
 			s.SumAccuracy += run.Accuracy * float64(samples)
-			s.SumP95 += run.P95LatencyMs * float64(samples)
+			// Fix 2: use AvgTurnMs (mean turn duration from complete events) instead of
+			// the deprecated P95LatencyMs alias.
+			s.SumP95 += run.AvgTurnMs * float64(samples)
+			if run.ROIScore > 0 {
+				s.SumROI += run.ROIScore * float64(samples)
+				s.ROISamples += samples
+			}
 		}
 
 		if run.RunAt.After(s.LastRunAt) {
@@ -331,22 +355,31 @@ func aggregateChartsModelStats(runs []store.BenchmarkRun) map[string]*chartModel
 		}
 
 		weight := responsibilityWeightForAgent(run.AgentID)
-		if run.SampleSize <= 0 {
-			run.SampleSize = 1
+		samples := run.SampleSize
+		if samples <= 0 {
+			samples = 1
 		}
-		s.roleWeightSum += float64(run.SampleSize)
-		weightedScore := computeHealthScore(run.Accuracy, run.P95LatencyMs, run.Verdict) * weight
-		s.roleWeightedScore += weightedScore * float64(run.SampleSize)
+		runROI := 0.0
+		if run.ROIScore > 0 {
+			runROI = run.ROIScore
+		}
+		s.roleWeightSum += float64(samples)
+		weightedScore := computeHealthScore(run.Accuracy, run.AvgTurnMs, run.Verdict, runROI, minROI) * weight
+		s.roleWeightedScore += weightedScore * float64(samples)
 	}
 
 	for _, s := range stats {
+		avgAcc := 0.0
+		avgP95 := 0.0
+		avgROI := 0.0
 		if s.TotalSamples > 0 {
-			avgAcc := s.SumAccuracy / float64(s.TotalSamples)
-			avgP95 := s.SumP95 / float64(s.TotalSamples)
-			s.HealthScore = computeHealthScore(avgAcc, avgP95, s.LastVerdict)
-		} else {
-			s.HealthScore = computeHealthScore(0, 0, s.LastVerdict)
+			avgAcc = s.SumAccuracy / float64(s.TotalSamples)
+			avgP95 = s.SumP95 / float64(s.TotalSamples)
 		}
+		if s.ROISamples > 0 {
+			avgROI = s.SumROI / float64(s.ROISamples)
+		}
+		s.HealthScore = computeHealthScore(avgAcc, avgP95, s.LastVerdict, avgROI, minROI)
 		if s.roleWeightSum > 0 {
 			s.ResponsibilityScore = s.roleWeightedScore / s.roleWeightSum
 		} else {
@@ -394,11 +427,9 @@ func rankChartsByScoreForMonth(stats map[string]*chartModelStats, totals map[str
 	}
 	items := make([]item, 0, len(stats))
 	for _, s := range stats {
-		cost, ok := totals[s.Model]
-		if !ok {
-			// Only include models that have month spend rows in tracking.
-			continue
-		}
+		// Include all models with benchmark data regardless of cost.
+		// Free models (cost=0) should still appear in performance/responsibility rankings.
+		cost := totals[s.Model] // 0 if model is free or had no spend this month
 		items = append(items, item{model: s.Model, score: scoreFn(s), cost: cost})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -636,6 +667,37 @@ func panelBarHeight(totalHeight int) int {
 	return barHeight
 }
 
+func chartCostToUnits(cost, minPositive, maxTotal float64, barUnits int, selectedCount int) int {
+	if cost <= 0 || selectedCount == 0 || barUnits <= 0 {
+		return 0
+	}
+	if maxTotal <= 0 {
+		maxTotal = cost
+	}
+	if minPositive <= 0 {
+		minPositive = cost
+	}
+	logMin := math.Log10(minPositive)
+	logMax := math.Log10(maxTotal)
+	if logMax-logMin < 1e-9 {
+		return barUnits
+	}
+	r := (math.Log10(cost) - logMin) / (logMax - logMin)
+	if r < 0 {
+		r = 0
+	}
+	if r > 1 {
+		r = 1
+	}
+	// Reserve the first half-block for the minimum positive value, then spread
+	// the remaining positive range across the rest of the available units.
+	units := 1 + int(math.Ceil(r*float64(barUnits-1)))
+	if units > barUnits {
+		units = barUnits
+	}
+	return units
+}
+
 func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, height int, data chartPanelData) []string {
 	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render(title)}
 	if len(days) == 0 || len(data.selectedModels) == 0 {
@@ -707,22 +769,27 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			logMax = logMin + 1
 		}
 
-		costToBlocks := func(cost float64) int {
-			if cost <= 0 || len(data.selectedModels) == 0 {
-				return 0
-			}
+		const unitsPerBlock = 2 // each terminal row represents 2 half-block units
+		barUnits := barHeight * unitsPerBlock
+		costToUnits := func(cost float64) int {
 			if uniformPositive {
-				return barHeight
+				if cost <= 0 || len(data.selectedModels) == 0 {
+					return 0
+				}
+				return barUnits
 			}
-			lg := math.Log10(cost)
-			r := (lg - logMin) / (logMax - logMin)
-			if r < 0 {
-				r = 0
+			return chartCostToUnits(cost, minPositive, maxTotal, barUnits, len(data.selectedModels))
+		}
+		costToBlockRows := func(cost float64) int {
+			units := costToUnits(cost)
+			rows := int(math.Round(float64(units) / float64(unitsPerBlock)))
+			if rows < 1 {
+				rows = 1
 			}
-			if r > 1 {
-				r = 1
+			if rows > barHeight {
+				rows = barHeight
 			}
-			return int(math.Round(r * float64(barHeight)))
+			return rows
 		}
 
 		formatY := func(v float64) string {
@@ -745,22 +812,20 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 
 		tickRowLabels := make(map[int]string)
 		for _, v := range yTicks {
-			b := costToBlocks(v)
-			if b < 1 {
-				continue
-			}
-			if b > barHeight {
-				b = barHeight
-			}
+			b := costToBlockRows(v)
 			tickRowLabels[b] = formatY(v)
 		}
+		// For log-scaled charts, cost=0 cannot be represented in the block mapping,
+		// but users still expect the Y axis to start at 0.
+		// The bottom visible row is y=1 blocks, so pin label for that row to $0.
+		tickRowLabels[1] = formatY(0)
 
-		heightsPerDay := make([][]int, len(chunkDays))
+		heightsPerDay := make([][]int, len(chunkDays)) // half-block units per segment
 		for i, d := range chunkDays {
 			rowCosts := data.costs[d.Format("2006-01-02")]
 			totalCost := chunkTotals[i]
-			totalBlocks := costToBlocks(totalCost)
-			if totalBlocks <= 0 || rowCosts == nil {
+			totalUnits := costToUnits(totalCost)
+			if totalUnits <= 0 || rowCosts == nil {
 				heightsPerDay[i] = make([]int, len(data.selectedModels))
 				continue
 			}
@@ -770,14 +835,14 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			sumFloors := 0
 			for j, model := range data.selectedModels {
 				c := rowCosts[model]
-				segExact := (float64(totalBlocks) * c) / totalCost
+				segExact := (float64(totalUnits) * c) / totalCost
 				f := int(segExact)
 				floors[j] = f
 				fracs[j] = segExact - float64(f)
 				sumFloors += f
 			}
 
-			rem := totalBlocks - sumFloors
+			rem := totalUnits - sumFloors
 			heights := make([]int, len(data.selectedModels))
 			copy(heights, floors)
 			if rem > 0 {
@@ -803,27 +868,72 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 			}
 			row := strings.Repeat(" ", pad) + label + "|"
 
+			rowLowerStart := (y - 1) * unitsPerBlock
+			rowLowerEnd := rowLowerStart + 1
+			rowUpperStart := rowLowerEnd
+			rowUpperEnd := y * unitsPerBlock
+
 			for i := range chunkDays {
-				seg := -1
+				lowerSeg := -1
+				upperSeg := -1
 				cum := 0
 				heights := heightsPerDay[i]
 				for j := range data.selectedModels {
-					cum += heights[j]
-					if y <= cum {
-						seg = j
-						break
+					segStart := cum
+					segEnd := cum + heights[j]
+					if heights[j] > 0 {
+						if lowerSeg < 0 && segEnd > rowLowerStart && segStart < rowLowerEnd {
+							lowerSeg = j
+						}
+						if upperSeg < 0 && segEnd > rowUpperStart && segStart < rowUpperEnd {
+							upperSeg = j
+						}
 					}
+					cum = segEnd
 				}
-				if seg < 0 {
+
+				if lowerSeg < 0 && upperSeg < 0 {
 					row += strings.Repeat(" ", cellWidth)
 					continue
 				}
-				model := data.selectedModels[seg]
-				cell := data.blocks[model]
+
 				globalIdx := chunkStart + i
-				if globalIdx == cursorDayIndex {
-					cell = lipgloss.NewStyle().Foreground(data.colors[model]).Background(lipgloss.Color("240")).Render("█")
+				cursor := globalIdx == cursorDayIndex
+
+				var cell string
+				if upperSeg >= 0 && lowerSeg >= 0 && upperSeg == lowerSeg {
+					model := data.selectedModels[upperSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("█")
+				} else if upperSeg >= 0 && lowerSeg >= 0 {
+					upperModel := data.selectedModels[upperSeg]
+					lowerModel := data.selectedModels[lowerSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[upperModel])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					} else {
+						st = st.Background(data.colors[lowerModel])
+					}
+					cell = st.Render("▀")
+				} else if upperSeg >= 0 {
+					model := data.selectedModels[upperSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("▀")
+				} else {
+					model := data.selectedModels[lowerSeg]
+					st := lipgloss.NewStyle().Foreground(data.colors[model])
+					if cursor {
+						st = st.Background(lipgloss.Color("240"))
+					}
+					cell = st.Render("▄")
 				}
+
 				row += " " + cell + " " + " "
 			}
 			lines = append(lines, row)
@@ -955,6 +1065,7 @@ func NewChartsModel(es store.EventStore, bs store.BenchmarkStore) ChartsModel {
 		monthStart:     monthStart,
 		loading:        true,
 		cursorDayIndex: 0,
+		minROI:         defaultChartMinROI,
 	}
 }
 
@@ -967,6 +1078,10 @@ func (m ChartsModel) Init() tea.Cmd {
 
 func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case ConfigReloadedMsg:
+		m.minROI = msg.Thresholds.Defaults.MinROIScore
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -1020,24 +1135,25 @@ func (m ChartsModel) Update(msg tea.Msg) (ChartsModel, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "k":
-			m.cursorDayIndex--
-			if m.cursorDayIndex < 0 {
-				m.cursorDayIndex = 0
+			if m.cursorDayIndex > 0 {
+				m.cursorDayIndex--
+				return m, nil
 			}
-			return m, nil
-		case "l":
-			m.cursorDayIndex++
-			// Clamp to days in month.
-			if m.cursorDayIndex >= daysInMonth(m.monthStart) {
-				m.cursorDayIndex = daysInMonth(m.monthStart) - 1
-			}
-			return m, nil
-		case "left":
+			// At the first day of the month: move to the previous month and
+			// jump to the last day so k/l alone handle both day and month
+			// navigation without using arrow keys.
 			m.monthStart = m.monthStart.AddDate(0, -1, 0)
-			m.cursorDayIndex = 0
+			m.cursorDayIndex = daysInMonth(m.monthStart) - 1
 			m.loading = true
 			return m, m.fetchChartData()
-		case "right":
+		case "l":
+			monthDays := daysInMonth(m.monthStart)
+			if m.cursorDayIndex < monthDays-1 {
+				m.cursorDayIndex++
+				return m, nil
+			}
+			// At the last day of the month: move to the next month and reset
+			// the cursor so k/l alone handle both day and month navigation.
 			m.monthStart = m.monthStart.AddDate(0, 1, 0)
 			m.cursorDayIndex = 0
 			m.loading = true
@@ -1052,6 +1168,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 	monthStart := m.monthStart
 	es := m.es
 	bs := m.bs
+	minROI := m.minROI
 	return func() tea.Msg {
 		if es == nil {
 			return ChartsDataMsg{MonthStart: monthStart, Rows: nil, SelectedModels: nil, Err: nil}
@@ -1066,7 +1183,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 		}
 
 		totals := totalsByCost(rows)
-		costSelected := rankModelsByCost(rows, 3)
+		costSelected := rankModelsByCost(rows, 0) // 0 = no limit, show all models
 		performanceSelected := costSelected
 		responsibilitySelected := costSelected
 		stats := map[string]*chartModelStats{}
@@ -1075,7 +1192,16 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 			if err != nil {
 				return ChartsDataMsg{MonthStart: monthStart, Err: err}
 			}
-			stats = aggregateChartsModelStats(runs)
+			// Fix 3: score cards (Performance/Responsibility) must only consider
+			// weekly runs — consistent with verdict trend and Benchmark History Summary.
+			// Use make() to avoid aliasing the backing array of runs.
+			weeklyRuns := make([]store.BenchmarkRun, 0, len(runs))
+			for _, r := range runs {
+				if r.RunKind == store.RunKindWeekly {
+					weeklyRuns = append(weeklyRuns, r)
+				}
+			}
+			stats = aggregateChartsModelStats(weeklyRuns, minROI)
 			performanceSelected = rankChartsByScoreForMonth(stats, totals, func(s *chartModelStats) float64 { return s.HealthScore }, 3)
 			responsibilitySelected = rankChartsByScoreForMonth(stats, totals, func(s *chartModelStats) float64 { return s.ResponsibilityScore }, 3)
 			if len(performanceSelected) == 0 {
@@ -1101,7 +1227,7 @@ func (m ChartsModel) fetchChartData() tea.Cmd {
 
 func (m ChartsModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).Render("Charts")
-	sub := fmt.Sprintf("Monthly cost chart plus benchmark summary cards — %s  (←/→ month, k/l or mouse only affect the cost chart)", m.monthStart.Format("January 2006"))
+	sub := fmt.Sprintf("Monthly cost chart plus benchmark summary cards — %s  (←/→ switch views; k/l or mouse move within and across months in the cost chart)", m.monthStart.Format("January 2006"))
 
 	legendLine := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Render("Legend: R = Responsibility score, H = Health score")
 	lines := []string{title + "\n" + sub, legendLine}

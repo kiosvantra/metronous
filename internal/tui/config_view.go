@@ -45,10 +45,8 @@ type configField struct {
 
 var configFields = []configField{
 	{label: "Min Accuracy", key: "min_accuracy", step: 0.01, min: 0, max: 1},
-	{label: "Max P95 Latency (ms)", key: "max_latency_p95_ms", step: 1000, min: 0, max: 300000},
-	{label: "Min Tool Success Rate", key: "min_tool_success_rate", step: 0.01, min: 0, max: 1},
-	{label: "Min ROI Score", key: "min_roi_score", step: 0.01, min: 0, max: 1.0},
-	{label: "Max Cost/Session (USD)", key: "max_cost_usd_per_session", step: 0.01, min: 0, max: 100},
+	{label: "Min ROI Score", key: "min_roi_score", step: 0.01, min: 0, max: 10.0},
+	{label: "Max Cost/Session (USD)", key: "max_cost_usd_per_session", step: 0.50, min: 0, max: 100},
 }
 
 var (
@@ -84,26 +82,51 @@ func (m ConfigModel) Init() tea.Cmd {
 
 // Update handles key presses for navigation and value adjustment.
 func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		if m.thresholds.EffectiveKeymapPreset() == config.KeymapPresetNvim {
+			// In nvim preset, map h/l to left/right for config adjustments.
+			switch key {
+			case "h":
+				key = "left"
+			case "l":
+				key = "right"
+			}
+		}
+
+		switch key {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(configFields)-1 {
+			// The last cursor position is reserved for the keymap preset row.
+			maxCursor := len(configFields)
+			if m.cursor < maxCursor {
 				m.cursor++
 			}
 		case "right", "+", "=":
-			m.adjustCurrent(+1)
+			if m.cursor == len(configFields) {
+				m.toggleKeymapPreset(+1)
+			} else {
+				m.adjustCurrent(+1)
+			}
 		case "left", "-":
-			m.adjustCurrent(-1)
+			if m.cursor == len(configFields) {
+				m.toggleKeymapPreset(-1)
+			} else {
+				m.adjustCurrent(-1)
+			}
 		}
 
 	case configSavedMsg:
 		m.statusMsg = "✓ Saved"
 		m.statusOK = true
+		// After a successful save, automatically reload thresholds so that all
+		// tabs see the updated configuration without requiring a manual reload.
+		cmd = m.reloadCmd()
 
 	case configReloadedMsg:
 		m.thresholds = msg.Thresholds
@@ -115,7 +138,7 @@ func (m ConfigModel) Update(msg tea.Msg) (ConfigModel, tea.Cmd) {
 		m.statusMsg = fmt.Sprintf("✗ Error: %v", msg.Err)
 		m.statusOK = false
 	}
-	return m, nil
+	return m, cmd
 }
 
 // UpdateSave handles ctrl+s saves.
@@ -150,10 +173,6 @@ func (m *ConfigModel) getFieldValue(key string) float64 {
 	switch key {
 	case "min_accuracy":
 		return m.thresholds.Defaults.MinAccuracy
-	case "max_latency_p95_ms":
-		return float64(m.thresholds.Defaults.MaxLatencyP95Ms)
-	case "min_tool_success_rate":
-		return m.thresholds.Defaults.MinToolSuccessRate
 	case "min_roi_score":
 		return m.thresholds.Defaults.MinROIScore
 	case "max_cost_usd_per_session":
@@ -167,15 +186,27 @@ func (m *ConfigModel) setFieldValue(key string, v float64) {
 	switch key {
 	case "min_accuracy":
 		m.thresholds.Defaults.MinAccuracy = v
-	case "max_latency_p95_ms":
-		m.thresholds.Defaults.MaxLatencyP95Ms = int(v)
-	case "min_tool_success_rate":
-		m.thresholds.Defaults.MinToolSuccessRate = v
 	case "min_roi_score":
 		m.thresholds.Defaults.MinROIScore = v
 	case "max_cost_usd_per_session":
 		m.thresholds.Defaults.MaxCostUSDPerSession = v
 	}
+}
+
+// toggleKeymapPreset cycles the keymap preset between the supported values.
+// dir should be +1 or -1.
+func (m *ConfigModel) toggleKeymapPreset(dir int) {
+	presets := []config.KeymapPreset{config.KeymapPresetDefault, config.KeymapPresetNvim}
+	current := m.thresholds.EffectiveKeymapPreset()
+	idx := 0
+	for i, p := range presets {
+		if p == current {
+			idx = i
+			break
+		}
+	}
+	idx = (idx + dir + len(presets)) % len(presets)
+	m.thresholds.KeymapPreset = presets[idx]
 }
 
 // saveCmd returns a tea.Cmd that writes the current thresholds to disk atomically.
@@ -263,8 +294,13 @@ func (m ConfigModel) reloadCmd() tea.Cmd {
 func (m ConfigModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Threshold Configuration") + "\n\n")
-	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  ctrl+s: save  ctrl+r: reload") + "\n\n")
+	sb.WriteString(titleStyle.Render("Configuration") + "\n\n")
+	sb.WriteString(dimStyle.Render("  ↑/↓ or j/k: move between fields") + "\n")
+	sb.WriteString(dimStyle.Render("  ←/→ or +/-: adjust value  s / ctrl+s: save  r / ctrl+r: reload") + "\n")
+	sb.WriteString(dimStyle.Render("  Decision thresholds affect daemon recommendations; UI preferences affect only the dashboard.") + "\n\n")
+
+	// Decision thresholds section.
+	sb.WriteString(dimStyle.Render("Decision thresholds:") + "\n")
 
 	for i, f := range configFields {
 		v := m.getFieldValue(f.key)
@@ -287,6 +323,35 @@ func (m ConfigModel) View() string {
 		}
 		sb.WriteString("\n")
 	}
+
+	// UI preferences section.
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("UI preferences:") + "\n")
+
+	// Keymap preset row.
+	keymapPreset := m.thresholds.EffectiveKeymapPreset()
+	var keymapLabel string
+	switch keymapPreset {
+	case config.KeymapPresetNvim:
+		keymapLabel = "Nvim (hjkl navigation)"
+	default:
+		keymapLabel = "Default (numbers/arrows)"
+	}
+	row := fmt.Sprintf("  %-28s  %s", "Keymap preset", keymapLabel)
+	if m.cursor == len(configFields) {
+		sb.WriteString(fieldActiveStyle.Render("▶ " + strings.TrimLeft(row, " ")))
+	} else {
+		sb.WriteString(fieldInactiveStyle.Render(row))
+	}
+	sb.WriteString("\n")
+
+	// Legend explaining what each configuration option controls.
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("Legend:") + "\n")
+	sb.WriteString(dimStyle.Render("  • Min Accuracy: Minimum required task accuracy (0.0–1.0); higher values are stricter.") + "\n")
+	sb.WriteString(dimStyle.Render("  • Min ROI Score: Minimum acceptable efficiency (successful tool calls per dollar).") + "\n")
+	sb.WriteString(dimStyle.Render("  • Max Cost/Session (USD): Maximum spend allowed per tracked session before flagging cost issues.") + "\n")
+	sb.WriteString(dimStyle.Render("  • Keymap preset: 'Default' keeps original keybindings; 'Nvim' enables hjkl navigation. On non-config tabs h/l move between tabs; inside Config they adjust the selected field.") + "\n")
 
 	// Per-agent overrides count.
 	if len(m.thresholds.PerAgent) > 0 {
@@ -321,12 +386,6 @@ func validateThresholds(t config.Thresholds) error {
 	d := t.Defaults
 	if d.MinAccuracy < 0 || d.MinAccuracy > 1.0 {
 		return fmt.Errorf("min_accuracy %.4f is outside valid range [0, 1]", d.MinAccuracy)
-	}
-	if d.MinToolSuccessRate < 0 || d.MinToolSuccessRate > 1.0 {
-		return fmt.Errorf("min_tool_success_rate %.4f is outside valid range [0, 1]", d.MinToolSuccessRate)
-	}
-	if d.MaxLatencyP95Ms < 0 {
-		return fmt.Errorf("max_latency_p95_ms %d must be >= 0", d.MaxLatencyP95Ms)
 	}
 	if d.MinROIScore < 0 {
 		return fmt.Errorf("min_roi_score %.4f must be >= 0", d.MinROIScore)

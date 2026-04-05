@@ -86,12 +86,9 @@ func EvaluateRulesWithPricing(m benchmark.WindowMetrics, thresholds config.Defau
 	if m.Accuracy < thresholds.MinAccuracy {
 		return store.VerdictSwitch
 	}
-	if m.P95LatencyMs > float64(thresholds.MaxLatencyP95Ms) {
-		return store.VerdictSwitch
-	}
-	if m.ToolSuccessRate < thresholds.MinToolSuccessRate {
-		return store.VerdictSwitch
-	}
+	// NOTE: latency (P95LatencyMs/AvgTurnMs) is intentionally excluded from SWITCH
+	// triggers because the current duration_ms data is cumulative session time, not
+	// per-call latency. It will be reintroduced once clean latency data is captured.
 
 	// ROI check: only when the model is paid AND cost data is reliable.
 	if roiActive(m.Model, m, root) && m.ROIScore < thresholds.MinROIScore {
@@ -133,33 +130,34 @@ func BuildReasonWithPricing(vt store.VerdictType, m benchmark.WindowMetrics, thr
 	case store.VerdictSwitch:
 		var failures []string
 		if m.Accuracy < thresholds.MinAccuracy {
-			failures = append(failures, fmt.Sprintf("Accuracy %.2f below threshold %.2f", m.Accuracy, thresholds.MinAccuracy))
-		}
-		if m.P95LatencyMs > float64(thresholds.MaxLatencyP95Ms) {
-			failures = append(failures, fmt.Sprintf("P95 latency %.0fms exceeds threshold %dms", m.P95LatencyMs, thresholds.MaxLatencyP95Ms))
-		}
-		if m.ToolSuccessRate < thresholds.MinToolSuccessRate {
-			failures = append(failures, fmt.Sprintf("Tool success rate %.2f below threshold %.2f", m.ToolSuccessRate, thresholds.MinToolSuccessRate))
+			failures = append(failures, fmt.Sprintf("Accuracy %.1f%% below threshold %.1f%%",
+				m.Accuracy*100, thresholds.MinAccuracy*100))
 		}
 		if roiEnabled && m.ROIScore < thresholds.MinROIScore {
-			failures = append(failures, fmt.Sprintf("ROI score %.2f below threshold %.2f", m.ROIScore, thresholds.MinROIScore))
+			failures = append(failures, fmt.Sprintf("ROI score %.2f below threshold %.2f (cost per session too high relative to accuracy)",
+				m.ROIScore, thresholds.MinROIScore))
 		}
 		if len(failures) > 0 {
 			return strings.Join(failures, "; ")
 		}
-		return "One or more soft thresholds breached"
+		return "One or more thresholds breached"
 
 	case store.VerdictKeep:
-		base := fmt.Sprintf("All thresholds passed (accuracy=%.2f, p95=%.0fms, tool_rate=%.2f, roi=%.2f)",
-			m.Accuracy, m.P95LatencyMs, m.ToolSuccessRate, m.ROIScore)
-		if !roiEnabled {
+		var parts []string
+		parts = append(parts, fmt.Sprintf("accuracy=%.1f%%", m.Accuracy*100))
+		if m.AvgTurnMs > 0 {
+			parts = append(parts, fmt.Sprintf("avg_response=%.1fs", m.AvgTurnMs/1000))
+		}
+		if roiEnabled {
+			parts = append(parts, fmt.Sprintf("roi=%.2f", m.ROIScore))
+		} else {
 			if root != nil && root.IsModelFree(m.Model) {
-				base += fmt.Sprintf("; ROI ignored (free model: %s)", m.Model)
+				parts = append(parts, "roi=N/A (free model)")
 			} else {
-				base += "; ROI ignored (unreliable cost data: TotalCostUSD=0)"
+				parts = append(parts, "roi=N/A (no billing data)")
 			}
 		}
-		return base
+		return fmt.Sprintf("All thresholds passed (%s)", strings.Join(parts, ", "))
 
 	default:
 		return "Unknown verdict"

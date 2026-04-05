@@ -287,6 +287,9 @@ func (m *mockBenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.B
 func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
 	return nil, nil
 }
+func (m *mockBenchmarkStore) MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error {
+	return nil
+}
 func (m *mockBenchmarkStore) Close() error { return nil }
 
 // Verify JSON round-trip for Event metadata using stdlib json.

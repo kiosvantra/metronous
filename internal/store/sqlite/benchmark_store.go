@@ -57,6 +57,63 @@ const addWindowStartColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_start
 // addWindowEndColumn migrates existing databases to add the window end timestamp (ms UTC).
 const addWindowEndColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_end INTEGER NOT NULL DEFAULT 0`
 
+// addAvgPromptTokensColumn adds the avg_prompt_tokens metric column.
+const addAvgPromptTokensColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_prompt_tokens REAL NOT NULL DEFAULT 0.0`
+
+// addAvgCompletionTokensColumn adds the avg_completion_tokens metric column.
+const addAvgCompletionTokensColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_completion_tokens REAL NOT NULL DEFAULT 0.0`
+
+// addAvgTurnMsColumn adds the avg_turn_ms metric column (complete events only).
+const addAvgTurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_turn_ms REAL NOT NULL DEFAULT 0.0`
+
+// addP95TurnMsColumn adds the p95_turn_ms metric column (complete events only).
+const addP95TurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN p95_turn_ms REAL NOT NULL DEFAULT 0.0`
+
+// addRunStatusColumn adds the run_status column to track active vs superseded runs.
+const addRunStatusColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_status TEXT NOT NULL DEFAULT 'active'`
+
+// addRawModelColumn adds the raw_model column to store un-normalized model names with provider prefixes.
+const addRawModelColumn = `ALTER TABLE benchmark_runs ADD COLUMN raw_model TEXT NOT NULL DEFAULT ''`
+
+// markHistoricalSupersededRuns marks older runs (not the most recent per agent+model) as superseded.
+// This is a one-time data migration that fixes historical data where all runs were marked 'active'.
+// The migration is idempotent: runs already marked 'superseded' are not re-processed, and it uses
+// a deterministic approach (rank by run_at DESC per agent+model) to find the "most recent" run.
+const markHistoricalSupersededRuns = `
+UPDATE benchmark_runs
+SET run_status = 'superseded'
+WHERE run_status = 'active'
+  AND (agent_id, model, run_at) NOT IN (
+    -- Find the most recent run_at for each (agent_id, model) pair
+    SELECT agent_id, model, MAX(run_at)
+    FROM benchmark_runs
+    WHERE run_status = 'active'
+    GROUP BY agent_id, model
+  )`
+
+// markHistoricalSupersededRunsByCountHierarchy is an improved migration that uses sample_size
+// as the primary heuristic to identify which run per (agent_id, model) is truly "current".
+// For each (agent_id, model) pair with multiple runs, mark all except the one with the
+// highest sample_size as 'superseded'. In case of ties (same sample_size), the most recent
+// run (highest run_at) is kept active. This is more robust than MAX(run_at) when models
+// in an intraweek cycle have the same timestamp.
+const markHistoricalSupersededRunsByCountHierarchy = `
+UPDATE benchmark_runs
+SET run_status = 'superseded'
+WHERE run_status = 'active'
+  AND id NOT IN (
+    -- For each (agent_id, model) pair, find the run to keep as 'active':
+    -- the one with highest sample_size, breaking ties by highest run_at.
+    SELECT id FROM (
+      SELECT id,
+             ROW_NUMBER() OVER (PARTITION BY agent_id, model 
+                                ORDER BY sample_size DESC, run_at DESC) as rn
+      FROM benchmark_runs
+      WHERE run_status = 'active'
+    ) ranked
+    WHERE rn = 1
+  )`
+
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
 type BenchmarkStore struct {
 	writeDB *sql.DB
@@ -114,6 +171,15 @@ func applyAddColumnMigration(ctx context.Context, db *sql.DB, stmt, colName stri
 	return nil
 }
 
+// applyDataMigration executes a data migration (UPDATE/INSERT/DELETE).
+// It is idempotent by design: the query should only affect rows that need migration.
+func applyDataMigration(ctx context.Context, db *sql.DB, stmt, name string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("apply %s data migration: %w", name, err)
+	}
+	return nil
+}
+
 // ApplyBenchmarkMigrations creates all tables and indexes for benchmark.db,
 // then applies any additive column migrations for existing databases.
 // It is idempotent and safe to call at startup.
@@ -130,23 +196,52 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 		{addRunKindColumn, "run_kind"},
 		{addWindowStartColumn, "window_start"},
 		{addWindowEndColumn, "window_end"},
+		{addAvgPromptTokensColumn, "avg_prompt_tokens"},
+		{addAvgCompletionTokensColumn, "avg_completion_tokens"},
+		{addAvgTurnMsColumn, "avg_turn_ms"},
+		{addP95TurnMsColumn, "p95_turn_ms"},
+		{addRunStatusColumn, "run_status"},
+		{addRawModelColumn, "raw_model"},
 	}
 	for _, m := range migrations {
 		if err := applyAddColumnMigration(ctx, db, m.stmt, m.colName); err != nil {
 			return err
 		}
 	}
+
+	// Apply data migrations (after all columns exist).
+	// markHistoricalSupersededRuns is idempotent: it only affects runs with status='active'
+	// and marks older ones per (agent_id, model) as 'superseded' using MAX(run_at).
+	// Note: This is kept for backward compatibility but superseded by the next migration.
+	if err := applyDataMigration(ctx, db, markHistoricalSupersededRuns, "mark_historical_superseded_runs"); err != nil {
+		return err
+	}
+
+	// markHistoricalSupersededRunsByCountHierarchy is a more robust migration that uses
+	// sample_size to identify the "current" model per (agent_id, model) pair.
+	// This handles the case where models in an intraweek cycle have the same timestamp.
+	// It is idempotent: only affects runs with status='active', and respects already-superseded runs.
+	if err := applyDataMigration(ctx, db, markHistoricalSupersededRunsByCountHierarchy, "mark_historical_superseded_runs_by_count"); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // SaveRun persists a benchmark run. If run.ID is empty, a UUID is generated.
 // If RunKind is empty it defaults to RunKindWeekly for backward compatibility.
+// SaveRun uses run.Status directly (set by the caller). If Status is empty or
+// RunStatusActive, it defaults to RunStatusActive for backward compatibility.
+// Status transitions (active → superseded) are handled by MarkSupersededRuns.
 func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) error {
 	if run.ID == "" {
 		run.ID = uuid.New().String()
 	}
 	if run.RunKind == "" {
 		run.RunKind = store.RunKindWeekly
+	}
+	if run.Status == "" {
+		run.Status = store.RunStatusActive
 	}
 
 	const q = `
@@ -155,13 +250,15 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
 			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-			run_kind, window_start, window_end
+			run_kind, window_start, window_end,
+			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?,
+			?, ?, ?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -187,6 +284,12 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		string(run.RunKind),
 		run.WindowStart.UTC().UnixMilli(),
 		run.WindowEnd.UTC().UnixMilli(),
+		run.AvgPromptTokens,
+		run.AvgCompletionTokens,
+		run.AvgTurnMs,
+		run.P95TurnMs,
+		string(run.Status),
+		run.RawModel,
 	)
 	if err != nil {
 		return fmt.Errorf("save benchmark run: %w", err)
@@ -220,7 +323,8 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -261,7 +365,8 @@ func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQu
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -314,7 +419,8 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -478,6 +584,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			runKind       string
 			windowStartMs int64
 			windowEndMs   int64
+			runStatus     string
 			run           store.BenchmarkRun
 		)
 		err := rows.Scan(
@@ -503,6 +610,12 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&runKind,
 			&windowStartMs,
 			&windowEndMs,
+			&run.AvgPromptTokens,
+			&run.AvgCompletionTokens,
+			&run.AvgTurnMs,
+			&run.P95TurnMs,
+			&runStatus,
+			&run.RawModel,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan benchmark run row: %w", err)
@@ -515,6 +628,10 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 		}
 		run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 		run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+		run.Status = store.RunStatus(runStatus)
+		if run.Status == "" {
+			run.Status = store.RunStatusActive
+		}
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
@@ -536,6 +653,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		runKind       string
 		windowStartMs int64
 		windowEndMs   int64
+		runStatus     string
 		run           store.BenchmarkRun
 	)
 	err := row.Scan(
@@ -561,6 +679,12 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&runKind,
 		&windowStartMs,
 		&windowEndMs,
+		&run.AvgPromptTokens,
+		&run.AvgCompletionTokens,
+		&run.AvgTurnMs,
+		&run.P95TurnMs,
+		&runStatus,
+		&run.RawModel,
 	)
 	if err != nil {
 		return nil, err
@@ -573,6 +697,10 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	}
 	run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 	run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+	run.Status = store.RunStatus(runStatus)
+	if run.Status == "" {
+		run.Status = store.RunStatusActive
+	}
 	return &run, nil
 }
 
@@ -640,7 +768,8 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE run_at >= ? AND run_at < ?
 		ORDER BY run_at DESC`
@@ -654,38 +783,115 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 }
 
 // GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
-// Returns an empty slice if the agent has no runs or fewer than requested.
+// Each entry represents one benchmark cycle. CHANGED is inserted when consecutive
+// active runs use different models (indicating a real model switch between cycles).
+//
+// Only active weekly runs (run_kind='weekly') are included so the trend reflects
+// scheduled quality assessments only. Intraweek (on-demand) runs are excluded.
+// Superseded runs are also excluded so the trend reflects genuine quality assessments
+// (KEEP / SWITCH / URGENT_SWITCH / INSUFFICIENT_DATA) rather than historical noise.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	if weeks <= 0 {
 		return nil, nil
 	}
-	// Fetch newest-first, then reverse for oldest-first order.
-	const q = `SELECT verdict FROM benchmark_runs
-		WHERE agent_id = ?
+
+	// Look back further than `weeks` to compensate for CHANGED entries that expand
+	// the slice: each model transition inserts an extra entry.
+	lookback := weeks * 6
+	if lookback < 20 {
+		lookback = 20
+	}
+
+	// Select active weekly runs only, newest-first, so we pick one representative
+	// row per benchmark cycle. Intraweek (on-demand) runs are excluded so the
+	// trend reflects only scheduled weekly quality assessments.
+	const q = `
+		SELECT verdict, model
+		FROM benchmark_runs
+		WHERE agent_id = ? AND run_status = 'active' AND run_kind = ?
 		ORDER BY run_at DESC
 		LIMIT ?`
 
-	rows, err := bs.readDB.QueryContext(ctx, q, agentID, weeks)
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, string(store.RunKindWeekly), lookback)
 	if err != nil {
 		return nil, fmt.Errorf("get verdict trend for %q: %w", agentID, err)
 	}
 	defer rows.Close()
 
-	var verdicts []string
+	type batchEntry struct {
+		verdict string
+		model   string
+	}
+	var batches []batchEntry
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, fmt.Errorf("scan verdict: %w", err)
+		var e batchEntry
+		if err := rows.Scan(&e.verdict, &e.model); err != nil {
+			return nil, fmt.Errorf("scan verdict trend row: %w", err)
 		}
-		verdicts = append(verdicts, v)
+		batches = append(batches, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate verdict rows: %w", err)
+		return nil, fmt.Errorf("iterate verdict trend rows: %w", err)
 	}
 
-	// Reverse to get oldest-first order.
-	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
-		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
+	// batches is newest-first. Reverse to oldest-first for display.
+	for i, j := 0, len(batches)-1; i < j; i, j = i+1, j-1 {
+		batches[i], batches[j] = batches[j], batches[i]
 	}
+
+	// Trim to the last N entries (oldest-first window).
+	if len(batches) > weeks {
+		batches = batches[len(batches)-weeks:]
+	}
+
+	// Build the final trend, inserting CHANGED between consecutive entries that
+	// used different models (genuine model switch between benchmark cycles).
+	var verdicts []string
+	var prevModel string
+	for _, b := range batches {
+		if prevModel != "" && b.model != prevModel {
+			verdicts = append(verdicts, "CHANGED")
+		}
+		verdicts = append(verdicts, b.verdict)
+		prevModel = b.model
+	}
+
 	return verdicts, nil
+}
+
+// MarkSupersededRuns marks older intraweek runs of the same model as superseded when a newer run
+// of that model is created in the same cycle. It updates runs where:
+// - agent_id = agentID
+// - run_kind = 'intraweek'
+// - model = newModel (same model)
+// - run_at < newRunAt (older run)
+// - run_at >= cycleStart and run_at < cycleEnd (same cycle)
+// Setting run_status = 'superseded'. This is called only for intraweek runs after
+// inserting new runs. Weekly runs are never marked superseded.
+func (bs *BenchmarkStore) MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error {
+	const q = `
+		UPDATE benchmark_runs
+		SET run_status = ?
+		WHERE agent_id = ? AND run_kind = ? AND run_at < ? AND model = ?
+		AND run_at >= ? AND run_at < ? AND run_status != ?
+	`
+
+	newRunMs := newRunAt.UTC().UnixMilli()
+	cycleStartMs := cycleStart.UTC().UnixMilli()
+	cycleEndMs := cycleEnd.UTC().UnixMilli()
+
+	_, err := bs.writeDB.ExecContext(ctx, q,
+		string(store.RunStatusSuperseded),
+		agentID,
+		string(store.RunKindIntraweek),
+		newRunMs,
+		newModel,
+		cycleStartMs,
+		cycleEndMs,
+		string(store.RunStatusSuperseded),
+	)
+	if err != nil {
+		return fmt.Errorf("mark superseded runs for %s: %w", agentID, err)
+	}
+	return nil
 }

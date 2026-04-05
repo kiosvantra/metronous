@@ -6,8 +6,21 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
+
+// NormalizeModelName strips well-known provider prefixes from model identifiers
+// so that "opencode/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6" and
+// "claude-sonnet-4-6" are treated as the same model across all stores.
+func NormalizeModelName(model string) string {
+	for _, prefix := range []string{"opencode/", "anthropic/", "ollama-cloud/", "ollama/"} {
+		if strings.HasPrefix(model, prefix) {
+			return model[len(prefix):]
+		}
+	}
+	return model
+}
 
 // Event represents a single telemetry event ingested from an AI agent session.
 // Fields are aligned with the MCP ingest tool schema.
@@ -72,7 +85,8 @@ type EventQuery struct {
 	// Since filters events on or after this timestamp (zero = no lower bound).
 	Since time.Time
 
-	// Until filters events before or on this timestamp (zero = no upper bound).
+	// Until filters events before or on this timestamp (inclusive; zero = no
+	// upper bound). Note: QueryDailyCostByModel uses [since, until) semantics.
 	Until time.Time
 
 	// Limit caps the number of events returned (0 = no limit).
@@ -96,10 +110,12 @@ type AgentSummary struct {
 	// TotalEvents is the total number of events recorded.
 	TotalEvents int
 
-	// TotalCostUSD is the sum of all event costs in USD.
+	// TotalCostUSD is the cumulative cost across all sessions, computed as the
+	// sum of each session's final cumulative cost_usd (i.e., session delta).
 	TotalCostUSD float64
 
-	// AvgQuality is the mean quality score across all rated events.
+	// AvgQuality is the running mean quality score across all events, treating
+	// missing quality_score (nil) as 0.
 	AvgQuality float64
 }
 
@@ -186,7 +202,8 @@ type EventStore interface {
 	GetAgentSummary(ctx context.Context, agentID string) (AgentSummary, error)
 
 	// QueryDailyCostByModel aggregates total cost (USD) per model per local-day
-	// for events in the supplied time window.
+	// for events in the supplied time window. The day bucket is computed in
+	// the process-local timezone (time.Local).
 	// Implementations must treat the window as [since, until) and only consider
 	// events where event_type='complete'.
 	QueryDailyCostByModel(ctx context.Context, since, until time.Time) ([]DailyCostByModelRow, error)
@@ -222,6 +239,16 @@ const (
 	RunKindIntraweek RunKindType = "intraweek"
 )
 
+// RunStatus indicates whether a benchmark run is currently active or has been superseded.
+type RunStatus string
+
+const (
+	// RunStatusActive is the default for new runs and active models.
+	RunStatusActive RunStatus = "active"
+	// RunStatusSuperseded indicates the model was replaced by a newer model in the same cycle.
+	RunStatusSuperseded RunStatus = "superseded"
+)
+
 // BenchmarkRun holds all metrics and the verdict for a single benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
@@ -249,6 +276,11 @@ type BenchmarkRun struct {
 
 	// Model is the LLM model the agent was using during the window.
 	Model string
+
+	// RawModel is the un-normalized model name with provider prefix (e.g., "opencode/claude-sonnet-4-6").
+	// Populated at benchmark time from the most frequent raw model name seen in the event window.
+	// Empty string for backward compatibility with runs before this field was added.
+	RawModel string
 
 	// Accuracy is the ratio of non-error events to total events (0.0–1.0).
 	Accuracy float64
@@ -290,7 +322,25 @@ type BenchmarkRun struct {
 	ArtifactPath string
 
 	// AvgQualityScore is the mean quality_score across all rated events in the window.
+	// Deprecated: quality_score has <11% coverage and duplicates accuracy. Kept for
+	// backward compatibility.
 	AvgQualityScore float64
+
+	// AvgPromptTokens is the mean number of prompt tokens per complete event.
+	AvgPromptTokens float64
+
+	// AvgCompletionTokens is the mean number of completion tokens per complete event.
+	AvgCompletionTokens float64
+
+	// AvgTurnMs is the mean turn duration in milliseconds (complete events only).
+	AvgTurnMs float64
+
+	// P95TurnMs is the 95th-percentile turn duration in milliseconds (complete events only).
+	P95TurnMs float64
+
+	// Status indicates whether this run is active or has been superseded by a newer model.
+	// Defaults to RunStatusActive.
+	Status RunStatus
 }
 
 // BenchmarkModelSummary aggregates benchmark metrics per model across all agents.
@@ -378,6 +428,17 @@ type BenchmarkStore interface {
 	// QueryRunsInWindow returns all benchmark runs whose run_at falls within
 	// [since, until) (inclusive start, exclusive end), ordered by run_at DESC.
 	QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]BenchmarkRun, error)
+
+	// MarkSupersededRuns marks older intraweek runs of the same model as superseded when a newer run
+	// of that model is created in the same cycle. It updates runs where:
+	// - agent_id = agentID
+	// - run_kind = 'intraweek'
+	// - model = newModel (same model)
+	// - run_at < newRunAt (older run)
+	// - run_at >= cycleStart and run_at < cycleEnd (same cycle)
+	// Setting run_status = 'superseded'. This is called only for intraweek runs after
+	// inserting new runs. Weekly runs are never marked superseded.
+	MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error
 
 	// Close releases all resources held by the store.
 	Close() error

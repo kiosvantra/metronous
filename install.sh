@@ -43,17 +43,9 @@ case "$ARCH" in
 esac
 
 case "$OS" in
-    linux) EXT=".tar.gz" ;;
-    darwin)
-        echo "Error: install.sh is not supported on macOS." >&2
-        echo "Use one of these manual flows instead:" >&2
-        echo "  git clone https://github.com/kiosvantra/metronous && cd metronous" >&2
-        echo "  go build -o metronous ./cmd/metronous" >&2
-        echo "  ./metronous init && ./metronous server --data-dir ~/.metronous/data --daemon-mode" >&2
-        exit 1
-        ;;
+    linux|darwin) EXT=".tar.gz" ;;
     mingw*|msys*|cygwin*|windows)
-        echo "Error: install.sh is supported on Linux only." >&2
+        echo "Error: install.sh is supported on Linux and macOS only." >&2
         echo "For Windows, move the extracted metronous.exe to a permanent directory and run it from PowerShell as Administrator." >&2
         exit 1
         ;;
@@ -225,13 +217,10 @@ install_binary() {
 # Try installation locations in order of preference
 INSTALLED_PATH=""
 
-# 1. Try /usr/local/bin (standard location)
-if install_binary "/usr/local/bin"; then
-    INSTALLED_PATH="/usr/local/bin/${BINARY_NAME}"
-fi
-
-# 2. If not, try user's local bin
-if [ -z "$INSTALLED_PATH" ]; then
+# For macOS, prefer ~/.local/bin to avoid sudo prompts
+# For Linux, try /usr/local/bin first (system-wide), then fallback to ~/.local/bin
+if [ "$OS" = "darwin" ]; then
+    # 1. macOS: Try user's local bin first (no sudo needed)
     LOCAL_BIN="$HOME/.local/bin"
     if ! mkdir -p "$LOCAL_BIN" 2>&1; then
         echo "Error: Cannot create directory $LOCAL_BIN" >&2
@@ -242,7 +231,36 @@ if [ -z "$INSTALLED_PATH" ]; then
             echo "IMPORTANT: Add to your PATH:"
             echo "  export PATH=\"\${HOME}/.local/bin:\$PATH\""
             echo ""
-            echo "Add this line to your ~/.bashrc or ~/.zshrc to make it permanent."
+            echo "Add this line to your ~/.zshrc (or ~/.bash_profile for bash) to make it permanent."
+        fi
+    fi
+    
+    # 2. macOS: If ~/.local/bin failed, try /usr/local/bin with sudo
+    if [ -z "$INSTALLED_PATH" ]; then
+        if install_binary "/usr/local/bin"; then
+            INSTALLED_PATH="/usr/local/bin/${BINARY_NAME}"
+        fi
+    fi
+else
+    # 1. Linux: Try /usr/local/bin (standard location, usually has perms)
+    if install_binary "/usr/local/bin"; then
+        INSTALLED_PATH="/usr/local/bin/${BINARY_NAME}"
+    fi
+    
+    # 2. Linux: If not, try user's local bin
+    if [ -z "$INSTALLED_PATH" ]; then
+        LOCAL_BIN="$HOME/.local/bin"
+        if ! mkdir -p "$LOCAL_BIN" 2>&1; then
+            echo "Error: Cannot create directory $LOCAL_BIN" >&2
+        else
+            if install_binary "$LOCAL_BIN"; then
+                INSTALLED_PATH="${LOCAL_BIN}/${BINARY_NAME}"
+                echo ""
+                echo "IMPORTANT: Add to your PATH:"
+                echo "  export PATH=\"\${HOME}/.local/bin:\$PATH\""
+                echo ""
+                echo "Add this line to your ~/.bashrc or ~/.zshrc to make it permanent."
+            fi
         fi
     fi
 fi

@@ -54,9 +54,11 @@ This document explains the **methodology** behind Metronous: what data it collec
    The `benchmark.db` contains summary tables (`agent_summaries`, `benchmark_runs`) that are updated incrementally as new events arrive.
 
 3. **Weekly Benchmark Pipeline**  
-    By default, Metronous runs a benchmark analysis every Sunday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
+    By default, Metronous runs a benchmark analysis every Monday at 02:00 local time (configurable via the TUI or environment variable). The pipeline consists of four stages:
 
-    **Run Cycle alignment (TUI):** the "Benchmark Detailed" tab groups results into *Sunday-bounded weeks* in *local time*; this is what PgUp/PgDn navigates.
+    **Run Cycle alignment (TUI):** the "Benchmark Detailed" tab groups results into *Sunday-bounded weeks* in *local time*; this is what PgUp/PgDn navigates. The "Benchmark History Summary" tab shows only (agent, model) pairs active in the last 4 weekly cycles, weighted by recency.
+
+    **Active model and run status:** at run time, the pipeline reads `~/.config/opencode/opencode.json` to determine which model is currently configured for each agent. That model's row is stamped with `run_status = 'active'`; all other models in the same cycle receive `run_status = 'superseded'`. The full provider-prefixed model name is stored in `raw_model` for exact identification, while table displays use the normalized (prefix-stripped) name.
 
     ### a. Data Collection  
     For each model seen in the selected time window (default: last 7 days), gather:
@@ -132,7 +134,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    OpenCode itself does **not** automatically switch models. Metronous reports a recommendation; the user or team decides whether to update the relevant OpenCode model configuration.  
    The intended workflow is:
    1. Wait for the weekly benchmark to run (or trigger it manually with `metronous benchmark --model <name>`).
-   2. Observe the verdict in the TUI (Benchmark tab) or via `metronous report`.
+   2. Observe the verdict in the TUI (Benchmark History Summary tab or Benchmark Detailed tab) or via `metronous report`.
    3. If the verdict is `SWITCH`, manually update the relevant OpenCode model or agent configuration.
    4. Restart OpenCode (or reload its MCP server) to start using the new model.
 

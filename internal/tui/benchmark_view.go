@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/discovery"
 	"github.com/kiosvantra/metronous/internal/store"
 )
@@ -47,10 +48,11 @@ type BenchmarkDataMsg struct {
 
 // Verdict colour styles.
 var (
-	verdictKeep   = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // green
-	verdictSwitch = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
-	verdictUrgent = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
-	verdictOther  = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey
+	verdictKeep       = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))  // green
+	verdictSwitch     = lipgloss.NewStyle().Foreground(lipgloss.Color("226")) // yellow
+	verdictUrgent     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")) // red
+	verdictOther      = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // grey
+	verdictSuperseded = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // dark orange
 )
 
 // detailPanelStyle styles the decision rationale detail panel.
@@ -66,16 +68,43 @@ var detailLabelStyle = lipgloss.NewStyle().
 var f5KeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("19")).Bold(true) // dark blue
 
 // benchColWidths / benchColNames describe the benchmark history table.
-// Columns: Time | Agent | Type | Accuracy | P95 Latency | Verdict | → Model | Savings
-// "Time" shows full date+time (YYYY-MM-DD HH:MM) so width is 17 to avoid truncation.
+// Columns: Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To
 var (
-	benchColWidths = []int{17, 16, 9, 10, 12, 18, 16, 8}
-	benchColNames  = []string{"Time", "Agent", "Type", "Accuracy", "P95 Latency", "Verdict", "→ Model", "Savings"}
+	benchColWidths = []int{16, 22, 8, 10, 13, 18, 16}
+	benchColNames  = []string{"Agent", "Model", "Samples", "Accuracy", "Avg Response", "Verdict", "→ Switch To"}
 )
 
 // verdictColIdx is the index of the Verdict column in benchColNames/benchColWidths.
 // Defined as a constant so the rendering code stays in sync with the column layout.
 const verdictColIdx = 5
+
+// formatDuration converts a duration in milliseconds to a human-readable string.
+// Rules:
+//   - ms <= 0        → "0.0s"
+//   - ms < 60000     → "42.3s"
+//   - ms < 3600000   → "24m 15s"
+//   - ms >= 3600000  → "1h 23m"
+func formatDuration(ms float64) string {
+	if ms <= 0 {
+		return "0.0s"
+	}
+	if ms < 60_000 {
+		return fmt.Sprintf("%.1fs", ms/1000)
+	}
+	if ms < 3_600_000 {
+		totalSec := int(ms / 1000)
+		mins := totalSec / 60
+		secs := totalSec % 60
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	totalMin := int(ms / 60_000)
+	hours := totalMin / 60
+	mins := totalMin % 60
+	return fmt.Sprintf("%dh %dm", hours, mins)
+}
+
+// maxBenchmarkRows is the maximum number of rows visible at once (scroll window).
+const maxBenchmarkRows = 15
 
 // modelPricingSection mirrors the JSON structure of the "model_pricing" key in thresholds.json.
 type modelPricingSection struct {
@@ -107,13 +136,15 @@ func loadModelPricing(dataDir string) map[string]float64 {
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
 	bs        store.BenchmarkStore
-	runs      []store.BenchmarkRun // rows for the current cycle (one per agent, placeholder if no run)
+	runs      []store.BenchmarkRun // rows for the current cycle (one per agent+model combo, placeholder if no run)
 	agents    []discovery.AgentInfo
 	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
 	trendByID map[string][]string // agentID → verdict trend (oldest first)
 	err       error
-	// cursor is the row index within the current cycle's agent list.
+	// cursor is the absolute row index within m.runs.
+	// offset is the first visible row index (scroll window).
 	cursor  int
+	offset  int
 	loading bool
 	// cycles is the ordered list of week-start times (newest first) discovered in the DB.
 	cycles []time.Time
@@ -139,6 +170,9 @@ type BenchmarkModel struct {
 	// runErr holds the error (if any) from the most recent F5 run.
 	// Cleared when the next F5 run starts.
 	runErr error
+	// Threshold defaults used for explainability classification/rendering.
+	minAccuracy float64
+	minROI      float64
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -147,13 +181,16 @@ type BenchmarkModel struct {
 // workDir is used for project-level agent discovery; pass os.Getwd() from the caller.
 // r is an optional IntraweekRunner; pass nil to disable F5 manual runs.
 func NewBenchmarkModel(bs store.BenchmarkStore, dataDir string, workDir string, r IntraweekRunner) BenchmarkModel {
+	defaults := config.DefaultThresholdValues().Defaults
 	return BenchmarkModel{
-		bs:      bs,
-		loading: true,
-		pricing: loadModelPricing(dataDir),
-		agents:  discovery.DiscoverAgents(workDir),
-		workDir: workDir,
-		runner:  r,
+		bs:          bs,
+		loading:     true,
+		pricing:     loadModelPricing(dataDir),
+		agents:      discovery.DiscoverAgents(workDir),
+		workDir:     workDir,
+		runner:      r,
+		minAccuracy: defaults.MinAccuracy,
+		minROI:      defaults.MinROIScore,
 	}
 }
 
@@ -181,6 +218,11 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			m.fetchRuns(),
 		)
 
+	case ConfigReloadedMsg:
+		m.minAccuracy = msg.Thresholds.Defaults.MinAccuracy
+		m.minROI = msg.Thresholds.Defaults.MinROIScore
+		return m, nil
+
 	case BenchmarkDataMsg:
 		m.loading = false
 		m.err = msg.Err
@@ -207,6 +249,10 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 					m.cursor = 0
 				}
 			}
+			// Clamp offset.
+			if m.offset > m.cursor {
+				m.offset = m.cursor
+			}
 		}
 		return m, nil
 
@@ -223,6 +269,9 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			// Move selection one row up within the current cycle.
 			if m.cursor > 0 {
 				m.cursor--
+				if m.cursor < m.offset {
+					m.offset = m.cursor
+				}
 			}
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
@@ -230,6 +279,9 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			// Move selection one row down within the current cycle.
 			if m.cursor < len(m.runs)-1 {
 				m.cursor++
+				if m.cursor >= m.offset+maxBenchmarkRows {
+					m.offset = m.cursor - maxBenchmarkRows + 1
+				}
 			}
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
@@ -238,6 +290,7 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			if m.cycleIndex < len(m.cycles)-1 {
 				m.cycleIndex++
 				m.cursor = 0
+				m.offset = 0
 				m.detailFrozen = false
 				return m, m.fetchRuns()
 			}
@@ -246,6 +299,7 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			if m.cycleIndex > 0 {
 				m.cycleIndex--
 				m.cursor = 0
+				m.offset = 0
 				m.detailFrozen = false
 				return m, m.fetchRuns()
 			}
@@ -383,38 +437,80 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		// Build a lookup: agentID → run in this cycle (last run if multiple per agent per cycle).
-		runByAgent := make(map[string]store.BenchmarkRun, len(windowRuns))
+		// ── 5. Build one row per (agent, model) combo + NO RUN placeholders ─────
+		// Collect the latest run per (agentID, model) pair within the cycle.
+		type agentModel struct{ agentID, model string }
+		latestByAgentModel := make(map[agentModel]store.BenchmarkRun, len(windowRuns))
 		for _, r := range windowRuns {
-			if existing, ok := runByAgent[r.AgentID]; !ok || r.RunAt.After(existing.RunAt) {
-				runByAgent[r.AgentID] = r
+			key := agentModel{r.AgentID, r.Model}
+			if existing, ok := latestByAgentModel[key]; !ok || r.RunAt.After(existing.RunAt) {
+				latestByAgentModel[key] = r
 			}
 		}
 
-		// ── 5. Build one row per agent (NO RUN placeholder if absent) ─────────
+		// Track which agents have at least one real run in this cycle.
+		agentsWithRuns := make(map[string]bool, len(windowRuns))
+		for key := range latestByAgentModel {
+			agentsWithRuns[key.agentID] = true
+		}
+
 		var page []store.BenchmarkRun
+		for key, run := range latestByAgentModel {
+			_ = key
+			page = append(page, run)
+		}
+		// Add NO RUN placeholder for agents with zero runs in the cycle.
 		for _, agentID := range allIDs {
-			if run, ok := runByAgent[agentID]; ok {
-				page = append(page, run)
-			} else {
-				// Placeholder: AgentID set, RunAt zero → isNoData() returns true.
+			if !agentsWithRuns[agentID] {
 				page = append(page, store.BenchmarkRun{AgentID: agentID})
 			}
 		}
 
-		// Sort: primary → subagent → all → built-in, then alphabetical.
+		// Sort: agentID asc → within agent: active first, then superseded/insufficient_data → run_at desc → SampleSize desc.
+		// NO DATA placeholders go last.
+		statusOrder := map[store.RunStatus]int{
+			store.RunStatusActive:     0,
+			store.RunStatusSuperseded: 1,
+		}
 		sort.Slice(page, func(i, j int) bool {
-			ti := agentTypeOrder(typeByID[page[i].AgentID])
-			tj := agentTypeOrder(typeByID[page[j].AgentID])
-			if ti != tj {
-				return ti < tj
+			// NO DATA placeholders always go last.
+			if isNoData(page[i]) != isNoData(page[j]) {
+				return !isNoData(page[i])
 			}
-			return page[i].AgentID < page[j].AgentID
+			// Sort by agentID asc first (cascade grouping).
+			if page[i].AgentID != page[j].AgentID {
+				return page[i].AgentID < page[j].AgentID
+			}
+			// Within same agent: active runs come before superseded runs.
+			iStatus := statusOrder[page[i].Status]
+			jStatus := statusOrder[page[j].Status]
+			if iStatus != jStatus {
+				return iStatus < jStatus
+			}
+			// Within same agent and status, sort by run_at desc (most recent first).
+			if page[i].RunAt != page[j].RunAt {
+				return page[i].RunAt.After(page[j].RunAt)
+			}
+			// Sort by SampleSize desc.
+			if page[i].SampleSize != page[j].SampleSize {
+				return page[i].SampleSize > page[j].SampleSize
+			}
+			// Tiebreaker: Model asc (alphabetical, deterministic).
+			return page[i].Model < page[j].Model
 		})
 
 		// ── 6. Fetch verdict trends for each agent in the page (last 8 weeks) ─
 		trendByID := make(map[string][]string, len(page))
+		seenAgentIDs := make(map[string]struct{}, len(page))
 		for _, run := range page {
+			if run.AgentID == "" {
+				continue
+			}
+			if _, seen := seenAgentIDs[run.AgentID]; seen {
+				continue
+			}
+			seenAgentIDs[run.AgentID] = struct{}{}
+
 			trend, err := m.bs.GetVerdictTrend(ctx, run.AgentID, 8)
 			if err == nil {
 				trendByID[run.AgentID] = trend
@@ -429,7 +525,21 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 func (m BenchmarkModel) View() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render("Run Cycle") + "\n\n")
+	sb.WriteString(titleStyle.Render("Run Cycle") + "\n")
+	sb.WriteString(dimStyle.Render("Current cycle snapshot — active model per agent with all historical model variants") + "\n")
+
+	// F5 indicator — always visible below the title, same as Benchmark Summary.
+	f5TopStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
+	dimTop := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	if m.running {
+		runningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
+		sb.WriteString(runningStyle.Render("  ⏳ Running intraweek benchmark...") + "\n\n")
+	} else if m.runErr != nil {
+		errRunStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		sb.WriteString(errRunStyle.Render(fmt.Sprintf("  ✗ Intraweek run failed: %v", m.runErr)) + "\n\n")
+	} else {
+		sb.WriteString(dimTop.Render("  Press") + " " + f5TopStyle.Render("F5") + dimTop.Render(" to run an intraweek benchmark now") + "\n\n")
+	}
 
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
@@ -453,13 +563,45 @@ func (m BenchmarkModel) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(benchColWidths)) + "\n")
 
-	// Data rows — m.runs already contains only the current page (maxBenchmarkRows rows max).
-	// The cursor is a local index within this page.
+	// Scroll indicator above if there are rows above the visible window.
+	if m.offset > 0 {
+		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more above", m.offset)) + "\n")
+	}
+
+	// Compute current model per agent (highest run_at with Status='active').
+	// Index invariant: currentModelByAgent stores absolute indexes into m.runs
+	// (not page-relative indexes). The render loop also iterates m.runs with
+	// absolute index i, so currentModelByAgent[agentID] == i is valid.
+	currentModelByAgent := make(map[string]int) // agent → run index
 	for i, run := range m.runs {
-		agentType := m.typeByID[run.AgentID]
-		row := formatBenchmarkRow(run, agentType, m.pricing)
+		if !isNoData(run) && run.Status == store.RunStatusActive {
+			if _, exists := currentModelByAgent[run.AgentID]; !exists || m.runs[currentModelByAgent[run.AgentID]].RunAt.Before(run.RunAt) {
+				currentModelByAgent[run.AgentID] = i
+			}
+		}
+	}
+
+	// Data rows — render only the visible window [offset, offset+maxBenchmarkRows).
+	end := m.offset + maxBenchmarkRows
+	if end > len(m.runs) {
+		end = len(m.runs)
+	}
+	for i := m.offset; i < end; i++ {
+		// Insert a faint divider between agent groups so that contiguous
+		// rows for the same agent are visually grouped together.
+		if i > m.offset {
+			prev := m.runs[i-1]
+			if prev.AgentID != m.runs[i].AgentID {
+				divider := strings.Repeat("\u2500", totalWidth(benchColWidths))
+				sb.WriteString(dimStyle.Render(divider) + "\n")
+			}
+		}
+
+		run := m.runs[i]
+		row := formatBenchmarkRow(run, m.pricing)
 		baseStyle := lipgloss.NewStyle()
 		isNoDataRow := isNoData(run)
+		isSuperseded := !isNoDataRow && run.Status == store.RunStatusSuperseded
 		// For NO DATA rows: keep grey text, but if the cursor is on the row
 		// show only the background highlight (so the cursor doesn't disappear).
 		if isNoDataRow {
@@ -469,27 +611,60 @@ func (m BenchmarkModel) View() string {
 			}
 		} else if i == m.cursor {
 			baseStyle = cursorStyle
+		} else if isSuperseded {
+			// Superseded rows use dark orange text for the entire row.
+			baseStyle = verdictSuperseded
 		}
-		// Render columns before Verdict without special colour.
-		// verdictColIdx = 5 (Time, Agent, Type, Accuracy, P95 Latency, Verdict, → Model, Savings)
-		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
-		// Verdict column: remove cursor background from this specific column.
+
+		// Add visual marker (●) to agent cell if this is the current active run for the agent.
+		isCurrent := !isNoDataRow && run.Status == store.RunStatusActive && currentModelByAgent[run.AgentID] == i
+
+		// Render the row. When isCurrent, the agent column is rendered manually so
+		// that the ANSI-colored marker prefix does not interfere with renderRow's
+		// byte-length truncation logic (len(cell) counts bytes including escape codes).
+		var rendered string
+		if isCurrent {
+			// Truncate plain agentCell to (width-2) visible chars, then prepend the marker.
+			// This keeps the total visible width equal to benchColWidths[0].
+			agentCell := row[0]
+			maxAgentLen := benchColWidths[0] - 2 // reserve 2 visible chars for "● "
+			if len(agentCell) > maxAgentLen {
+				agentCell = agentCell[:maxAgentLen-1] + "…"
+			}
+			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
+			// Pad the plain agentCell to (width-2) so the full column is exactly width chars.
+			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
+			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
+			// Render remaining columns 1..verdictColIdx-1 via renderRow (safe: no ANSI in those cells).
+			rendered = agentColRendered + " " + renderRow(row[1:verdictColIdx], benchColWidths[1:verdictColIdx], baseStyle)
+		} else {
+			// No marker: render all columns 0..verdictColIdx-1 uniformly.
+			rendered = renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
+		}
+
+		// Verdict column: coloured independently.
 		var verdictCell string
 		if isNoDataRow {
 			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+		} else if run.Status == store.RunStatusSuperseded {
+			// Superseded runs show "CHANGED" in dark orange.
+			verdictCell = verdictSuperseded.Render(
+				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
 		} else {
 			verdictCell = verdictStyle(run.Verdict).Render(
 				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
 		}
 		rendered += verdictCell
-		// → Model column (index 6).
+		// → Switch To column (index verdictColIdx+1 = 6).
 		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
-		// Savings column (index 7).
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[7], row[7]))
-		// Write the row directly — do NOT re-wrap with baseStyle.Render() as that
-		// would strip the inner ANSI colour codes (verdict colour, etc.).
 		sb.WriteString(rendered)
 		sb.WriteString("\n")
+	}
+
+	// Scroll indicator below if there are rows below the visible window.
+	below := len(m.runs) - end
+	if below > 0 {
+		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more below", below)) + "\n")
 	}
 
 	// Pagination footer: show cycle number (1-based from newest).
@@ -498,27 +673,18 @@ func (m BenchmarkModel) View() string {
 	var cycleLabel string
 	if totalCycles > 0 {
 		cycleStart := m.cycles[m.cycleIndex]
+		// cycleIndex 0 = most recent cycle = highest number (totalCycles).
+		// cycleIndex totalCycles-1 = oldest = cycle 1.
+		currentNum := totalCycles - m.cycleIndex
 		cycleLabel = fmt.Sprintf("cycle %d/%d  (week of %s)",
-			m.cycleIndex+1, totalCycles, cycleStart.Local().Format("2006-01-02"))
+			currentNum, totalCycles, cycleStart.Local().Format("2006-01-02"))
 	} else {
 		cycleLabel = "cycle 1/1"
 	}
-	footerPrefix := fmt.Sprintf("  %d agents  |  %s  (PgUp/PgDn to change cycle, ↑↓ to select, Enter to freeze detail,",
+	footerText := fmt.Sprintf("  %d rows  |  %s  (↑↓ scroll, PgUp/PgDn cycle, Enter freeze detail)",
 		len(m.runs), cycleLabel)
-	footerSuffix := " to run intraweek)"
-	sb.WriteString(dimStyle.Render(footerPrefix) + f5KeyStyle.Render(" F5") + dimStyle.Render(footerSuffix))
+	sb.WriteString(dimStyle.Render(footerText))
 	sb.WriteString("\n")
-
-	// Running status indicator — shown only while an F5 run is in progress.
-	if m.running {
-		runningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true)
-		sb.WriteString(runningStyle.Render("  ⏳ Running intraweek benchmark..."))
-		sb.WriteString("\n")
-	} else if m.runErr != nil {
-		errRunStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-		sb.WriteString(errRunStyle.Render(fmt.Sprintf("  ✗ Intraweek run failed: %v", m.runErr)))
-		sb.WriteString("\n")
-	}
 
 	// Detail panel for the selected run.
 	// When detailFrozen, show the frozen snapshot — it won't change on background refresh.
@@ -534,7 +700,7 @@ func (m BenchmarkModel) View() string {
 			detailRun = m.runs[m.cursor]
 			trend = m.trendByID[detailRun.AgentID]
 		}
-		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend))
+		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend, m.minAccuracy, m.minROI))
 	}
 
 	return sb.String()
@@ -542,12 +708,13 @@ func (m BenchmarkModel) View() string {
 
 // renderDetailPanel renders the decision rationale panel for the selected run.
 // trend is the verdict history for the agent (oldest first); pass nil if unavailable.
-func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend []string) string {
+func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend []string, minAccuracy float64, minROI float64) string {
 	var sb strings.Builder
 
 	// Prevent terminal auto-wrapping from pushing/popping the main table out of
-	// view when switching rows.
-	const maxDetailValueLen = 120
+	// view when switching rows. Use a generous limit so multi-line fields like
+	// the trend legend are never truncated.
+	const maxDetailValueLen = 200
 	clamp := func(s string) string {
 		s = strings.TrimSpace(s)
 		if len(s) <= maxDetailValueLen {
@@ -568,11 +735,9 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 		return sb.String()
 	}
 
-	// Avoid multi-line layout shifts from DecisionReason (which can contain
-	// newlines). Keeping the detail panel single-line per field prevents
-	// terminal scrolling artifacts while moving the cursor.
-	reason := strings.ReplaceAll(run.DecisionReason, "\n", " ")
-	reason = clamp(reason)
+	// Reason is always derived dynamically from numeric fields so historical
+	// runs reflect the current formula, not the stale text stored in the DB.
+	reason := clamp(renderReason(run))
 
 	// Verdict line: show switch arrow if applicable.
 	verdictLine := string(run.Verdict)
@@ -585,32 +750,104 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 
 	// Format fields with aligned labels.
 	writeDetailField(&sb, "Agent", run.AgentID)
-	writeDetailField(&sb, "Model", run.Model)
+	modelDisplay := run.RawModel
+	if modelDisplay == "" {
+		modelDisplay = run.Model
+	}
+	writeDetailField(&sb, "Model", modelDisplay)
+	writeDetailField(&sb, "RunAt", run.RunAt.Local().Format("2006-01-02 15:04"))
 	writeDetailField(&sb, "Verdict", verdictLine)
 	writeDetailField(&sb, "Cost", fmt.Sprintf("$%.2f  Savings: %s", run.TotalCostUSD, savingsStr))
 	writeDetailField(&sb, "Samples", fmt.Sprintf("%d events", run.SampleSize))
 	sb.WriteString("\n")
 	writeDetailField(&sb, "Reason", reason)
+
+	explanation := buildVerdictExplanation(run, pricing, minAccuracy, minROI)
+	switch explanation.FailureType {
+	case "quality-gap":
+		if explanation.IsFreeToPayTransition {
+			renderScenario1(&sb, run, explanation)
+		} else {
+			renderScenario2(&sb, run, explanation)
+		}
+	case "cost-optimization":
+		renderScenario3(&sb, run, explanation)
+	case "cost-data-missing":
+		renderScenario5(&sb, run, explanation)
+	case "keep":
+		renderScenario4(&sb, run, explanation)
+	default:
+		renderScenarioUnknown(&sb, run)
+	}
+
 	writeDetailField(&sb, "Context", clamp(evaluateAgentContext(run)))
 
 	// Trend line: show last N verdicts with direction indicator.
 	if len(trend) > 0 {
 		trendStr := formatVerdictTrend(trend)
-		writeDetailField(&sb, "Trend", clamp(trendStr))
+		writeDetailField(&sb, "Weekly Trend", clamp(trendStr))
 	}
 
 	return sb.String()
 }
 
-// formatVerdictTrend formats a slice of verdict strings into a human-readable trend line.
-// e.g. "SWITCH → SWITCH → KEEP → KEEP  (↑ improving)"
+// verdictAbbrev returns a single-character abbreviation for a verdict.
+// Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA
+func verdictAbbrev(v string) string {
+	switch store.VerdictType(v) {
+	case store.VerdictKeep:
+		return "K"
+	case store.VerdictSwitch:
+		return "S"
+	case store.VerdictUrgentSwitch:
+		return "U"
+	case store.VerdictInsufficientData:
+		return "?"
+	case store.VerdictType("CHANGED"):
+		return "C"
+	default:
+		return "?"
+	}
+}
+
+// trendDirectionStyled returns the direction indicator with color applied.
+//   - improving → bright green (82)
+//   - degrading → bright red   (196)
+//   - stable    → bright blue  (39)
+func trendDirectionStyled(verdicts []string) string {
+	dir := trendDirection(verdicts)
+	switch dir {
+	case "↑ improving":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true).Render(dir)
+	case "↓ degrading":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render(dir)
+	case "→ unknown":
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Render(dir)
+	default: // → stable
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Render(dir)
+	}
+}
+
+// formatVerdictTrend formats the last 5 verdicts as abbreviated single chars
+// separated by arrows, followed by a colored direction indicator.
+// Legend line is appended below.
+// e.g. "K → K → S → C → ?  (↓ degrading)\n  Legend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA"
 func formatVerdictTrend(trend []string) string {
 	if len(trend) == 0 {
 		return "-"
 	}
-	trendLine := strings.Join(trend, " → ")
-	direction := trendDirection(trend)
-	return fmt.Sprintf("%s  (%s)", trendLine, direction)
+	// Take last 5 entries (most recent).
+	window := trend
+	if len(window) > 5 {
+		window = window[len(window)-5:]
+	}
+	abbrevs := make([]string, len(window))
+	for i, v := range window {
+		abbrevs[i] = verdictAbbrev(v)
+	}
+	trendLine := strings.Join(abbrevs, " → ")
+	direction := trendDirectionStyled(trend)
+	return fmt.Sprintf("%s  (%s)\nLegend: K=KEEP  S=SWITCH  U=URGENT_SWITCH  C=CHANGED  ?=INSUFFICIENT_DATA", trendLine, direction)
 }
 
 // verdictSeverity returns a numeric severity for a verdict (lower = better).
@@ -618,6 +855,10 @@ func verdictSeverity(v string) int {
 	switch store.VerdictType(v) {
 	case store.VerdictKeep:
 		return 0
+	case store.VerdictInsufficientData:
+		return 1
+	case store.VerdictType("CHANGED"):
+		return 1
 	case store.VerdictSwitch:
 		return 2
 	case store.VerdictUrgentSwitch:
@@ -628,18 +869,33 @@ func verdictSeverity(v string) int {
 }
 
 // trendDirection returns a direction indicator string for a slice of verdict strings.
-// INSUFFICIENT_DATA at either endpoint is treated as a neutral sentinel — it does not
-// imply improvement or degradation from data gaps.
+// If the most recent verdict is INSUFFICIENT_DATA or CHANGED, direction is "unknown" —
+// we cannot assess trend direction from transition/non-comparable points.
+// If only older entries are INSUFFICIENT_DATA/CHANGED (but the last is not),
+// comparison is still valid and uses the most recent comparable baseline.
 func trendDirection(verdicts []string) string {
 	if len(verdicts) < 2 {
 		return "→ stable"
 	}
-	first := verdicts[0]
 	last := verdicts[len(verdicts)-1]
 
-	// Data gaps are neutral — don't signal improvement or degradation.
-	if first == string(store.VerdictInsufficientData) || last == string(store.VerdictInsufficientData) {
-		return "→ stable"
+	// If the latest verdict has insufficient data, we cannot determine direction.
+	if last == string(store.VerdictInsufficientData) || last == "CHANGED" {
+		return "→ unknown"
+	}
+
+	// Find the most recent non-INSUFFICIENT_DATA / non-CHANGED verdict before the last one
+	// to use as the comparison baseline.
+	first := ""
+	for i := len(verdicts) - 2; i >= 0; i-- {
+		if verdicts[i] != string(store.VerdictInsufficientData) && verdicts[i] != "CHANGED" {
+			first = verdicts[i]
+			break
+		}
+	}
+	if first == "" {
+		// All previous verdicts were INSUFFICIENT_DATA/CHANGED — no baseline to compare.
+		return "→ unknown"
 	}
 
 	firstSev := verdictSeverity(first)
@@ -654,94 +910,417 @@ func trendDirection(verdicts []string) string {
 	return "→ stable"
 }
 
-// evaluateAgentContext returns a short qualitative assessment of whether the agent
-// fulfilled its mission, based on its known role and available telemetry metrics.
-func evaluateAgentContext(run store.BenchmarkRun) string {
-	switch run.AgentID {
-	case "sdd-orchestrator":
-		// Mission: coordinate, never do work inline
-		// Good: high tool_success (delegates correctly)
-		// Bad: if tool success < 0.8, likely doing inline work
-		if run.ToolSuccessRate >= 0.9 {
-			return "Coordinating effectively — delegations succeeding at expected rate"
-		} else if run.ToolSuccessRate >= 0.7 {
-			return "Some delegation failures detected — may be attempting inline work"
-		}
-		return "High failure rate — orchestrator may be bypassing delegation pattern"
+// renderReason generates the Reason string dynamically from the run's numeric
+// fields. This is intentionally NOT read from run.DecisionReason so that any
+// improvements to the formula are reflected immediately in historical runs.
+func renderReason(run store.BenchmarkRun) string {
+	switch run.Verdict {
+	case store.VerdictInsufficientData:
+		return fmt.Sprintf("Insufficient data: only %d events (minimum 50 required)", run.SampleSize)
 
-	case "sdd-apply":
-		// Mission: implement code changes
-		// Good: high tool success (edits, writes working)
-		// Bad: low success means broken implementations
-		if run.ToolSuccessRate >= 0.9 {
-			return "Implementations landing correctly — code changes applied successfully"
-		} else if run.ToolSuccessRate >= 0.7 {
-			return "Some implementation failures — review task definitions for clarity"
+	case store.VerdictUrgentSwitch:
+		var parts []string
+		if run.Accuracy < 0.70 {
+			parts = append(parts, fmt.Sprintf("URGENT: accuracy %.1f%% is critically low", run.Accuracy*100))
 		}
-		return "High implementation failure rate — task definitions may be incomplete"
+		if len(parts) == 0 {
+			parts = append(parts, "URGENT: critical threshold breached")
+		}
+		return strings.Join(parts, "; ")
 
-	case "sdd-explore":
-		// Mission: investigate codebase and think through ideas
-		// Good: high tool success (reads, searches working)
-		// Check: sample size indicates depth of exploration
-		if run.SampleSize >= 50 && run.ToolSuccessRate >= 0.9 {
-			return "Deep exploration with high read success — investigations thorough"
-		} else if run.ToolSuccessRate >= 0.8 {
-			return "Adequate exploration — consider deeper codebase analysis"
+	case store.VerdictSwitch:
+		var parts []string
+		if run.Accuracy < 0.95 {
+			parts = append(parts, fmt.Sprintf("accuracy %.1f%% below threshold 95.0%%", run.Accuracy*100))
 		}
-		return "Shallow exploration detected — may be missing critical context"
+		if run.ROIScore > 0 && run.ROIScore < 0.05 {
+			parts = append(parts, fmt.Sprintf("ROI %.2f below threshold 0.05 (cost too high relative to accuracy)", run.ROIScore))
+		}
+		if len(parts) == 0 {
+			parts = append(parts, "threshold breached")
+		}
+		return strings.Join(parts, "; ")
 
-	case "sdd-verify":
-		// Mission: validate implementation against specs
-		// Good: high tool success (reads, comparisons working)
-		if run.ToolSuccessRate >= 0.9 {
-			return "Validation passing — spec compliance checks executing correctly"
-		} else if run.ToolSuccessRate >= 0.7 {
-			return "Some validation failures — specs may need clarification"
+	case store.VerdictKeep:
+		var parts []string
+		parts = append(parts, fmt.Sprintf("accuracy=%.1f%%", run.Accuracy*100))
+		if run.AvgTurnMs > 0 {
+			parts = append(parts, fmt.Sprintf("avg_response=%s", formatDuration(run.AvgTurnMs)))
 		}
-		return "Validation failing frequently — implementation may not match specs"
-
-	case "sdd-spec":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Spec writing succeeding — requirements captured correctly"
+		if run.ROIScore > 0 {
+			parts = append(parts, fmt.Sprintf("roi=%.2f", run.ROIScore))
+		} else {
+			parts = append(parts, "roi=N/A (free model or no billing data)")
 		}
-		return "Spec generation issues — proposal inputs may be incomplete"
-
-	case "sdd-design":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Design artifacts generated successfully"
-		}
-		return "Design generation issues — proposal may need more detail"
-
-	case "sdd-propose":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Proposals being created from explorations correctly"
-		}
-		return "Proposal failures — exploration output may be insufficient"
-
-	case "sdd-tasks":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Task breakdown succeeding — specs and designs well-structured"
-		}
-		return "Task breakdown failures — specs may be ambiguous"
-
-	case "sdd-init":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Bootstrap executing correctly"
-		}
-		return "Bootstrap failures — check project configuration"
-
-	case "sdd-archive":
-		if run.ToolSuccessRate >= 0.9 {
-			return "Archiving completing correctly"
-		}
-		return "Archive failures — verify change artifacts are complete"
+		return fmt.Sprintf("All thresholds passed (%s)", strings.Join(parts, ", "))
 
 	default:
-		if run.ToolSuccessRate >= 0.9 {
-			return "Agent performing within normal parameters"
+		return "-"
+	}
+}
+
+// VerdictExplanation holds structured context for decision explainability rendering.
+type VerdictExplanation struct {
+	// Current state.
+	RequiredQuality    float64
+	CurrentQuality     float64
+	RequiredROI        float64
+	CurrentROI         float64
+	CurrentCostLabel   string
+	IsCurrentModelFree bool
+
+	// Scenario classification.
+	FailureType           string
+	IsFreeToPayTransition bool
+	IsQualityConstrained  bool
+	IsInterimRec          bool
+
+	// Recommendation context.
+	RecommendedModel     string
+	RecommendedQuality   string
+	RecommendedCostLabel string
+
+	// Impact.
+	QualityGapStr       string
+	CostImpactStr       string
+	HasReliableCostData bool
+}
+
+// buildVerdictExplanation classifies verdict explainability scenarios from run data.
+func buildVerdictExplanation(run store.BenchmarkRun, pricing map[string]float64, minAccuracy float64, minROI float64) VerdictExplanation {
+	if run.Verdict == store.VerdictInsufficientData {
+		return VerdictExplanation{}
+	}
+	if pricing == nil {
+		return VerdictExplanation{}
+	}
+
+	currentPrice, hasCurrentPrice := pricing[run.Model]
+	recommendedPrice, hasRecommendedPrice := pricing[run.RecommendedModel]
+	isCurrentFree := hasCurrentPrice && currentPrice == 0
+	hasReliableCostData := run.TotalCostUSD > 0
+	roiActive := hasCurrentPrice && currentPrice > 0 && hasReliableCostData
+
+	ex := VerdictExplanation{
+		RequiredQuality:     minAccuracy,
+		CurrentQuality:      run.Accuracy,
+		RequiredROI:         minROI,
+		CurrentROI:          run.ROIScore,
+		CurrentCostLabel:    formatCurrentCostLabel(run, pricing),
+		IsCurrentModelFree:  isCurrentFree,
+		RecommendedModel:    run.RecommendedModel,
+		RecommendedQuality:  fmt.Sprintf("≥%.0f%% (meets threshold)", minAccuracy*100),
+		QualityGapStr:       formatQualityGap(run.Accuracy, minAccuracy),
+		HasReliableCostData: hasReliableCostData,
+	}
+
+	if run.RecommendedModel != "" {
+		ex.RecommendedModel = store.NormalizeModelName(run.RecommendedModel)
+		if hasRecommendedPrice {
+			ex.RecommendedCostLabel = formatEstimatedCostLabel(recommendedPrice)
 		}
-		return "Performance below expected thresholds for this agent role"
+	}
+
+	currentCostForImpact := currentPrice
+	if hasReliableCostData && run.ROIScore > 0 {
+		// Compare costs at the same per-session scale:
+		// - recommendedPrice is configured per-session pricing
+		// - current cost is derived from ROI (accuracy / ROI = cost_per_session)
+		currentCostForImpact = run.Accuracy / run.ROIScore
+	}
+	if isCurrentFree {
+		currentCostForImpact = 0
+	}
+	if run.RecommendedModel != "" && hasRecommendedPrice {
+		ex.CostImpactStr = formatCostImpact(currentCostForImpact, recommendedPrice)
+	}
+
+	if run.Accuracy < minAccuracy {
+		ex.FailureType = "quality-gap"
+		if isCurrentFree {
+			ex.IsFreeToPayTransition = true
+		} else if !hasReliableCostData {
+			// Deliberately grouped as cost-data-missing: both missing billing telemetry
+			// and incomplete pricing block reliable cost guidance for a paid model.
+			ex.FailureType = "cost-data-missing"
+			ex.IsInterimRec = true
+		}
+		return ex
+	}
+
+	requiresSwitch := run.Verdict == store.VerdictSwitch || run.Verdict == store.VerdictUrgentSwitch
+	recommendedMaintainsQuality := run.Accuracy >= minAccuracy && run.RecommendedModel != ""
+	if requiresSwitch && run.ROIScore < minROI {
+		if !roiActive || !hasRecommendedPrice {
+			// Deliberately grouped as cost-data-missing: ROI-triggered switch cannot be
+			// explained reliably without both current and recommended cost inputs.
+			ex.FailureType = "cost-data-missing"
+			return ex
+		}
+		if !recommendedMaintainsQuality {
+			ex.FailureType = "keep"
+			return ex
+		}
+		if recommendedPrice > 0 && recommendedPrice < currentCostForImpact {
+			ex.FailureType = "cost-optimization"
+			ex.IsQualityConstrained = true
+			return ex
+		}
+	}
+
+	ex.FailureType = "keep"
+	return ex
+}
+
+func formatCostImpact(currentCost float64, recommendedCost float64) string {
+	if currentCost <= 0 {
+		if recommendedCost <= 0 {
+			return "was $0"
+		}
+		return fmt.Sprintf("was $0 (+$%.2f/session)", recommendedCost)
+	}
+	delta := recommendedCost - currentCost
+	if delta > 0 {
+		return fmt.Sprintf("+$%.2f/session", delta)
+	}
+	if delta < 0 {
+		return fmt.Sprintf("saves $%.2f/session", -delta)
+	}
+	return "$0/session change"
+}
+
+func formatQualityGap(current float64, required float64) string {
+	diff := (current - required) * 100
+	if diff >= 0 {
+		return fmt.Sprintf("+%.0f%%", diff)
+	}
+	return fmt.Sprintf("%.0f%%", diff)
+}
+
+func formatCurrentCostLabel(run store.BenchmarkRun, pricing map[string]float64) string {
+	currentPrice, inPricing := pricing[run.Model]
+
+	// If model not in pricing table, we don't know its cost
+	if !inPricing {
+		if run.TotalCostUSD > 0 {
+			return fmt.Sprintf("$%.2f/session (actual)", run.TotalCostUSD)
+		}
+		return "unknown (no billing telemetry)"
+	}
+
+	// Model is in pricing table
+	if currentPrice == 0 {
+		return "free"
+	}
+	if run.TotalCostUSD > 0 {
+		return fmt.Sprintf("$%.2f/session (actual)", run.TotalCostUSD)
+	}
+	// currentPrice > 0 is guaranteed at this point
+	return fmt.Sprintf("$%.2f/session (estimated)", currentPrice)
+}
+
+func formatEstimatedCostLabel(cost float64) string {
+	if cost <= 0 {
+		return "unknown"
+	}
+	return fmt.Sprintf("$%.2f/session (estimated)", cost)
+}
+
+func renderScenario1(sb *strings.Builder, run store.BenchmarkRun, ex VerdictExplanation) {
+	writeDetailField(sb, "Scenario", "⚠ QUALITY INSUFFICIENT (Free Model)")
+	writeDetailField(sb, "Current", fmt.Sprintf("%s (%s)", store.NormalizeModelName(run.Model), ex.CurrentCostLabel))
+	writeDetailField(sb, "Threshold", fmt.Sprintf("%.0f%% accuracy", ex.RequiredQuality*100))
+	writeDetailField(sb, "Accuracy", fmt.Sprintf("%.1f%% (gap %s)", ex.CurrentQuality*100, ex.QualityGapStr))
+	writeDetailField(sb, "Best Option", formatRecommendedModel(ex.RecommendedModel))
+	writeDetailField(sb, "Cost", formatRecommendedCost(ex.RecommendedCostLabel, ex.CostImpactStr))
+	writeDetailField(sb, "Decision", switchDecisionText(run.Verdict, "accept cost to meet quality requirement"))
+}
+
+func renderScenario2(sb *strings.Builder, run store.BenchmarkRun, ex VerdictExplanation) {
+	writeDetailField(sb, "Scenario", "⚠ QUALITY INSUFFICIENT (Paid Model)")
+	writeDetailField(sb, "Current", fmt.Sprintf("%s (%s)", store.NormalizeModelName(run.Model), ex.CurrentCostLabel))
+	writeDetailField(sb, "Threshold", fmt.Sprintf("%.0f%% accuracy", ex.RequiredQuality*100))
+	writeDetailField(sb, "Accuracy", fmt.Sprintf("%.1f%% (gap %s)", ex.CurrentQuality*100, ex.QualityGapStr))
+	writeDetailField(sb, "Best Option", formatRecommendedModel(ex.RecommendedModel))
+	writeDetailField(sb, "Cost", formatRecommendedCost(ex.RecommendedCostLabel, ex.CostImpactStr))
+	writeDetailField(sb, "Decision", switchDecisionText(run.Verdict, "tier upgrade required"))
+}
+
+func renderScenario3(sb *strings.Builder, run store.BenchmarkRun, ex VerdictExplanation) {
+	writeDetailField(sb, "Scenario", "✓ QUALITY SUFFICIENT — Cost Optimization Available")
+	writeDetailField(sb, "Current", fmt.Sprintf("%s (%s)", store.NormalizeModelName(run.Model), ex.CurrentCostLabel))
+	writeDetailField(sb, "Threshold", fmt.Sprintf("%.0f%% accuracy", ex.RequiredQuality*100))
+	writeDetailField(sb, "Accuracy", fmt.Sprintf("%.1f%% (gap %s)", ex.CurrentQuality*100, ex.QualityGapStr))
+	writeDetailField(sb, "ROI", fmt.Sprintf("%.2f (threshold %.2f)", ex.CurrentROI, ex.RequiredROI))
+	writeDetailField(sb, "Optimize", formatRecommendedModel(ex.RecommendedModel))
+	writeDetailField(sb, "Cost", formatRecommendedCost(ex.RecommendedCostLabel, ex.CostImpactStr))
+	writeDetailField(sb, "Decision", switchDecisionText(run.Verdict, "reduce cost while preserving quality"))
+}
+
+func renderScenario4(sb *strings.Builder, run store.BenchmarkRun, ex VerdictExplanation) {
+	if ex.IsCurrentModelFree {
+		writeDetailField(sb, "Scenario", "✓ QUALITY SUFFICIENT + FREE")
+	} else {
+		writeDetailField(sb, "Scenario", "✓ QUALITY SUFFICIENT")
+	}
+	writeDetailField(sb, "Current", fmt.Sprintf("%s (%s)", store.NormalizeModelName(run.Model), ex.CurrentCostLabel))
+	writeDetailField(sb, "Threshold", fmt.Sprintf("%.0f%% accuracy", ex.RequiredQuality*100))
+	writeDetailField(sb, "Accuracy", fmt.Sprintf("%.1f%% (gap %s)", ex.CurrentQuality*100, ex.QualityGapStr))
+	writeDetailField(sb, "Decision", "✅ KEEP")
+}
+
+func renderScenario5(sb *strings.Builder, run store.BenchmarkRun, ex VerdictExplanation) {
+	writeDetailField(sb, "Scenario", "⚠ QUALITY INSUFFICIENT (Cost Data Unavailable)")
+	writeDetailField(sb, "Current", fmt.Sprintf("%s (%s)", store.NormalizeModelName(run.Model), ex.CurrentCostLabel))
+	writeDetailField(sb, "Threshold", fmt.Sprintf("%.0f%% accuracy", ex.RequiredQuality*100))
+	writeDetailField(sb, "Accuracy", fmt.Sprintf("%.1f%% (gap %s)", ex.CurrentQuality*100, ex.QualityGapStr))
+	writeDetailField(sb, "Interim", formatRecommendedModel(ex.RecommendedModel))
+	if ex.RecommendedCostLabel == "" {
+		writeDetailField(sb, "Cost", "unknown")
+	} else {
+		writeDetailField(sb, "Cost", ex.RecommendedCostLabel)
+	}
+	if run.Verdict == store.VerdictUrgentSwitch {
+		writeDetailField(sb, "Decision", "URGENT SWITCH (temporary)")
+	} else {
+		writeDetailField(sb, "Decision", "SWITCH (temporary)")
+	}
+	writeDetailField(sb, "Note", "Data pending — will optimize for cost after billing telemetry is available")
+}
+
+func renderScenarioUnknown(sb *strings.Builder, run store.BenchmarkRun) {
+	writeDetailField(sb, "Scenario", "Decision rationale unavailable")
+	writeDetailField(sb, "Current", store.NormalizeModelName(run.Model))
+	writeDetailField(sb, "Decision", string(run.Verdict))
+}
+
+func formatRecommendedModel(model string) string {
+	if model == "" {
+		return "N/A"
+	}
+	return fmt.Sprintf("🎯 %s", model)
+}
+
+func formatRecommendedCost(costLabel string, impactLabel string) string {
+	if costLabel == "" && impactLabel == "" {
+		return "unknown"
+	}
+	if costLabel == "" {
+		return impactLabel
+	}
+	if impactLabel == "" {
+		return costLabel
+	}
+	return fmt.Sprintf("%s (%s)", costLabel, impactLabel)
+}
+
+func switchDecisionText(verdict store.VerdictType, message string) string {
+	if verdict == store.VerdictUrgentSwitch {
+		return fmt.Sprintf("URGENT SWITCH — %s", message)
+	}
+	return fmt.Sprintf("SWITCH — %s", message)
+}
+
+// evaluateAgentContext returns a qualitative assessment of agent mission fulfillment.
+// Uses accuracy and sample size as signals — tool_success_rate is excluded because
+// it is always 1.0 in practice and provides no signal.
+func evaluateAgentContext(run store.BenchmarkRun) string {
+	acc := run.Accuracy
+	n := run.SampleSize
+
+	// For INSUFFICIENT_DATA, note we have limited evidence.
+	insufficientPrefix := ""
+	if run.Verdict == store.VerdictInsufficientData {
+		insufficientPrefix = "Limited data — "
+	}
+
+	highAcc := acc >= 0.99
+	goodAcc := acc >= 0.95
+
+	switch run.AgentID {
+	case "sdd-orchestrator":
+		if highAcc && n >= 50 {
+			return insufficientPrefix + "Coordinating effectively across agents"
+		} else if goodAcc {
+			return insufficientPrefix + "Coordination mostly effective — minor errors detected"
+		}
+		return insufficientPrefix + "Coordination issues — orchestrator may need guidance"
+
+	case "sdd-apply":
+		if highAcc {
+			return insufficientPrefix + "Implementations landing correctly"
+		} else if goodAcc {
+			return insufficientPrefix + "Most implementations successful — some corrections needed"
+		}
+		return insufficientPrefix + "Implementation failures detected — review task definitions"
+
+	case "sdd-explore":
+		if highAcc && n >= 50 {
+			return insufficientPrefix + "Thorough exploration — investigations well-grounded"
+		} else if goodAcc {
+			return insufficientPrefix + "Adequate exploration — consider wider codebase coverage"
+		}
+		return insufficientPrefix + "Shallow or error-prone exploration"
+
+	case "sdd-verify":
+		if highAcc {
+			return insufficientPrefix + "Validation executing correctly — spec compliance confirmed"
+		} else if goodAcc {
+			return insufficientPrefix + "Validation mostly passing — some spec gaps detected"
+		}
+		return insufficientPrefix + "Validation failures — implementation may not match specs"
+
+	case "sdd-spec":
+		if highAcc {
+			return insufficientPrefix + "Specs being written correctly"
+		}
+		return insufficientPrefix + "Spec generation issues — review proposal inputs"
+
+	case "sdd-design":
+		if highAcc {
+			return insufficientPrefix + "Design artifacts generated correctly"
+		}
+		return insufficientPrefix + "Design generation issues — proposal may need more detail"
+
+	case "sdd-propose":
+		if highAcc {
+			return insufficientPrefix + "Proposals created correctly from explorations"
+		}
+		return insufficientPrefix + "Proposal failures — check exploration output quality"
+
+	case "sdd-tasks":
+		if highAcc {
+			return insufficientPrefix + "Task breakdown working correctly"
+		}
+		return insufficientPrefix + "Task breakdown issues — specs may be ambiguous"
+
+	case "sdd-init":
+		if highAcc {
+			return insufficientPrefix + "Bootstrap executing correctly"
+		}
+		return insufficientPrefix + "Bootstrap failures — check project configuration"
+
+	case "sdd-archive":
+		if highAcc {
+			return insufficientPrefix + "Archiving completing correctly"
+		}
+		return insufficientPrefix + "Archive failures — verify change artifacts are complete"
+
+	case "igris":
+		if highAcc {
+			return insufficientPrefix + "Conversational and coordination tasks completing successfully"
+		} else if goodAcc {
+			return insufficientPrefix + "Mostly effective — occasional errors in task handling"
+		}
+		return insufficientPrefix + "Elevated error rate — review recent task complexity"
+
+	default:
+		if highAcc {
+			return insufficientPrefix + "Agent performing within expected parameters"
+		} else if goodAcc {
+			return insufficientPrefix + "Mostly within parameters — minor issues detected"
+		}
+		return insufficientPrefix + "Performance below expected thresholds for this role"
 	}
 }
 
@@ -760,41 +1339,47 @@ func isNoData(run store.BenchmarkRun) bool {
 }
 
 // formatBenchmarkRow converts a BenchmarkRun into display columns.
-// agentType is the type label for the Type column (primary/subagent/built-in/all).
+// Columns: Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To
 // For NO_DATA rows, metric fields are rendered as "-".
-// Intraweek runs are labelled with "(IW)" suffix on the Time column to distinguish
-// them from the scheduled weekly run within the same cycle.
-func formatBenchmarkRow(run store.BenchmarkRun, agentType string, pricing map[string]float64) []string {
-	if agentType == "" {
-		agentType = "-"
-	}
-
+func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []string {
 	// Handle placeholder rows (agent discovered but no runs yet).
 	if isNoData(run) {
-		return []string{"-", run.AgentID, agentType, "-", "-", "NO DATA", "-", "-"}
+		return []string{run.AgentID, "-", "-", "-", "-", "NO DATA", "-"}
 	}
 
-	date := run.RunAt.Local().Format("2006-01-02 15:04")
-	// Append "(IW)" marker for intraweek runs so the cycle view clearly shows
-	// which runs were triggered manually vs the scheduled Sunday run.
-	if run.RunKind == store.RunKindIntraweek {
-		date += " (IW)"
+	rawForDisplay := run.RawModel
+	if rawForDisplay == "" {
+		rawForDisplay = run.Model
 	}
+	model := store.NormalizeModelName(rawForDisplay)
+	if model == "" {
+		model = "-"
+	}
+	samples := fmt.Sprintf("%d", run.SampleSize)
 
 	accuracy := fmt.Sprintf("%.1f%%", run.Accuracy*100)
-	p95 := fmt.Sprintf("%.0fms", run.P95LatencyMs)
+	// Use AvgTurnMs (clean turn latency from complete events only).
+	// Fall back to P95LatencyMs for runs recorded before the migration.
+	turnMs := run.AvgTurnMs
+	if turnMs <= 0 {
+		turnMs = run.P95LatencyMs
+	}
+	avgResp := formatDuration(turnMs)
 
-	// → Model column: show RecommendedModel only for SWITCH/URGENT_SWITCH with a non-empty value.
-	recommendedModel := "-"
+	// → Switch To column: show RecommendedModel only for SWITCH/URGENT_SWITCH.
+	switchTo := "-"
 	if run.RecommendedModel != "" &&
 		(run.Verdict == store.VerdictSwitch || run.Verdict == store.VerdictUrgentSwitch) {
-		recommendedModel = run.RecommendedModel
+		switchTo = run.RecommendedModel
 	}
 
-	// Savings column.
-	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
+	// Verdict column: show "CHANGED" for superseded runs, otherwise use calculated verdict.
+	verdictText := string(run.Verdict)
+	if run.Status == store.RunStatusSuperseded {
+		verdictText = "CHANGED"
+	}
 
-	return []string{date, run.AgentID, agentType, accuracy, p95, string(run.Verdict), recommendedModel, savingsStr}
+	return []string{run.AgentID, model, samples, accuracy, avgResp, verdictText, switchTo}
 }
 
 // computeSavings returns the savings ratio (0.0–1.0) and a formatted string
