@@ -291,8 +291,9 @@ func (m ConfigModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Threshold Configuration") + "\n\n")
-	sb.WriteString(dimStyle.Render("  ↑/↓: select field  ←/→ or +/-: adjust value  s: save  r: reload") + "\n")
-	sb.WriteString(dimStyle.Render("  Keymap preset: Default (numbers/arrows) or Nvim (hjkl) via the Config tab") + "\n\n")
+	sb.WriteString(dimStyle.Render("  ↑/↓ or j/k: move between fields") + "\n")
+	sb.WriteString(dimStyle.Render("  ←/→ or +/-: adjust value  s / ctrl+s: save  r / ctrl+r: reload") + "\n")
+	sb.WriteString(dimStyle.Render("  Keymap preset: switch between Default (numbers/arrows) and Nvim (hjkl) on the row below") + "\n\n")
 
 	for i, f := range configFields {
 		v := m.getFieldValue(f.key)
@@ -332,6 +333,14 @@ func (m ConfigModel) View() string {
 		sb.WriteString(fieldInactiveStyle.Render(row))
 	}
 	sb.WriteString("\n")
+
+	// Legend explaining what each configuration option controls.
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("Legend:") + "\n")
+	sb.WriteString(dimStyle.Render("  • Min Accuracy: Minimum required task accuracy (0.0–1.0); higher values are stricter.") + "\n")
+	sb.WriteString(dimStyle.Render("  • Min ROI Score: Minimum acceptable efficiency (successful tool calls per dollar).") + "\n")
+	sb.WriteString(dimStyle.Render("  • Max Cost/Session (USD): Maximum spend allowed per tracked session before flagging cost issues.") + "\n")
+	sb.WriteString(dimStyle.Render("  • Keymap preset: 'Default' keeps original keybindings; 'Nvim' enables hjkl navigation. On non-config tabs h/l move between tabs; inside Config they adjust the selected field.") + "\n")
 
 	// Per-agent overrides count.
 	if len(m.thresholds.PerAgent) > 0 {
