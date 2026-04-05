@@ -552,8 +552,8 @@ func renderSummaryCard(title string, entries []chartSummaryEntry, width int, sho
 		width = 40
 	}
 	innerWidth := width - 4
-	if innerWidth < 24 {
-		innerWidth = 24
+	if innerWidth < 0 {
+		innerWidth = 0
 	}
 	borderStyle := lipgloss.NewStyle().
 		Width(width).
@@ -642,7 +642,14 @@ func wrapLegendLines(selected []string, totals map[string]float64, colors map[st
 			sep = ""
 		}
 		candidate := line + sep + entry
-		if width > 0 && lipgloss.Width(candidate) > maxInt(40, width-2) && line != "Legend: " {
+		maxLineWidth := 40
+		if width > 0 {
+			maxLineWidth = width - 2
+			if maxLineWidth < 20 {
+				maxLineWidth = 20
+			}
+		}
+		if lipgloss.Width(candidate) > maxLineWidth && line != "Legend: " {
 			legendLines = append(legendLines, line)
 			line = strings.Repeat(" ", len("Legend: ")) + entry
 		} else {
@@ -657,8 +664,8 @@ func panelBarHeight(totalHeight int) int {
 	barHeight := 8
 	if totalHeight > 0 {
 		barHeight = (totalHeight - 18) / 3
-		if barHeight < 5 {
-			barHeight = 5
+		if barHeight < 3 {
+			barHeight = 3
 		}
 		if barHeight > 12 {
 			barHeight = 12
@@ -977,7 +984,7 @@ func renderChartPanel(title string, days []time.Time, cursorDayIndex, width, hei
 	return lines
 }
 
-func renderChartTooltip(days []time.Time, cursorDayIndex int, data chartPanelData) []string {
+func renderChartTooltip(days []time.Time, cursorDayIndex, width int, data chartPanelData) []string {
 	if len(days) == 0 || len(data.selectedModels) == 0 {
 		return nil
 	}
@@ -996,7 +1003,15 @@ func renderChartTooltip(days []time.Time, cursorDayIndex int, data chartPanelDat
 			total += rowCosts[model]
 		}
 	}
-	tooltipLines := []string{fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total)}
+	maxWidth := width
+	if maxWidth < 0 {
+		maxWidth = 0
+	}
+	firstLine := fmt.Sprintf("Tooltip: %s ($%.2f)", cursorDay.Format("Jan 02"), total)
+	if maxWidth > 0 {
+		firstLine = truncateSummaryText(firstLine, maxWidth)
+	}
+	tooltipLines := []string{firstLine}
 	if total <= 0 || rowCosts == nil {
 		tooltipLines = append(tooltipLines, "(no spend on selected models)")
 		return tooltipLines
@@ -1014,7 +1029,11 @@ func renderChartTooltip(days []time.Time, cursorDayIndex int, data chartPanelDat
 		if ent.cost <= 0 {
 			continue
 		}
-		tooltipLines = append(tooltipLines, fmt.Sprintf("- %s %s: $%.3f", data.blocks[ent.model], ent.model, ent.cost))
+		line := fmt.Sprintf("- %s %s: $%.3f", data.blocks[ent.model], ent.model, ent.cost)
+		if maxWidth > 0 {
+			line = truncateSummaryText(line, maxWidth)
+		}
+		tooltipLines = append(tooltipLines, line)
 	}
 	return tooltipLines
 }
@@ -1263,7 +1282,7 @@ func (m ChartsModel) View() string {
 		lines = append(lines, "No cost data for the selected month.")
 	} else {
 		lines = append(lines, renderChartPanel("Cost chart", days, m.cursorDayIndex, m.width, m.height, costPanel)...)
-		tooltipLines := renderChartTooltip(days, m.cursorDayIndex, costPanel)
+		tooltipLines := renderChartTooltip(days, m.cursorDayIndex, m.width, costPanel)
 		if len(tooltipLines) > 0 {
 			lines = append(lines, "")
 			lines = append(lines, tooltipLines...)
