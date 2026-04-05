@@ -51,6 +51,10 @@ type TrackingModel struct {
 	pageOffset    int
 	loading       bool
 	lastViewLines int
+	// width and height are updated from tea.WindowSizeMsg so the view can
+	// adapt row counts and column widths to the current terminal size.
+	width  int
+	height int
 
 	// Popup state — frozen at moment of opening, not updated by background refresh.
 	popupOpen      bool
@@ -109,6 +113,10 @@ func (m TrackingModel) Init() tea.Cmd {
 // Update handles tick, data, and key messages.
 func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case trackingTickMsg:
 		// Schedule next tick and fetch sessions (popup data is NOT updated).
 		return m, tea.Batch(
@@ -157,40 +165,41 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 
 		// If popup is open, route navigation keys into popup viewport.
 		if m.popupOpen {
+			maxRows := m.maxVisibleRows()
 			switch msg.String() {
 			case "up", "k":
 				if m.popupCursor > 0 {
 					m.popupCursor--
 				} else if m.popupOffset > 0 {
-					m.popupOffset -= maxTrackingRows
+					m.popupOffset -= maxRows
 					if m.popupOffset < 0 {
 						m.popupOffset = 0
 					}
-					m.popupCursor = maxTrackingRows - 1
+					m.popupCursor = maxRows - 1
 				}
 			case "down", "j":
 				visibleCount := len(m.popupEvents) - m.popupOffset
-				if visibleCount > maxTrackingRows {
-					visibleCount = maxTrackingRows
+				if visibleCount > maxRows {
+					visibleCount = maxRows
 				}
 				if visibleCount < 0 {
 					visibleCount = 0
 				}
 				if m.popupCursor < visibleCount-1 {
 					m.popupCursor++
-				} else if m.popupOffset+maxTrackingRows < len(m.popupEvents) {
-					m.popupOffset += maxTrackingRows
+				} else if m.popupOffset+maxRows < len(m.popupEvents) {
+					m.popupOffset += maxRows
 					m.popupCursor = 0
 				}
 			case "pgdown":
-				newOffset := m.popupOffset + maxTrackingRows
+				newOffset := m.popupOffset + maxRows
 				if newOffset < len(m.popupEvents) {
 					m.popupOffset = newOffset
 					m.popupCursor = 0
 				}
 			case "pgup":
-				if m.popupOffset >= maxTrackingRows {
-					m.popupOffset -= maxTrackingRows
+				if m.popupOffset >= maxRows {
+					m.popupOffset -= maxRows
 				} else {
 					m.popupOffset = 0
 				}
@@ -221,12 +230,12 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				return m, m.fetchSessionEvents(sid)
 			}
 		case "pgdown":
-			m.pageOffset += maxTrackingRows
+			m.pageOffset += m.maxVisibleRows()
 			m.cursor = 0
 			return m, m.fetchSessions()
 		case "pgup":
-			if m.pageOffset >= maxTrackingRows {
-				m.pageOffset -= maxTrackingRows
+			if m.pageOffset >= m.maxVisibleRows() {
+				m.pageOffset -= m.maxVisibleRows()
 			} else {
 				m.pageOffset = 0
 			}
@@ -243,7 +252,8 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				defer cancel()
 				total, err := m.es.CountEvents(ctx, store.EventQuery{})
 				if err == nil && total > 0 {
-					lastPageOffset := ((total - 1) / maxTrackingRows) * maxTrackingRows
+					rows := m.maxVisibleRows()
+					lastPageOffset := ((total - 1) / rows) * rows
 					m.pageOffset = lastPageOffset
 					m.cursor = 0
 					return m, m.fetchSessions()
@@ -257,17 +267,37 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 	return m, nil
 }
 
+// maxVisibleRows returns the number of rows that should be visible in the
+// tracking table or popup for the current terminal height. It never exceeds
+// maxTrackingRows so the layout remains stable on tall terminals.
+func (m TrackingModel) maxVisibleRows() int {
+	if m.height <= 0 {
+		return maxTrackingRows
+	}
+	// Reserve a handful of lines for the title, headers, footer, and status so
+	// the table does not push them off-screen when the terminal is short.
+	rows := m.height - 10
+	if rows < 5 {
+		rows = 5
+	}
+	if rows > maxTrackingRows {
+		rows = maxTrackingRows
+	}
+	return rows
+}
+
 // fetchSessions returns a command that queries the EventStore for the current page of sessions.
 func (m TrackingModel) fetchSessions() tea.Cmd {
 	if m.es == nil {
 		return nil
 	}
 	offset := m.pageOffset
+	limit := m.maxVisibleRows()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		sessions, err := m.es.QuerySessions(ctx, store.SessionQuery{
-			Limit:  maxTrackingRows,
+			Limit:  limit,
 			Offset: offset,
 		})
 		return TrackingDataMsg{Sessions: sessions, Err: err}
@@ -309,33 +339,44 @@ func (m *TrackingModel) renderBackground() string {
 
 	sb.WriteString(titleStyle.Render("Real-time Event Stream") + "\n\n")
 
+	maxRows := m.maxVisibleRows()
+	effectiveColWidths := colWidths
+	if m.width > 0 {
+		// Leave a small margin so the table does not hug the window edge.
+		available := m.width - 4
+		if available < 0 {
+			available = m.width
+		}
+		effectiveColWidths = clampColumnWidths(colWidths, available)
+	}
+
 	if m.loading {
 		sb.WriteString(dimStyle.Render("  Loading…") + "\n")
 		// Pad to fixed height so overlay math is consistent.
-		for i := 0; i < maxTrackingRows+3; i++ {
+		for i := 0; i < maxRows+3; i++ {
 			sb.WriteString("\n")
 		}
 		return sb.String()
 	}
 	if m.err != nil {
 		sb.WriteString(errStyle.Render(fmt.Sprintf("  Error: %v", m.err)) + "\n")
-		for i := 0; i < maxTrackingRows+3; i++ {
+		for i := 0; i < maxRows+3; i++ {
 			sb.WriteString("\n")
 		}
 		return sb.String()
 	}
 	if len(m.sessions) == 0 {
 		sb.WriteString(dimStyle.Render("  No events yet. Start tracking to see data here.") + "\n")
-		for i := 0; i < maxTrackingRows+3; i++ {
+		for i := 0; i < maxRows+3; i++ {
 			sb.WriteString("\n")
 		}
 		return sb.String()
 	}
 
 	// Header row.
-	sb.WriteString(renderRowMain(colNames, colWidths, headerStyle))
+	sb.WriteString(renderRowMain(colNames, effectiveColWidths, headerStyle))
 	sb.WriteString("\n")
-	sb.WriteString(strings.Repeat("─", totalWidth(colWidths)) + "\n")
+	sb.WriteString(strings.Repeat("─", totalWidth(effectiveColWidths)) + "\n")
 
 	// Session rows — always collapsed, one per session.
 	for ri, s := range m.sessions {
@@ -346,18 +387,18 @@ func (m *TrackingModel) renderBackground() string {
 			baseStyle = cursorStyle
 		}
 		spentStyle, durationStyle := severityStylesForCostAndDuration(s.CostUSD, s.DurationMs)
-		sb.WriteString(renderSessionRowMain(cells, colWidths, baseStyle, isCursor, spentStyle, durationStyle))
+		sb.WriteString(renderSessionRowMain(cells, effectiveColWidths, baseStyle, isCursor, spentStyle, durationStyle))
 		sb.WriteString("\n")
 	}
 
 	// Pad to maxTrackingRows so the background always occupies a fixed height.
-	for i := len(m.sessions); i < maxTrackingRows; i++ {
+	for i := len(m.sessions); i < maxRows; i++ {
 		sb.WriteString("\n")
 	}
 
 	// Pagination footer.
 	sb.WriteString("\n")
-	pageNum := m.pageOffset/maxTrackingRows + 1
+	pageNum := m.pageOffset/maxRows + 1
 	footer := fmt.Sprintf("  %d sessions shown  |  page %d  (PgUp/PgDn, ↑↓, Enter to open timeline)",
 		len(m.sessions), pageNum)
 	sb.WriteString(dimStyle.Render(footer))
@@ -383,25 +424,35 @@ func (m *TrackingModel) renderPopup() string {
 	if m.popupLoading {
 		// Show fixed-height placeholder while events are loading.
 		sb.WriteString(popupDimStyle.Render("  Loading events…") + "\n")
-		for i := 0; i < maxTrackingRows+2; i++ {
+		rows := m.maxVisibleRows()
+		for i := 0; i < rows+2; i++ {
 			sb.WriteString("\n")
 		}
 	} else if len(m.popupEvents) == 0 {
 		sb.WriteString(popupDimStyle.Render("  No events found for this session.") + "\n")
-		for i := 0; i < maxTrackingRows+2; i++ {
+		rows := m.maxVisibleRows()
+		for i := 0; i < rows+2; i++ {
 			sb.WriteString("\n")
 		}
 	} else {
 		// Timeline columns (no metadata).
 		// Spent values here are cumulative snapshots at the time of each event.
 		colW := []int{20, 14, 24, 8, 8, 12, 12}
+		if m.width > 0 {
+			available := m.width - 4
+			if available < 0 {
+				available = m.width
+			}
+			colW = clampColumnWidths(colW, available)
+		}
 		colH := []string{"Time", "Type", "Model", "In", "Out", "Spent(acc)", "Spent(step)"}
 		sb.WriteString(popupHeaderStyle.Render(renderRow(colH, colW, lipgloss.NewStyle())) + "\n")
 		sb.WriteString(strings.Repeat("─", totalWidth(colW)) + "\n")
 
-		// Compute the visible window [popupOffset, popupOffset+maxTrackingRows).
+		// Compute the visible window [popupOffset, popupOffset+maxVisibleRows).
 		start := m.popupOffset
-		end := start + maxTrackingRows
+		rows := m.maxVisibleRows()
+		end := start + rows
 		if end > len(m.popupEvents) {
 			end = len(m.popupEvents)
 		}
@@ -424,14 +475,14 @@ func (m *TrackingModel) renderPopup() string {
 		}
 
 		// Pad viewport to fixed height so popup box stays stable.
-		for i := len(visible); i < maxTrackingRows; i++ {
+		for i := len(visible); i < rows; i++ {
 			sb.WriteString("\n")
 		}
 
 		// Scroll indicator.
 		totalEvents := len(m.popupEvents)
-		pageNum := m.popupOffset/maxTrackingRows + 1
-		totalPages := (totalEvents + maxTrackingRows - 1) / maxTrackingRows
+		pageNum := m.popupOffset/rows + 1
+		totalPages := (totalEvents + rows - 1) / rows
 		scrollInfo := fmt.Sprintf("  %d/%d events  |  page %d/%d  (↑↓ / PgUp/PgDn)", totalEvents, totalEvents, pageNum, totalPages)
 		if totalPages == 1 {
 			scrollInfo = fmt.Sprintf("  %d events", totalEvents)
@@ -451,7 +502,15 @@ func overlayPopup(bg, popup string) string {
 	// should appear.
 	bgLines := strings.Split(bg, "\n")
 	popupLines := strings.Split(popup, "\n")
-	startRow := 4
+	// Center the popup vertically within the background while keeping at least
+	// a couple of lines of context above it.
+	startRow := 0
+	if len(bgLines) > len(popupLines) {
+		startRow = (len(bgLines) - len(popupLines)) / 2
+		if startRow < 2 {
+			startRow = 2
+		}
+	}
 
 	for pi, pline := range popupLines {
 		bi := startRow + pi

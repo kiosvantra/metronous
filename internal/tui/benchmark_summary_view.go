@@ -76,6 +76,10 @@ type BenchmarkSummaryModel struct {
 	running       bool
 	runErr        error
 	minROI        float64 // from thresholds config
+	// width and height are updated from tea.WindowSizeMsg so the view can
+	// adapt column widths to the current terminal size.
+	width  int
+	height int
 }
 
 const maxSummaryRows = 10
@@ -92,6 +96,22 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// currentSummaryColWidths returns a copy of summaryColWidths adjusted to fit
+// within the current terminal width. When the width is unknown (zero) the
+// original widths are returned unchanged.
+func (m BenchmarkSummaryModel) currentSummaryColWidths() []int {
+	out := make([]int, len(summaryColWidths))
+	copy(out, summaryColWidths)
+	if m.width <= 0 {
+		return out
+	}
+	available := m.width - 4
+	if available < 0 {
+		available = m.width
+	}
+	return clampColumnWidths(out, available)
 }
 
 // NewBenchmarkSummaryModel creates a BenchmarkSummaryModel wired to the given BenchmarkStore.
@@ -119,6 +139,10 @@ func (m BenchmarkSummaryModel) Init() tea.Cmd {
 // Update handles data, tick, and key messages.
 func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case ConfigReloadedMsg:
 		m.minROI = msg.Thresholds.Defaults.MinROIScore
 		return m, nil
@@ -634,10 +658,12 @@ func (m *BenchmarkSummaryModel) View() string {
 		return sb.String()
 	}
 
+	widths := m.currentSummaryColWidths()
+
 	// Header.
-	sb.WriteString(renderRow(summaryColNames, summaryColWidths, headerStyle))
+	sb.WriteString(renderRow(summaryColNames, widths, headerStyle))
 	sb.WriteString("\n")
-	sb.WriteString(strings.Repeat("─", totalWidth(summaryColWidths)) + "\n")
+	sb.WriteString(strings.Repeat("─", totalWidth(widths)) + "\n")
 
 	// Data rows.
 	offset := m.offset
@@ -662,7 +688,7 @@ func (m *BenchmarkSummaryModel) View() string {
 		if absIdx > 0 {
 			prev := m.rows[absIdx-1]
 			if prev.AgentID != row.AgentID {
-				divider := strings.Repeat("\u2500", totalWidth(summaryColWidths))
+				divider := strings.Repeat("\u2500", totalWidth(widths))
 				sb.WriteString(dimStyle.Render(divider) + "\n")
 			}
 		}
@@ -693,35 +719,35 @@ func (m *BenchmarkSummaryModel) View() string {
 		if row.IsActive {
 			// Truncate plain agentCell to (width-2) visible chars, then prepend the marker.
 			agentCell := cells[0]
-			maxAgentLen := summaryColWidths[0] - 2 // reserve 2 visible chars for "● "
+			maxAgentLen := widths[0] - 2 // reserve 2 visible chars for "● "
 			if len(agentCell) > maxAgentLen {
 				agentCell = agentCell[:maxAgentLen-1] + "…"
 			}
 			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
 			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
 			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
-			rendered = agentColRendered + " " + renderRow(cells[1:healthColIdx], summaryColWidths[1:healthColIdx], baseStyle)
+			rendered = agentColRendered + " " + renderRow(cells[1:healthColIdx], widths[1:healthColIdx], baseStyle)
 		} else {
-			rendered = renderRow(cells[:healthColIdx], summaryColWidths[:healthColIdx], baseStyle)
+			rendered = renderRow(cells[:healthColIdx], widths[:healthColIdx], baseStyle)
 		}
 
 		// Health column with colour.
 		healthCell := healthStyle(row.HealthScore).Inherit(baseStyle).Render(
-			fmt.Sprintf("%-*s", summaryColWidths[healthColIdx], cells[healthColIdx]))
+			fmt.Sprintf("%-*s", widths[healthColIdx], cells[healthColIdx]))
 		rendered += healthCell
 		// Last Verdict column: only the active model shows its last verdict.
 		// Non-active models always display "-" (dim, no colour styling).
 		verdictCell := ""
 		if !row.IsActive {
 			verdictCell = baseStyle.Render(
-				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], "-"))
+				fmt.Sprintf("%-*s", widths[verdictColIdx2], "-"))
 		} else if row.LastVerdict == store.VerdictInsufficientData {
 			verdictCell = baseStyle.Render(
-				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
+				fmt.Sprintf("%-*s", widths[verdictColIdx2], cells[verdictColIdx2]))
 		} else {
 			// Remove cursor background from this specific column.
 			verdictCell = verdictStyle(row.LastVerdict).Render(
-				fmt.Sprintf("%-*s", summaryColWidths[verdictColIdx2], cells[verdictColIdx2]))
+				fmt.Sprintf("%-*s", widths[verdictColIdx2], cells[verdictColIdx2]))
 		}
 		rendered += " " + verdictCell
 
@@ -748,7 +774,7 @@ func (m *BenchmarkSummaryModel) View() string {
 	if m.cursor >= 0 && m.cursor < len(m.rows) {
 		r := m.rows[m.cursor]
 		sb.WriteString("\n")
-		divider := strings.Repeat("─", totalWidth(summaryColWidths))
+		divider := strings.Repeat("─", totalWidth(widths))
 		sb.WriteString(dimStyle.Render(divider) + "\n")
 		sb.WriteString(detailLabelStyle.Render("Agent History Summary") + "\n")
 		sb.WriteString(dimStyle.Render("Weighted historical averages (weekly + intraweek) — showing models active in the last 4 weekly cycles") + "\n")

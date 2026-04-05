@@ -106,6 +106,22 @@ func formatDuration(ms float64) string {
 // maxBenchmarkRows is the maximum number of rows visible at once (scroll window).
 const maxBenchmarkRows = 15
 
+// currentBenchmarkColWidths returns a copy of benchColWidths adjusted to fit
+// within the current terminal width. When the width is unknown (zero) the
+// original widths are returned unchanged.
+func (m BenchmarkModel) currentBenchmarkColWidths() []int {
+	out := make([]int, len(benchColWidths))
+	copy(out, benchColWidths)
+	if m.width <= 0 {
+		return out
+	}
+	available := m.width - 4
+	if available < 0 {
+		available = m.width
+	}
+	return clampColumnWidths(out, available)
+}
+
 // modelPricingSection mirrors the JSON structure of the "model_pricing" key in thresholds.json.
 type modelPricingSection struct {
 	Models map[string]float64 `json:"models"`
@@ -173,6 +189,10 @@ type BenchmarkModel struct {
 	// Threshold defaults used for explainability classification/rendering.
 	minAccuracy float64
 	minROI      float64
+	// width and height are updated from tea.WindowSizeMsg so the view can
+	// adapt column widths to the current terminal size.
+	width  int
+	height int
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -207,6 +227,10 @@ func (m BenchmarkModel) Init() tea.Cmd {
 // Update handles data, tick, and key messages.
 func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
 	case benchmarkTickMsg:
 		// Schedule next tick and refresh data.
 		// While a manual run is in progress we still schedule the next tick so the
@@ -558,10 +582,12 @@ func (m BenchmarkModel) View() string {
 		return sb.String()
 	}
 
+	widths := m.currentBenchmarkColWidths()
+
 	// Header.
-	sb.WriteString(renderRow(benchColNames, benchColWidths, headerStyle))
+	sb.WriteString(renderRow(benchColNames, widths, headerStyle))
 	sb.WriteString("\n")
-	sb.WriteString(strings.Repeat("─", totalWidth(benchColWidths)) + "\n")
+	sb.WriteString(strings.Repeat("─", totalWidth(widths)) + "\n")
 
 	// Scroll indicator above if there are rows above the visible window.
 	if m.offset > 0 {
@@ -592,7 +618,7 @@ func (m BenchmarkModel) View() string {
 		if i > m.offset {
 			prev := m.runs[i-1]
 			if prev.AgentID != m.runs[i].AgentID {
-				divider := strings.Repeat("\u2500", totalWidth(benchColWidths))
+				divider := strings.Repeat("\u2500", totalWidth(widths))
 				sb.WriteString(dimStyle.Render(divider) + "\n")
 			}
 		}
@@ -625,9 +651,9 @@ func (m BenchmarkModel) View() string {
 		var rendered string
 		if isCurrent {
 			// Truncate plain agentCell to (width-2) visible chars, then prepend the marker.
-			// This keeps the total visible width equal to benchColWidths[0].
+			// This keeps the total visible width equal to widths[0].
 			agentCell := row[0]
-			maxAgentLen := benchColWidths[0] - 2 // reserve 2 visible chars for "● "
+			maxAgentLen := widths[0] - 2 // reserve 2 visible chars for "● "
 			if len(agentCell) > maxAgentLen {
 				agentCell = agentCell[:maxAgentLen-1] + "…"
 			}
@@ -636,27 +662,27 @@ func (m BenchmarkModel) View() string {
 			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
 			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
 			// Render remaining columns 1..verdictColIdx-1 via renderRow (safe: no ANSI in those cells).
-			rendered = agentColRendered + " " + renderRow(row[1:verdictColIdx], benchColWidths[1:verdictColIdx], baseStyle)
+			rendered = agentColRendered + " " + renderRow(row[1:verdictColIdx], widths[1:verdictColIdx], baseStyle)
 		} else {
 			// No marker: render all columns 0..verdictColIdx-1 uniformly.
-			rendered = renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
+			rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)
 		}
 
 		// Verdict column: coloured independently.
 		var verdictCell string
 		if isNoDataRow {
-			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", widths[verdictColIdx], row[verdictColIdx]))
 		} else if run.Status == store.RunStatusSuperseded {
 			// Superseded runs show "CHANGED" in dark orange.
 			verdictCell = verdictSuperseded.Render(
-				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
+				fmt.Sprintf("%-*s", widths[verdictColIdx], "CHANGED"))
 		} else {
 			verdictCell = verdictStyle(run.Verdict).Render(
-				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+				fmt.Sprintf("%-*s", widths[verdictColIdx], row[verdictColIdx]))
 		}
 		rendered += verdictCell
 		// → Switch To column (index verdictColIdx+1 = 6).
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
+		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", widths[6], row[6]))
 		sb.WriteString(rendered)
 		sb.WriteString("\n")
 	}
