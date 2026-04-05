@@ -657,7 +657,16 @@ func (m *BenchmarkSummaryModel) View() string {
 	for i, row := range visible {
 		absIdx := offset + i
 		baseStyle := lipgloss.NewStyle()
-		if absIdx == m.cursor {
+		isInactive := !row.IsActive
+		if isInactive {
+			// Inactive models are rendered in a darker gray so the active
+			// model remains visually primary, mirroring the detailed view
+			// where non-current rows are visually softer than the active one.
+			baseStyle = dimStyle
+			if absIdx == m.cursor {
+				baseStyle = dimStyle.Copy().Background(lipgloss.Color("236"))
+			}
+		} else if absIdx == m.cursor {
 			baseStyle = cursorStyle
 		}
 
