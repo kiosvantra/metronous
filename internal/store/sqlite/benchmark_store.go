@@ -72,6 +72,9 @@ const addP95TurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN p95_turn_ms RE
 // addRunStatusColumn adds the run_status column to track active vs superseded runs.
 const addRunStatusColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_status TEXT NOT NULL DEFAULT 'active'`
 
+// addRawModelColumn adds the raw_model column to store un-normalized model names with provider prefixes.
+const addRawModelColumn = `ALTER TABLE benchmark_runs ADD COLUMN raw_model TEXT NOT NULL DEFAULT ''`
+
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
 type BenchmarkStore struct {
 	writeDB *sql.DB
@@ -150,6 +153,7 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 		{addAvgTurnMsColumn, "avg_turn_ms"},
 		{addP95TurnMsColumn, "p95_turn_ms"},
 		{addRunStatusColumn, "run_status"},
+		{addRawModelColumn, "raw_model"},
 	}
 	for _, m := range migrations {
 		if err := applyAddColumnMigration(ctx, db, m.stmt, m.colName); err != nil {
@@ -178,14 +182,14 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
 			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 			run_kind, window_start, window_end,
-			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
+			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?,
-			?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -216,6 +220,7 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		run.AvgTurnMs,
 		run.P95TurnMs,
 		string(store.RunStatusActive),
+		run.RawModel,
 	)
 	if err != nil {
 		return fmt.Errorf("save benchmark run: %w", err)
@@ -250,7 +255,7 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -292,7 +297,7 @@ func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQu
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -346,7 +351,7 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -541,6 +546,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&run.AvgTurnMs,
 			&run.P95TurnMs,
 			&runStatus,
+			&run.RawModel,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan benchmark run row: %w", err)
@@ -609,6 +615,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&run.AvgTurnMs,
 		&run.P95TurnMs,
 		&runStatus,
+		&run.RawModel,
 	)
 	if err != nil {
 		return nil, err
@@ -693,7 +700,7 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
 		run_kind, window_start, window_end,
-		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE run_at >= ? AND run_at < ?
 		ORDER BY run_at DESC`

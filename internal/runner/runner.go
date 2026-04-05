@@ -233,11 +233,28 @@ func (r *Runner) processAgentAllModels(ctx context.Context, agentID string, star
 			}
 		}
 
+		// Compute dominant raw model from events with this normalized model.
+		// This preserves provider context (e.g., opencode/claude-sonnet vs anthropic/claude-sonnet).
+		rawModelCounts := make(map[string]int)
+		for _, e := range modelEvents[model] {
+			raw := e.Model // raw model name with provider prefix
+			rawModelCounts[raw]++
+		}
+		var dominantRawModel string
+		var maxCount int
+		for raw, count := range rawModelCounts {
+			if count > maxCount {
+				dominantRawModel = raw
+				maxCount = count
+			}
+		}
+
 		run := store.BenchmarkRun{
 			RunAt:               runAt,
 			WindowDays:          windowDays,
 			AgentID:             agentID,
 			Model:               model,
+			RawModel:            dominantRawModel,
 			Accuracy:            pm.metrics.Accuracy,
 			AvgLatencyMs:        pm.metrics.AvgTurnMs,
 			P50LatencyMs:        pm.metrics.P50TurnMs,

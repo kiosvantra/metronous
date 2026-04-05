@@ -277,6 +277,11 @@ type BenchmarkRun struct {
 	// Model is the LLM model the agent was using during the window.
 	Model string
 
+	// RawModel is the un-normalized model name with provider prefix (e.g., "opencode/claude-sonnet-4-6").
+	// Populated at benchmark time from the most frequent raw model name seen in the event window.
+	// Empty string for backward compatibility with runs before this field was added.
+	RawModel string
+
 	// Accuracy is the ratio of non-error events to total events (0.0–1.0).
 	Accuracy float64
 

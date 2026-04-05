@@ -600,8 +600,9 @@ func TestBenchmarkDetailUnfreezeOnNavigation(t *testing.T) {
 	}
 }
 
-// TestBenchmarkViewShowsDateAndTime verifies the Time column shows date+time not just date.
-func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
+// TestBenchmarkViewShowsAgentAndModelInDetailPanel verifies that agent and model
+// data are displayed in the detail panel when the table row is selected.
+func TestBenchmarkViewShowsAgentAndModelInDetailPanel(t *testing.T) {
 	m := tui.NewBenchmarkModel(nil, "", "", nil)
 	// Use a fixed timestamp in the local timezone to avoid UTC conversion differences.
 	ts := time.Date(2026, 3, 15, 14, 30, 0, 0, time.Local)
@@ -618,14 +619,20 @@ func TestBenchmarkViewShowsDateAndTime(t *testing.T) {
 	})
 
 	view := m.View()
-	// The Time column should show the date portion (YYYY-MM-DD).
-	if !strings.Contains(view, "2026-03-15") {
-		t.Errorf("expected date '2026-03-15' in view, got: %q", view)
+	// The table should show agent and model data.
+	if !strings.Contains(view, "time-agent") {
+		t.Errorf("expected agent 'time-agent' in view, got: %q", view)
 	}
-	// The Time column should show the hour portion (HH:MM) — time.Local is preserved.
-	expectedTime := ts.Format("15:04")
-	if !strings.Contains(view, expectedTime) {
-		t.Errorf("expected time %q in view, got: %q", expectedTime, view)
+	if !strings.Contains(view, "gpt-4") {
+		t.Errorf("expected model 'gpt-4' in view, got: %q", view)
+	}
+	// Detail panel should be rendered with all key fields including RunAt timestamp.
+	if !strings.Contains(view, "Decision Rationale") {
+		t.Errorf("expected Decision Rationale section in view, got: %q", view)
+	}
+	// Verify RunAt is displayed in the detail panel (format: YYYY-MM-DD HH:MM).
+	if !strings.Contains(view, "2026-03-15 14:30") {
+		t.Errorf("expected RunAt timestamp '2026-03-15 14:30' in detail panel, got: %q", view)
 	}
 }
 

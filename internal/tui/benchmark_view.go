@@ -67,16 +67,15 @@ var detailLabelStyle = lipgloss.NewStyle().
 var f5KeyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("19")).Bold(true) // dark blue
 
 // benchColWidths / benchColNames describe the benchmark history table.
-// Columns: Time | Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To | Savings
-// "Time" shows full date+time (YYYY-MM-DD HH:MM) so width is 17 to avoid truncation.
+// Columns: Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To
 var (
-	benchColWidths = []int{17, 14, 22, 8, 10, 13, 18, 16, 8}
-	benchColNames  = []string{"Time", "Agent", "Model", "Samples", "Accuracy", "Avg Response", "Verdict", "→ Switch To", "Savings"}
+	benchColWidths = []int{16, 22, 8, 10, 13, 18, 16}
+	benchColNames  = []string{"Agent", "Model", "Samples", "Accuracy", "Avg Response", "Verdict", "→ Switch To"}
 )
 
 // verdictColIdx is the index of the Verdict column in benchColNames/benchColWidths.
 // Defined as a constant so the rendering code stays in sync with the column layout.
-const verdictColIdx = 6
+const verdictColIdx = 5
 
 // maxBenchmarkRows is the maximum number of rows visible at once (scroll window).
 const maxBenchmarkRows = 20
@@ -466,8 +465,12 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			if page[i].RunAt != page[j].RunAt {
 				return page[i].RunAt.After(page[j].RunAt)
 			}
-			// Tiebreaker: SampleSize desc.
-			return page[i].SampleSize > page[j].SampleSize
+			// Sort by SampleSize desc.
+			if page[i].SampleSize != page[j].SampleSize {
+				return page[i].SampleSize > page[j].SampleSize
+			}
+			// Tiebreaker: Model asc (alphabetical, deterministic).
+			return page[i].Model < page[j].Model
 		})
 
 		// ── 6. Fetch verdict trends for each agent in the page (last 8 weeks) ─
@@ -571,43 +574,58 @@ func (m BenchmarkModel) View() string {
 		} else if i == m.cursor {
 			baseStyle = cursorStyle
 		}
-		// Render columns before Verdict without special colour.
-		// verdictColIdx = 6 (Time, Agent, Model, Samples, Accuracy, Avg Response, Verdict, → Switch To, Savings)
-		rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
 
 		// Add visual marker (●) to agent cell if this is the current active run for the agent.
 		isCurrent := !isNoDataRow && run.Status == store.RunStatusActive && currentModelByAgent[run.AgentID] == i
 		if isCurrent {
-			// Replace the agent column with a marker prefix.
-			agentCell := row[1]
-			agentWithMarker := "● " + agentCell
-			// Re-render the first column (Time) + modified Agent column.
-			rendered = renderRow(row[0:1], benchColWidths[0:1], baseStyle)
-			rendered += baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[1], agentWithMarker))
-			// Add back the remaining columns (Model, Samples, Accuracy, Avg Response).
-			rendered += " " + renderRow(row[2:verdictColIdx], benchColWidths[2:verdictColIdx], baseStyle)
-		}
-
-		// Verdict column: coloured independently.
-		var verdictCell string
-		if isNoDataRow {
-			verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
-		} else if run.Status == store.RunStatusSuperseded {
-			// Superseded runs show "CHANGED" in grey.
-			verdictCell = verdictOther.Render(
-				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
+			// Replace the agent column with a marker prefix (bright green).
+			agentCell := row[0]
+			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
+			agentWithMarker := greenMarker + " " + agentCell
+			// Apply Width to account for ANSI sequence length in marker, then apply baseStyle for background.
+			agentColStyle := lipgloss.NewStyle().Width(benchColWidths[0])
+			agentColWithWidth := agentColStyle.Render(agentWithMarker)
+			rendered := baseStyle.Render(agentColWithWidth)
+			// Add back the remaining columns (Model, Samples, Accuracy, Avg Response, Verdict, → Switch To).
+			rendered += " " + renderRow(row[1:verdictColIdx], benchColWidths[1:verdictColIdx], baseStyle)
+			// Verdict column: coloured independently.
+			var verdictCell string
+			if isNoDataRow {
+				verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			} else if run.Status == store.RunStatusSuperseded {
+				// Superseded runs show "CHANGED" in darker grey.
+				supersededStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+				verdictCell = supersededStyle.Render(
+					fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
+			} else {
+				verdictCell = verdictStyle(run.Verdict).Render(
+					fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			}
+			rendered += verdictCell
+			// → Switch To column (index verdictColIdx+1 = 6).
+			rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
+			sb.WriteString(rendered)
 		} else {
-			verdictCell = verdictStyle(run.Verdict).Render(
-				fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			// No marker: render all columns normally.
+			rendered := renderRow(row[:verdictColIdx], benchColWidths[:verdictColIdx], baseStyle)
+			// Verdict column: coloured independently.
+			var verdictCell string
+			if isNoDataRow {
+				verdictCell = baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			} else if run.Status == store.RunStatusSuperseded {
+				// Superseded runs show "CHANGED" in darker grey.
+				supersededStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+				verdictCell = supersededStyle.Render(
+					fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], "CHANGED"))
+			} else {
+				verdictCell = verdictStyle(run.Verdict).Render(
+					fmt.Sprintf("%-*s", benchColWidths[verdictColIdx], row[verdictColIdx]))
+			}
+			rendered += verdictCell
+			// → Switch To column (index verdictColIdx+1 = 6).
+			rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[6], row[6]))
+			sb.WriteString(rendered)
 		}
-		rendered += verdictCell
-		// → Switch To column (index 7).
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[7], row[7]))
-		// Savings column (index 8).
-		rendered += " " + baseStyle.Render(fmt.Sprintf("%-*s", benchColWidths[8], row[8]))
-		// Write the row directly — do NOT re-wrap with baseStyle.Render() as that
-		// would strip the inner ANSI colour codes (verdict colour, etc.).
-		sb.WriteString(rendered)
 		sb.WriteString("\n")
 	}
 
@@ -701,6 +719,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 	// Format fields with aligned labels.
 	writeDetailField(&sb, "Agent", run.AgentID)
 	writeDetailField(&sb, "Model", store.NormalizeModelName(run.Model))
+	writeDetailField(&sb, "RunAt", run.RunAt.Local().Format("2006-01-02 15:04"))
 	writeDetailField(&sb, "Verdict", verdictLine)
 	writeDetailField(&sb, "Cost", fmt.Sprintf("$%.2f  Savings: %s", run.TotalCostUSD, savingsStr))
 	writeDetailField(&sb, "Samples", fmt.Sprintf("%d events", run.SampleSize))
@@ -1284,22 +1303,18 @@ func isNoData(run store.BenchmarkRun) bool {
 }
 
 // formatBenchmarkRow converts a BenchmarkRun into display columns.
-// Columns: Time | Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To | Savings
+// Columns: Agent | Model | Samples | Accuracy | Avg Response | Verdict | → Switch To
 // For NO_DATA rows, metric fields are rendered as "-".
-// Intraweek runs are labelled with "(IW)" suffix on the Time column.
 func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []string {
 	// Handle placeholder rows (agent discovered but no runs yet).
 	if isNoData(run) {
-		return []string{"-", run.AgentID, "-", "-", "-", "-", "NO DATA", "-", "-"}
+		return []string{run.AgentID, "-", "-", "-", "-", "NO DATA", "-"}
 	}
 
-	date := run.RunAt.Local().Format("2006-01-02 15:04")
-	// Append "(IW)" marker for intraweek runs.
-	if run.RunKind == store.RunKindIntraweek {
-		date += " (IW)"
+	model := run.RawModel
+	if model == "" {
+		model = run.Model
 	}
-
-	model := run.Model
 	if model == "" {
 		model = "-"
 	}
@@ -1326,10 +1341,7 @@ func formatBenchmarkRow(run store.BenchmarkRun, pricing map[string]float64) []st
 		switchTo = run.RecommendedModel
 	}
 
-	// Savings column.
-	_, savingsStr := computeSavings(run.Model, run.RecommendedModel, run.Verdict, pricing)
-
-	return []string{date, run.AgentID, model, samples, accuracy, avgResp, string(run.Verdict), switchTo, savingsStr}
+	return []string{run.AgentID, model, samples, accuracy, avgResp, string(run.Verdict), switchTo}
 }
 
 // computeSavings returns the savings ratio (0.0–1.0) and a formatted string
