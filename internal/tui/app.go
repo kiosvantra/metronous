@@ -360,6 +360,11 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "1":
+			// Pressing the key for the currently active tab should be a no-op
+			// so that the dashboard does not flash or re-clear the screen.
+			if !m.showLanding && m.CurrentTab == TabBenchmarkSummary {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
@@ -369,6 +374,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "2":
+			if !m.showLanding && m.CurrentTab == TabBenchmarkDetailed {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
@@ -378,6 +386,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "3":
+			if !m.showLanding && m.CurrentTab == TabTracking {
+				return m, nil
+			}
 			m.closeTrackingPopup()
 			m.CurrentTab = TabTracking
 			m.landingCursor = 2
@@ -385,6 +396,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "4":
+			if !m.showLanding && m.CurrentTab == TabCharts {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}
@@ -394,6 +408,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.needsClear = true
 			return m, nil
 		case "5":
+			if !m.showLanding && m.CurrentTab == TabConfig {
+				return m, nil
+			}
 			if m.CurrentTab == TabTracking {
 				m.closeTrackingPopup()
 			}

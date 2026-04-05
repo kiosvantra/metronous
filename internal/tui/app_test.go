@@ -1616,6 +1616,53 @@ func TestAppTabSwitchingFiveTabs(t *testing.T) {
 	}
 }
 
+// TestPressingCurrentTabKeyIsNoOp verifies that pressing the numeric key for the
+// currently active tab is a no-op and does not blank the dashboard.
+func TestPressingCurrentTabKeyIsNoOp(t *testing.T) {
+	m := newTestApp(t)
+
+	// Ensure View() has a non-zero width so tabs render.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = updated.(*tui.AppModel)
+
+	cases := []struct {
+		key     string
+		wantTab tui.Tab
+		needle  string
+	}{
+		{"1", tui.TabBenchmarkSummary, "Benchmark History Summary"},
+		{"2", tui.TabBenchmarkDetailed, "Benchmark Detailed"},
+		{"3", tui.TabTracking, "Tracking"},
+		{"4", tui.TabCharts, "Charts"},
+		{"5", tui.TabConfig, "Config"},
+	}
+
+	for _, tc := range cases {
+		// Navigate to the target tab.
+		updated, _ = sendKey(m, tc.key)
+		m = updated.(*tui.AppModel)
+		if m.CurrentTab != tc.wantTab {
+			t.Fatalf("setup: key %q should select %v, got %v", tc.key, tc.wantTab, m.CurrentTab)
+		}
+		viewBefore := m.View()
+		if !strings.Contains(viewBefore, tc.needle) {
+			t.Fatalf("setup: view for key %q did not contain %q; got: %q", tc.key, tc.needle, viewBefore)
+		}
+
+		// Press the same key again; this should be a no-op and the view must
+		// remain populated (not blanked out).
+		updated, _ = sendKey(m, tc.key)
+		m = updated.(*tui.AppModel)
+		if m.CurrentTab != tc.wantTab {
+			t.Errorf("after second %q: expected tab %v, got %v", tc.key, tc.wantTab, m.CurrentTab)
+		}
+		viewAfter := m.View()
+		if !strings.Contains(viewAfter, tc.needle) {
+			t.Errorf("after second %q: view lost expected content %q; got: %q", tc.key, tc.needle, viewAfter)
+		}
+	}
+}
+
 // TestAppTabBarContainsSummaryAndDetailed verifies the rendered tab bar includes
 // both "Summary" and "Detailed" labels.
 func TestAppTabBarContainsSummaryAndDetailed(t *testing.T) {
