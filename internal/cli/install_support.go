@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 type fileBackup struct {
@@ -47,4 +52,48 @@ func combineRollback(primary error, errs ...error) error {
 		return primary
 	}
 	return fmt.Errorf("%w (rollback errors: %s)", primary, strings.Join(parts, "; "))
+}
+
+type installOptions struct {
+	dryRun bool
+	yes    bool
+}
+
+// reviewInstallPlan prints a preview of planned file mutations when dry-run is
+// enabled, or prompts for confirmation before applying them.
+func reviewInstallPlan(cmd *cobra.Command, plan []string, dryRun, yes bool) (bool, error) {
+	out := cmd.OutOrStdout()
+	if dryRun {
+		fmt.Fprintln(out, "Dry run: no files will be written.")
+		for _, line := range plan {
+			fmt.Fprintln(out, line)
+		}
+		return true, nil
+	}
+
+	if yes {
+		return false, nil
+	}
+
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, fmt.Errorf("confirmation required; rerun with --yes or --dry-run")
+	}
+
+	fmt.Fprintln(out, "Planned changes:")
+	for _, line := range plan {
+		fmt.Fprintln(out, line)
+	}
+	fmt.Fprint(out, "Apply these changes? [y/N] ")
+
+	reader := bufio.NewReader(cmd.InOrStdin())
+	answer, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer != "y" && answer != "yes" {
+		return false, fmt.Errorf("aborted by user")
+	}
+
+	return false, nil
 }
