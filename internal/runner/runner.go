@@ -27,6 +27,10 @@ type Runner struct {
 	agentModel     config.AgentModelLookup
 }
 
+type benchmarkAttemptRecorder interface {
+	RecordBenchmarkAttempt(context.Context, store.RunKindType, time.Time, store.BenchmarkAttemptStatus, string) error
+}
+
 // NewRunner creates a Runner with the required dependencies.
 // agentModel is used to look up each agent's currently configured model from
 // the opencode.json file at benchmark time. Pass config.NullAgentModelLookup
@@ -108,8 +112,18 @@ func (r *Runner) RunIntraweek(ctx context.Context, windowDays int) error {
 }
 
 // run is the shared implementation for RunWeekly and RunIntraweek.
-func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end time.Time, windowDays int) error {
+func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end time.Time, windowDays int) (err error) {
 	runAt := time.Now().UTC()
+	r.recordAttempt(ctx, kind, runAt, store.BenchmarkAttemptRunning, "")
+	defer func() {
+		status := store.BenchmarkAttemptCompleted
+		errMsg := ""
+		if err != nil {
+			status = store.BenchmarkAttemptFailed
+			errMsg = err.Error()
+		}
+		r.recordAttempt(ctx, kind, runAt, status, errMsg)
+	}()
 
 	r.logger.Info("starting benchmark run",
 		zap.String("run_kind", string(kind)),
@@ -221,6 +235,20 @@ func (r *Runner) run(ctx context.Context, kind store.RunKindType, start, end tim
 		r.logger.Warn("agents failed during processing", zap.Strings("failed_agent_ids", failedAgents))
 	}
 	return nil
+}
+
+func (r *Runner) recordAttempt(ctx context.Context, kind store.RunKindType, attemptedAt time.Time, status store.BenchmarkAttemptStatus, runErr string) {
+	recorder, ok := r.benchmarkStore.(benchmarkAttemptRecorder)
+	if !ok {
+		return
+	}
+	if err := recorder.RecordBenchmarkAttempt(ctx, kind, attemptedAt, status, runErr); err != nil {
+		r.logger.Warn("failed to record benchmark attempt state",
+			zap.String("run_kind", string(kind)),
+			zap.String("status", string(status)),
+			zap.Error(err),
+		)
+	}
 }
 
 // modelMetrics holds the computed metrics and verdict for a single (agent, model) pair.

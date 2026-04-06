@@ -573,6 +573,59 @@ func TestGetVerdictTrend(t *testing.T) {
 	})
 }
 
+// TestRecordBenchmarkAttemptPersistsState verifies that operational attempt state
+// is stored independently from BenchmarkRun rows and can be updated safely.
+func TestRecordBenchmarkAttemptPersistsState(t *testing.T) {
+	ctx := context.Background()
+	bs := newTestBenchmarkStore(t)
+
+	weeklyAt := time.Date(2026, 4, 7, 2, 0, 0, 0, time.UTC)
+	intraweekAt := time.Date(2026, 4, 8, 14, 30, 0, 0, time.UTC)
+	failedAt := time.Date(2026, 4, 8, 15, 0, 0, 0, time.UTC)
+
+	if err := bs.RecordBenchmarkAttempt(ctx, store.RunKindWeekly, weeklyAt, store.BenchmarkAttemptCompleted, ""); err != nil {
+		t.Fatalf("RecordBenchmarkAttempt weekly: %v", err)
+	}
+	if err := bs.RecordBenchmarkAttempt(ctx, store.RunKindIntraweek, intraweekAt, store.BenchmarkAttemptRunning, ""); err != nil {
+		t.Fatalf("RecordBenchmarkAttempt intraweek: %v", err)
+	}
+	if err := bs.RecordBenchmarkAttempt(ctx, store.RunKindIntraweek, failedAt, store.BenchmarkAttemptFailed, "discover agents: boom"); err != nil {
+		t.Fatalf("RecordBenchmarkAttempt intraweek update: %v", err)
+	}
+
+	states, err := bs.GetBenchmarkAttemptStates(ctx)
+	if err != nil {
+		t.Fatalf("GetBenchmarkAttemptStates: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("expected 2 attempt states, got %d: %+v", len(states), states)
+	}
+
+	byKind := make(map[store.RunKindType]store.BenchmarkAttemptState, len(states))
+	for _, state := range states {
+		byKind[state.RunKind] = state
+	}
+
+	weekly := byKind[store.RunKindWeekly]
+	if !weekly.LastAttemptAt.Equal(weeklyAt) {
+		t.Fatalf("weekly attempt time = %v, want %v", weekly.LastAttemptAt, weeklyAt)
+	}
+	if weekly.LastAttemptStatus != store.BenchmarkAttemptCompleted {
+		t.Fatalf("weekly attempt status = %q, want completed", weekly.LastAttemptStatus)
+	}
+
+	intraweek := byKind[store.RunKindIntraweek]
+	if !intraweek.LastAttemptAt.Equal(failedAt) {
+		t.Fatalf("intraweek attempt time = %v, want %v", intraweek.LastAttemptAt, failedAt)
+	}
+	if intraweek.LastAttemptStatus != store.BenchmarkAttemptFailed {
+		t.Fatalf("intraweek attempt status = %q, want failed", intraweek.LastAttemptStatus)
+	}
+	if intraweek.LastAttemptError == "" {
+		t.Fatal("expected intraweek attempt error to be persisted")
+	}
+}
+
 // TestQueryRunsPagination verifies QueryRuns supports offset+limit sliding-window pagination.
 func TestQueryRunsPagination(t *testing.T) {
 	ctx := context.Background()

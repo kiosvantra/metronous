@@ -22,8 +22,14 @@ type benchmarkSummaryTickMsg struct{ t time.Time }
 
 // BenchmarkSummaryDataMsg carries aggregated per-agent/model summary rows.
 type BenchmarkSummaryDataMsg struct {
-	Rows []summaryRow
-	Err  error
+	Rows                       []summaryRow
+	LastWeeklyRunAt            time.Time
+	LastIntraweekRunAt         time.Time
+	LastWeeklyAttemptAt        time.Time
+	LastIntraweekAttemptAt     time.Time
+	LastWeeklyAttemptStatus    store.BenchmarkAttemptStatus
+	LastIntraweekAttemptStatus store.BenchmarkAttemptStatus
+	Err                        error
 }
 
 // summaryRow holds the aggregated metrics for a single (agent, model) pair.
@@ -65,17 +71,23 @@ type clearRunErrMsg struct{}
 
 // BenchmarkSummaryModel is the Bubble Tea sub-model for the benchmark summary tab.
 type BenchmarkSummaryModel struct {
-	bs            store.BenchmarkStore
-	rows          []summaryRow
-	err           error
-	cursor        int
-	offset        int
-	loading       bool
-	lastViewLines int
-	runner        IntraweekRunner
-	running       bool
-	runErr        error
-	minROI        float64 // from thresholds config
+	bs                         store.BenchmarkStore
+	rows                       []summaryRow
+	err                        error
+	cursor                     int
+	offset                     int
+	loading                    bool
+	lastViewLines              int
+	runner                     IntraweekRunner
+	running                    bool
+	runErr                     error
+	lastWeeklyRunAt            time.Time
+	lastIntraweekRunAt         time.Time
+	lastWeeklyAttemptAt        time.Time
+	lastIntraweekAttemptAt     time.Time
+	lastWeeklyAttemptStatus    store.BenchmarkAttemptStatus
+	lastIntraweekAttemptStatus store.BenchmarkAttemptStatus
+	minROI                     float64 // from thresholds config
 	// width and height are updated from tea.WindowSizeMsg so the view can
 	// adapt column widths to the current terminal size.
 	width  int
@@ -176,6 +188,12 @@ func (m BenchmarkSummaryModel) Update(msg tea.Msg) (BenchmarkSummaryModel, tea.C
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.rows = msg.Rows
+			m.lastWeeklyRunAt = msg.LastWeeklyRunAt
+			m.lastIntraweekRunAt = msg.LastIntraweekRunAt
+			m.lastWeeklyAttemptAt = msg.LastWeeklyAttemptAt
+			m.lastIntraweekAttemptAt = msg.LastIntraweekAttemptAt
+			m.lastWeeklyAttemptStatus = msg.LastWeeklyAttemptStatus
+			m.lastIntraweekAttemptStatus = msg.LastIntraweekAttemptStatus
 			if m.cursor >= len(m.rows) {
 				if len(m.rows) > 0 {
 					m.cursor = len(m.rows) - 1
@@ -259,6 +277,11 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		status, err := loadBenchmarkRunStatus(ctx, m.bs)
+		if err != nil {
+			return BenchmarkSummaryDataMsg{Err: err}
+		}
 
 		agentIDs, err := m.bs.ListAgents(ctx)
 		if err != nil {
@@ -554,7 +577,15 @@ func (m BenchmarkSummaryModel) fetchSummary() tea.Cmd {
 			return rows[i].Model < rows[j].Model
 		})
 
-		return BenchmarkSummaryDataMsg{Rows: rows}
+		return BenchmarkSummaryDataMsg{
+			Rows:                       rows,
+			LastWeeklyRunAt:            status.lastWeeklyRunAt,
+			LastIntraweekRunAt:         status.lastIntraweekRunAt,
+			LastWeeklyAttemptAt:        status.lastWeeklyAttemptAt,
+			LastIntraweekAttemptAt:     status.lastIntraweekAttemptAt,
+			LastWeeklyAttemptStatus:    status.lastWeeklyAttemptStatus,
+			LastIntraweekAttemptStatus: status.lastIntraweekAttemptStatus,
+		}
 	}
 }
 
@@ -631,6 +662,10 @@ func (m *BenchmarkSummaryModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Benchmark History Summary") + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last weekly saved run: %s", formatBenchmarkRunStatus(m.lastWeeklyRunAt))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last weekly attempt: %s", formatBenchmarkAttemptStatus(m.lastWeeklyAttemptAt, m.lastWeeklyAttemptStatus))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last intraweek saved run: %s", formatBenchmarkRunStatus(m.lastIntraweekRunAt))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last intraweek attempt: %s", formatBenchmarkAttemptStatus(m.lastIntraweekAttemptAt, m.lastIntraweekAttemptStatus))) + "\n\n")
 
 	// F5 indicator — always visible below the title.
 	f5Style := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
