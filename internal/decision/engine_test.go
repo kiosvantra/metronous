@@ -491,6 +491,31 @@ func TestBuildReasonWithPricingZeroCostNote(t *testing.T) {
 	}
 }
 
+// TestBuildReasonWithPricingIgnoresTrackingDurationSeverity verifies that KEEP
+// explanations do not depend on the tracking UI severity config.
+func TestBuildReasonWithPricingIgnoresTrackingDurationSeverity(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	thresholds.TrackingDurationSeverity = config.TrackingDurationSeverityConfig{GoodMaxMs: 1, WarnMaxMs: 2}
+
+	m := goodMetrics("agent-duration-reason")
+	m.AvgTurnMs = 4000
+
+	reason := decision.BuildReasonWithPricing(
+		store.VerdictKeep,
+		m,
+		thresholds.Defaults,
+		thresholds.UrgentTriggers,
+		&thresholds,
+	)
+
+	if !contains(reason, "avg_response=4.0s") {
+		t.Fatalf("KEEP reason should include the observed response time, got: %q", reason)
+	}
+	if contains(reason, "limit") {
+		t.Fatalf("KEEP reason should not reference a latency limit, got: %q", reason)
+	}
+}
+
 // TestEvaluateRulesBackwardsCompatibility ensures that the original EvaluateRules
 // signature (without pricing) still works — ROI is treated as always active
 // (old behaviour preserved for callers that don't have pricing data).

@@ -14,10 +14,12 @@ func TestThresholdsJSONDecode(t *testing.T) {
 		"version": "1.0",
 		"defaults": {
 			"min_accuracy": 0.85,
-			"max_latency_p95_ms": 30000,
-			"min_tool_success_rate": 0.90,
 			"min_roi_score": 0.05,
 			"max_cost_usd_per_session": 0.50
+		},
+		"tracking_duration_severity": {
+			"good_max_ms": 10000,
+			"warn_max_ms": 30000
 		},
 		"urgent_triggers": {
 			"min_accuracy": 0.60,
@@ -42,17 +44,17 @@ func TestThresholdsJSONDecode(t *testing.T) {
 	if t1.Defaults.MinAccuracy != 0.85 {
 		t.Errorf("Defaults.MinAccuracy: got %v, want 0.85", t1.Defaults.MinAccuracy)
 	}
-	if t1.Defaults.MaxLatencyP95Ms != 30000 {
-		t.Errorf("Defaults.MaxLatencyP95Ms: got %v, want 30000", t1.Defaults.MaxLatencyP95Ms)
-	}
-	if t1.Defaults.MinToolSuccessRate != 0.90 {
-		t.Errorf("Defaults.MinToolSuccessRate: got %v, want 0.90", t1.Defaults.MinToolSuccessRate)
-	}
 	if t1.Defaults.MinROIScore != 0.05 {
 		t.Errorf("Defaults.MinROIScore: got %v, want 0.05", t1.Defaults.MinROIScore)
 	}
 	if t1.Defaults.MaxCostUSDPerSession != 0.50 {
 		t.Errorf("Defaults.MaxCostUSDPerSession: got %v, want 0.50", t1.Defaults.MaxCostUSDPerSession)
+	}
+	if t1.TrackingDurationSeverity.GoodMaxMs != 10000 {
+		t.Errorf("TrackingDurationSeverity.GoodMaxMs: got %v, want 10000", t1.TrackingDurationSeverity.GoodMaxMs)
+	}
+	if t1.TrackingDurationSeverity.WarnMaxMs != 30000 {
+		t.Errorf("TrackingDurationSeverity.WarnMaxMs: got %v, want 30000", t1.TrackingDurationSeverity.WarnMaxMs)
 	}
 	if t1.UrgentTriggers.MinAccuracy != 0.60 {
 		t.Errorf("UrgentTriggers.MinAccuracy: got %v, want 0.60", t1.UrgentTriggers.MinAccuracy)
@@ -87,8 +89,35 @@ func TestThresholdsDefaultValues(t *testing.T) {
 	if defaults.Defaults.MinAccuracy != 0.85 {
 		t.Errorf("MinAccuracy: got %v, want 0.85", defaults.Defaults.MinAccuracy)
 	}
+	if defaults.TrackingDurationSeverity.GoodMaxMs != 10000 {
+		t.Errorf("TrackingDurationSeverity.GoodMaxMs: got %v, want 10000", defaults.TrackingDurationSeverity.GoodMaxMs)
+	}
 	if defaults.UrgentTriggers.MinAccuracy != 0.60 {
 		t.Errorf("UrgentTriggers.MinAccuracy: got %v, want 0.60", defaults.UrgentTriggers.MinAccuracy)
+	}
+}
+
+// TestTrackingDurationSeverity verifies that tracking duration severity follows
+// the explicit tracking UI config instead of latency thresholds.
+func TestTrackingDurationSeverity(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+
+	tests := []struct {
+		name     string
+		duration float64
+		want     config.DurationSeverity
+	}{
+		{name: "fast within green band", duration: 9000, want: config.DurationSeverityGood},
+		{name: "between green and warn max becomes warning", duration: 20000, want: config.DurationSeverityWarn},
+		{name: "over warn max becomes critical", duration: 40000, want: config.DurationSeverityCritical},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := thresholds.TrackingDurationSeverity.Classify(tc.duration); got != tc.want {
+				t.Fatalf("DurationSeverity(%v) = %s, want %s", tc.duration, got, tc.want)
+			}
+		})
 	}
 }
 

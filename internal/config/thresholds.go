@@ -21,12 +21,6 @@ type DefaultThresholds struct {
 	// MinAccuracy is the minimum required task accuracy (0.0–1.0). Default: 0.85.
 	MinAccuracy float64 `json:"min_accuracy"`
 
-	// MaxLatencyP95Ms is the maximum allowed P95 latency in milliseconds. Default: 30000.
-	MaxLatencyP95Ms int `json:"max_latency_p95_ms"`
-
-	// MinToolSuccessRate is the minimum required tool call success rate (0.0–1.0). Default: 0.90.
-	MinToolSuccessRate float64 `json:"min_tool_success_rate"`
-
 	// MinROIScore is the minimum acceptable ROI score (tool_success_rate / cost_per_session).
 	// Default: 0.05, representing a minimum efficiency of 0.05 successful tool calls per dollar.
 	MinROIScore float64 `json:"min_roi_score"`
@@ -52,7 +46,7 @@ type UrgentTriggers struct {
 type ModelRecommendations struct {
 	// AccuracyModel is the model to recommend for accuracy failures.
 	AccuracyModel string `json:"accuracy_model"`
-	// PerformanceModel is the model to recommend for latency or ROI failures.
+	// PerformanceModel is the model to recommend for ROI or performance failures.
 	PerformanceModel string `json:"performance_model"`
 	// DefaultModel is the fallback model recommendation.
 	DefaultModel string `json:"default_model"`
@@ -63,12 +57,6 @@ type ModelRecommendations struct {
 type AgentThresholds struct {
 	// MinAccuracy overrides DefaultThresholds.MinAccuracy for this agent.
 	MinAccuracy *float64 `json:"min_accuracy,omitempty"`
-
-	// MaxLatencyP95Ms overrides DefaultThresholds.MaxLatencyP95Ms for this agent.
-	MaxLatencyP95Ms *int `json:"max_latency_p95_ms,omitempty"`
-
-	// MinToolSuccessRate overrides DefaultThresholds.MinToolSuccessRate for this agent.
-	MinToolSuccessRate *float64 `json:"min_tool_success_rate,omitempty"`
 
 	// MinROIScore overrides DefaultThresholds.MinROIScore for this agent.
 	MinROIScore *float64 `json:"min_roi_score,omitempty"`
@@ -105,6 +93,9 @@ type Thresholds struct {
 	// PerAgent maps agent IDs to agent-specific threshold overrides.
 	PerAgent map[string]AgentThresholds `json:"per_agent,omitempty"`
 
+	// TrackingDurationSeverity configures the tracking UI duration color bands.
+	TrackingDurationSeverity TrackingDurationSeverityConfig `json:"tracking_duration_severity,omitempty"`
+
 	// ModelPricing holds pricing data used to determine whether a model is free.
 	// Models with price == 0 have ROI/cost checks skipped in the decision engine.
 	ModelPricing ModelPricing `json:"model_pricing,omitempty"`
@@ -131,8 +122,6 @@ func DefaultThresholdValues() Thresholds {
 		Version: "1.0",
 		Defaults: DefaultThresholds{
 			MinAccuracy:          0.85,
-			MaxLatencyP95Ms:      30000,
-			MinToolSuccessRate:   0.90,
 			MinROIScore:          0.05,
 			MaxCostUSDPerSession: 0.50,
 		},
@@ -140,6 +129,10 @@ func DefaultThresholdValues() Thresholds {
 			MinAccuracy:            0.60,
 			MaxErrorRate:           0.30,
 			MaxCostSpikeMultiplier: 3.0,
+		},
+		TrackingDurationSeverity: TrackingDurationSeverityConfig{
+			GoodMaxMs: 10000,
+			WarnMaxMs: 30000,
 		},
 		ModelRecommendations: ModelRecommendations{
 			AccuracyModel:    "claude-opus-4-5",
@@ -193,12 +186,6 @@ func (t *Thresholds) EffectiveThresholds(agentID string) DefaultThresholds {
 	if override.MinAccuracy != nil {
 		effective.MinAccuracy = *override.MinAccuracy
 	}
-	if override.MaxLatencyP95Ms != nil {
-		effective.MaxLatencyP95Ms = *override.MaxLatencyP95Ms
-	}
-	if override.MinToolSuccessRate != nil {
-		effective.MinToolSuccessRate = *override.MinToolSuccessRate
-	}
 	if override.MinROIScore != nil {
 		effective.MinROIScore = *override.MinROIScore
 	}
@@ -206,4 +193,62 @@ func (t *Thresholds) EffectiveThresholds(agentID string) DefaultThresholds {
 		effective.MaxCostUSDPerSession = *override.MaxCostUSDPerSession
 	}
 	return effective
+}
+
+// TrackingDurationSeverityConfig configures the tracking UI duration color bands.
+type TrackingDurationSeverityConfig struct {
+	// GoodMaxMs is the upper bound for the green band in the tracking UI.
+	GoodMaxMs int `json:"good_max_ms"`
+
+	// WarnMaxMs is the upper bound for the amber band in the tracking UI.
+	WarnMaxMs int `json:"warn_max_ms"`
+}
+
+// DurationSeverity represents how the tracking UI classifies a displayed duration.
+type DurationSeverity int
+
+const (
+	DurationSeverityUnknown DurationSeverity = iota
+	DurationSeverityGood
+	DurationSeverityWarn
+	DurationSeverityCritical
+)
+
+// String returns a stable lowercase label for the severity band.
+func (s DurationSeverity) String() string {
+	switch s {
+	case DurationSeverityGood:
+		return "good"
+	case DurationSeverityWarn:
+		return "warn"
+	case DurationSeverityCritical:
+		return "critical"
+	default:
+		return "unknown"
+	}
+}
+
+// Classify classifies a duration using the tracking UI display bands.
+func (t TrackingDurationSeverityConfig) Classify(durationMs float64) DurationSeverity {
+	if durationMs <= 0 {
+		return DurationSeverityUnknown
+	}
+	warnLimit := float64(t.WarnMaxMs)
+	if warnLimit <= 0 {
+		return DurationSeverityGood
+	}
+	greenLimit := float64(t.GoodMaxMs)
+	if greenLimit <= 0 || greenLimit > warnLimit {
+		greenLimit = warnLimit / 3.0
+		if greenLimit < 1 {
+			greenLimit = warnLimit
+		}
+	}
+	if durationMs <= greenLimit {
+		return DurationSeverityGood
+	}
+	if durationMs <= warnLimit {
+		return DurationSeverityWarn
+	}
+	return DurationSeverityCritical
 }

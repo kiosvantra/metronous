@@ -402,7 +402,7 @@ func TestConfigViewKeymapPresetToggle(t *testing.T) {
 	}
 
 	// Move cursor to the keymap row (one position past the last field).
-	for i := 0; i < 8; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	}
 
@@ -500,7 +500,7 @@ func TestConfigViewSaveReloadKeymapPreset(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Move cursor down to the keymap preset row.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}
@@ -641,7 +641,7 @@ func TestConfigViewSaveKeepsPresetAcrossTabSwitch(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Move cursor down to the keymap preset row.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}
@@ -707,7 +707,7 @@ func TestConfigViewNvimPresetDoesNotSwitchTabsOnHjkl(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Toggle the keymap preset to nvim inside the Config view.
-	for i := 0; i < 8; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}

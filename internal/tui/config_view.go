@@ -88,6 +88,24 @@ var configFields = []configField{
 		max:         100,
 		description: "If one session costs more than this, Metronous flags it as expensive in the tracking and benchmark views.",
 	},
+	{
+		label:       "Tracking Duration Good Max",
+		key:         "tracking_duration_good_max_ms",
+		fieldType:   fieldTypeInt,
+		step:        1000,
+		min:         1,
+		max:         24 * 60 * 60 * 1000,
+		description: "Tracking UI only: durations at or below this value stay green in the session list.",
+	},
+	{
+		label:       "Tracking Duration Warn Max",
+		key:         "tracking_duration_warn_max_ms",
+		fieldType:   fieldTypeInt,
+		step:        1000,
+		min:         1,
+		max:         24 * 60 * 60 * 1000,
+		description: "Tracking UI only: durations at or below this value are amber; longer durations are red.",
+	},
 	// Urgent triggers
 	{
 		label:       "Urgent Min Accuracy",
@@ -326,6 +344,10 @@ func (m *ConfigModel) setFloatValue(key string, v float64) {
 // getIntValue returns the current int value for a field key.
 func (m *ConfigModel) getIntValue(key string) int {
 	switch key {
+	case "tracking_duration_good_max_ms":
+		return m.thresholds.TrackingDurationSeverity.GoodMaxMs
+	case "tracking_duration_warn_max_ms":
+		return m.thresholds.TrackingDurationSeverity.WarnMaxMs
 	case "scheduler_window_days":
 		return m.windowDays
 	}
@@ -335,6 +357,10 @@ func (m *ConfigModel) getIntValue(key string) int {
 // setIntValue updates a field value given an int.
 func (m *ConfigModel) setIntValue(key string, v int) {
 	switch key {
+	case "tracking_duration_good_max_ms":
+		m.thresholds.TrackingDurationSeverity.GoodMaxMs = v
+	case "tracking_duration_warn_max_ms":
+		m.thresholds.TrackingDurationSeverity.WarnMaxMs = v
 	case "scheduler_window_days":
 		m.windowDays = v
 	}
@@ -584,10 +610,10 @@ func (m ConfigModel) View() string {
 	sb.WriteString(titleStyle.Render("Configuration") + "\n\n")
 	sb.WriteString(dimStyle.Render("  ↑/↓ or j/k: move between fields") + "\n")
 	sb.WriteString(dimStyle.Render("  ←/→ or +/-: adjust value  s / ctrl+s: save  r / ctrl+r: reload") + "\n")
-	sb.WriteString(dimStyle.Render("  Thresholds affect the daemon and benchmark pipeline; the keymap only changes how this screen behaves. Model recommendation policy is system-managed and not editable here.") + "\n\n")
+	sb.WriteString(dimStyle.Render("  Thresholds affect the daemon and benchmark pipeline; tracking duration severity is a display-only setting for the session list. Model recommendation policy is system-managed and not editable here.") + "\n\n")
 
-	// Decision thresholds section.
-	sb.WriteString(dimStyle.Render("Decision thresholds:") + "\n")
+	// Decision thresholds and tracking UI display settings.
+	sb.WriteString(dimStyle.Render("Decision thresholds and tracking UI display settings:") + "\n")
 
 	for i, f := range configFields {
 		var valRendered string
@@ -734,6 +760,16 @@ func validateThresholds(t config.Thresholds) error {
 	if d.MaxCostUSDPerSession < 0 {
 		return fmt.Errorf("max_cost_usd_per_session %.4f must be >= 0", d.MaxCostUSDPerSession)
 	}
+	tracking := t.TrackingDurationSeverity
+	if tracking.GoodMaxMs <= 0 {
+		return fmt.Errorf("tracking_duration_good_max_ms %d must be > 0", tracking.GoodMaxMs)
+	}
+	if tracking.WarnMaxMs <= 0 {
+		return fmt.Errorf("tracking_duration_warn_max_ms %d must be > 0", tracking.WarnMaxMs)
+	}
+	if tracking.GoodMaxMs >= tracking.WarnMaxMs {
+		return fmt.Errorf("tracking_duration_good_max_ms %d must be < tracking_duration_warn_max_ms %d", tracking.GoodMaxMs, tracking.WarnMaxMs)
+	}
 
 	u := t.UrgentTriggers
 	if u.MinAccuracy < 0 || u.MinAccuracy > 1.0 {
@@ -765,10 +801,10 @@ func (m *ConfigModel) GetCurrentFieldValue() float64 {
 // formatConfigValue formats a field value for display.
 func formatConfigValue(key string, v float64) string {
 	switch key {
-	case "max_latency_p95_ms":
-		return fmt.Sprintf("%dms", int(v))
 	case "max_cost_usd_per_session":
 		return fmt.Sprintf("$%.2f", v)
+	case "tracking_duration_good_max_ms", "tracking_duration_warn_max_ms":
+		return fmt.Sprintf("%dms", int(v))
 	case "min_roi_score":
 		return fmt.Sprintf("%.3f", v)
 	case "urgent_max_cost_spike_multiplier":
