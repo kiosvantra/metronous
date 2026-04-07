@@ -68,7 +68,7 @@ var configFields = []configField{
 		step:        0.01,
 		min:         0,
 		max:         1,
-		description: "Minimum required task accuracy (0.0–1.0); triggers SWITCH when below this threshold.",
+		description: "If an agent's accuracy drops below this value, Metronous recommends switching to a better model.",
 	},
 	{
 		label:       "Min ROI Score",
@@ -77,7 +77,7 @@ var configFields = []configField{
 		step:        0.01,
 		min:         0,
 		max:         10.0,
-		description: "Minimum acceptable efficiency (successful tool calls per dollar); triggers SWITCH when below this threshold for paid models.",
+		description: "For paid models, this is the minimum value-for-money score. If results fall below it, Metronous recommends a cheaper option.",
 	},
 	{
 		label:       "Max Cost/Session (USD)",
@@ -86,7 +86,7 @@ var configFields = []configField{
 		step:        0.50,
 		min:         0,
 		max:         100,
-		description: "Maximum spend allowed per tracked session before flagging cost issues in the tracking view.",
+		description: "If one session costs more than this, Metronous flags it as expensive in the tracking and benchmark views.",
 	},
 	// Urgent triggers
 	{
@@ -96,7 +96,7 @@ var configFields = []configField{
 		step:        0.01,
 		min:         0,
 		max:         1,
-		description: "Critical accuracy floor; triggers URGENT_SWITCH when below this threshold (evaluated before normal thresholds).",
+		description: "Emergency accuracy floor. If an agent falls below this, Metronous jumps straight to an urgent switch recommendation.",
 	},
 	{
 		label:       "Urgent Max Error Rate",
@@ -105,7 +105,7 @@ var configFields = []configField{
 		step:        0.01,
 		min:         0,
 		max:         1,
-		description: "Maximum tolerated error rate; triggers URGENT_SWITCH when exceeded (evaluated before normal thresholds).",
+		description: "Emergency error ceiling. If errors go above this, Metronous treats the model as unsafe and recommends an urgent switch.",
 	},
 	{
 		label:       "Urgent Cost Spike Multiplier",
@@ -114,33 +114,14 @@ var configFields = []configField{
 		step:        0.1,
 		min:         1,
 		max:         10,
-		description: "Cost multiple vs. baseline that triggers an alert in the tracking view when exceeded.",
-	},
-	// Model recommendations
-	{
-		label:       "Accuracy Model",
-		key:         "model_accuracy",
-		fieldType:   fieldTypeString,
-		description: "Model recommended when accuracy threshold fails (e.g., claude-opus-4-5 for stronger/smarter models).",
-	},
-	{
-		label:       "Performance Model",
-		key:         "model_performance",
-		fieldType:   fieldTypeString,
-		description: "Model recommended when ROI threshold fails (e.g., claude-haiku-4-5 for cheaper models with similar accuracy).",
-	},
-	{
-		label:       "Default Model",
-		key:         "model_default",
-		fieldType:   fieldTypeString,
-		description: "Fallback model recommendation when no specific trigger is active.",
+		description: "If a run costs this many times more than its usual baseline, Metronous raises an urgent cost warning.",
 	},
 	// Scheduler settings
 	{
 		label:       "Benchmark Schedule",
 		key:         "scheduler_benchmark_schedule",
 		fieldType:   fieldTypeString,
-		description: "Cron expression for automatic weekly benchmark execution (e.g., '0 0 2 * * 0' for Sundays at 2 AM).",
+		description: "The cron schedule that tells the daemon when to run the weekly benchmark automatically.",
 	},
 	{
 		label:       "Window Days",
@@ -149,7 +130,7 @@ var configFields = []configField{
 		step:        1,
 		min:         1,
 		max:         30,
-		description: "Number of days to include in the benchmark window for metric calculation.",
+		description: "How many recent days of activity each benchmark run should look at.",
 	},
 }
 
@@ -603,7 +584,7 @@ func (m ConfigModel) View() string {
 	sb.WriteString(titleStyle.Render("Configuration") + "\n\n")
 	sb.WriteString(dimStyle.Render("  ↑/↓ or j/k: move between fields") + "\n")
 	sb.WriteString(dimStyle.Render("  ←/→ or +/-: adjust value  s / ctrl+s: save  r / ctrl+r: reload") + "\n")
-	sb.WriteString(dimStyle.Render("  Decision thresholds affect daemon recommendations; UI preferences affect only the dashboard.") + "\n\n")
+	sb.WriteString(dimStyle.Render("  Thresholds affect the daemon and benchmark pipeline; the keymap only changes how this screen behaves. Model recommendation policy is system-managed and not editable here.") + "\n\n")
 
 	// Decision thresholds section.
 	sb.WriteString(dimStyle.Render("Decision thresholds:") + "\n")
@@ -673,7 +654,7 @@ func (m ConfigModel) View() string {
 
 	// Dynamic legend for the currently selected field.
 	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render("Description:") + "\n")
+	sb.WriteString(dimStyle.Render("What this setting means:") + "\n")
 	if m.cursor < len(configFields) {
 		f := configFields[m.cursor]
 		// Word wrap the description at 80 characters
