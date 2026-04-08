@@ -27,9 +27,9 @@ OpenCode → metronous-plugin.ts → HTTP POST /ingest → metronous daemon → 
                                                     metronous dashboard (TUI)
 ```
 
-- **Plugin (`metronous-plugin.ts`)**: Plugin de OpenCode que captura eventos de agentes y los reenvía al daemon via HTTP. Acumula el costo a partir de eventos `step-finish` y persiste el costo de la sesión en `~/.metronous/data/session_costs.json` entre reinicios.
-- **MCP shim (`metronous mcp`)**: Puente stdio↔HTTP iniciado por OpenCode como servidor MCP. Lee el puerto del daemon desde `~/.metronous/data/mcp.port` y reenvía los eventos.
-- **Daemon (`metronous server --daemon-mode`)**: Servicio de fondo de larga duración (systemd en Linux) que ingesta eventos, los almacena en SQLite y ejecuta benchmarks semanales los domingos a las 02:00 hora local.
+- **Plugin (`metronous-plugin.ts`)**: Plugin de OpenCode que captura eventos de agentes y los reenvía al daemon via HTTP. Acumula el costo a partir de eventos `step-finish`, puede enviar `X-Metronous-Auth` cuando `METRONOUS_INGEST_TOKEN` esta definido y persiste el costo de la sesion en `~/.metronous/data/session_costs.json` entre reinicios.
+- **MCP shim (`metronous mcp`)**: Puente stdio↔HTTP iniciado por OpenCode como servidor MCP. Lee el puerto del daemon desde `~/.metronous/data/mcp.port`, reenvia los eventos y replica el token opcional de ingesta.
+- **Daemon (`metronous server --daemon-mode`)**: Servicio de fondo de larga duracion (systemd en Linux) que ingesta eventos, los almacena en SQLite y ejecuta benchmarks semanales los domingos a las 02:00 hora local. Si `METRONOUS_INGEST_TOKEN` esta definido, valida los encabezados de ingesta y solo registra advertencias durante la transicion.
 - **TUI Dashboard**: Interfaz de terminal de 5 pestañas con seguimiento en vivo, resultados de benchmark, gráficos de costos y edición de configuración.
 
 Para detalles completos de los componentes consulta [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).  

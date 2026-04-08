@@ -249,6 +249,18 @@ const (
 	RunStatusSuperseded RunStatus = "superseded"
 )
 
+// BenchmarkAttemptStatus describes the lifecycle state of the latest benchmark attempt.
+type BenchmarkAttemptStatus string
+
+const (
+	// BenchmarkAttemptRunning means the scheduler/manual run has started but not finished yet.
+	BenchmarkAttemptRunning BenchmarkAttemptStatus = "running"
+	// BenchmarkAttemptCompleted means the latest attempt finished without a fatal error.
+	BenchmarkAttemptCompleted BenchmarkAttemptStatus = "completed"
+	// BenchmarkAttemptFailed means the latest attempt terminated with a fatal error.
+	BenchmarkAttemptFailed BenchmarkAttemptStatus = "failed"
+)
+
 // BenchmarkRun holds all metrics and the verdict for a single benchmark run.
 type BenchmarkRun struct {
 	// ID is a UUID v4 generated at save time.
@@ -368,6 +380,14 @@ type BenchmarkModelSummary struct {
 
 	// LastRunAt is the timestamp of the run that produced LastVerdict.
 	LastRunAt time.Time
+}
+
+// BenchmarkAttemptState stores the operational status of the latest benchmark attempt per run kind.
+type BenchmarkAttemptState struct {
+	RunKind           RunKindType
+	LastAttemptAt     time.Time
+	LastAttemptStatus BenchmarkAttemptStatus
+	LastAttemptError  string
 }
 
 // BenchmarkQuery defines filter criteria for querying benchmark runs.

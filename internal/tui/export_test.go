@@ -179,6 +179,11 @@ func GetConfigKeymapPresetForTest(m ConfigModel) config.KeymapPreset {
 	return m.thresholds.EffectiveKeymapPreset()
 }
 
+// GetConfigFieldCountForTest exposes the number of editable config fields.
+func GetConfigFieldCountForTest() int {
+	return len(configFields)
+}
+
 // SetAppKeymapPresetForTest allows external tests to force a keymap preset
 // on the AppModel without needing to load thresholds from disk.
 func SetAppKeymapPresetForTest(m *AppModel, preset config.KeymapPreset) {

@@ -31,7 +31,7 @@ This document explains the **methodology** behind Metronous: what data it collec
    - `quality_score` (optional, from the agent’s own validation)
    - Arbitrary payload (e.g., tool arguments, result)
 
-   This payload is sent as an MCP `tools/call ingest` request to the **metronous mcp shim**, which forwards it via HTTP to the long‑running **Metronous daemon** (a systemd user service). The daemon writes the event into two SQLite databases:
+    This payload is sent as an MCP `tools/call ingest` request to the **metronous mcp shim**, which forwards it via HTTP to the long‑running **Metronous daemon** (a systemd user service). If `METRONOUS_INGEST_TOKEN` is set, the shim and daemon also use the `X-Metronous-Auth` header for transport-level auth during the transition. The daemon writes the event into two SQLite databases:
    - `tracking.db` – raw event stream (for the TUI Tracking tab and ad‑hoc queries)
    - `benchmark.db` – pre‑aggregated data used by the weekly benchmark engine
 

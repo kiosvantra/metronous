@@ -26,6 +26,9 @@ const (
 
 	// ServerName is the name reported during MCP initialization.
 	ServerName = "metronous"
+
+	ingestAuthHeader = "X-Metronous-Auth"
+	ingestAuthEnvVar = "METRONOUS_INGEST_TOKEN"
 )
 
 // ServerVersion matches the CLI version.
@@ -490,10 +493,22 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 // tool handler.  This allows the OpenCode plugin to send telemetry via HTTP while
 // OpenCode itself owns the stdio pipe for the MCP protocol.
 func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
+	expectedToken := os.Getenv(ingestAuthEnvVar)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+
+		if expectedToken != "" {
+			provided := r.Header.Get(ingestAuthHeader)
+			if provided == "" {
+				s.logger.Warn("unauthenticated ingest request accepted during transition",
+					zap.String("remote_addr", r.RemoteAddr))
+			} else if provided != expectedToken {
+				s.logger.Warn("ingest request with invalid auth token accepted during transition",
+					zap.String("remote_addr", r.RemoteAddr))
+			}
 		}
 
 		var arguments map[string]interface{}

@@ -42,8 +42,8 @@ func LoadThresholds(path string) (*config.Thresholds, error) {
 // Per-agent overrides are applied automatically.
 //
 // Free-model behaviour: if the model reported in m.Model is listed in model_pricing with
-// price == 0, ROI/cost checks are skipped — only quality metrics (accuracy, error rate,
-// latency, tool success rate) can trigger a SWITCH or URGENT_SWITCH.
+// price == 0, ROI/cost checks are skipped — only quality metrics (accuracy and error rate)
+// can trigger a SWITCH or URGENT_SWITCH.
 //
 // Unreliable-cost safeguard: for paid models, if m.TotalCostUSD == 0 (no billing data
 // was collected), the ROI check is also suppressed to avoid false positives.
@@ -74,12 +74,11 @@ func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics
 // failed. Returns an empty string when no switch is needed.
 //
 // For free models or when cost data is unreliable, ROI failures do not drive the
-// recommendation — only quality failures (accuracy, latency, tool success) do.
+// recommendation — only quality failures (accuracy) do.
 //
 // Heuristic (accuracy-first, cost second):
 //   - Accuracy failure → recommend a stronger/smarter model (AccuracyModel)
 //   - ROI failure (paid model, reliable cost data) → recommend a cheaper model (PerformanceModel)
-//   - Note: latency is not used as a trigger — current duration_ms data is noisy
 func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations, root *config.Thresholds) string {
 	if vt != store.VerdictSwitch && vt != store.VerdictUrgentSwitch {
 		return ""

@@ -313,13 +313,22 @@ func TestServeWithHealthEndpoint(t *testing.T) {
 	}()
 
 	// Give the HTTP server a moment to start.
-	time.Sleep(200 * time.Millisecond)
-
-	// Read the port file (now a method on *Server, instance-scoped to data-dir).
-	port, err := srv.ReadPortFile()
-	if err != nil {
-		t.Fatalf("ReadPortFile: %v", err)
+	start := time.Now()
+	var port int
+	var err error
+	// On slower CI runners (and on Windows), the port file can be created
+	// slightly later than a fixed sleep.
+	for {
+		port, err = srv.ReadPortFile()
+		if err == nil {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+	// Basic sanity check.
 	if port <= 0 || port > 65535 {
 		t.Fatalf("invalid port from port file: %d", port)
 	}
@@ -438,6 +447,90 @@ func TestHTTPIngestEndpoint(t *testing.T) {
 	}
 	if gotArgs["event_type"] != "start" {
 		t.Errorf("event_type: got %v, want start", gotArgs["event_type"])
+	}
+
+	cancel()
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			t.Errorf("ServeWithHealth returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("ServeWithHealth did not return after context cancel")
+	}
+}
+
+// TestHTTPIngestEndpointWithAuthTokenWarnButAccept verifies that when
+// METRONOUS_INGEST_TOKEN is configured the /ingest endpoint still accepts
+// requests without an auth header during the transition period.
+func TestHTTPIngestEndpointWithAuthTokenWarnButAccept(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	out := &bytes.Buffer{}
+	srv := mcp.NewServer(pr, out, nil)
+
+	dataDir := t.TempDir()
+	srv.SetDataDir(dataDir)
+
+	// Register ingest handler that records the arguments received.
+	var gotArgs map[string]interface{}
+	mcp.RegisterIngestHandler(srv, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		gotArgs = req.Arguments
+		return &mcp.CallToolResult{Content: []mcp.ContentItem{mcp.TextContent("ok")}}, nil
+	})
+
+	t.Setenv("METRONOUS_INGEST_TOKEN", "test-token")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeWithHealth(ctx)
+	}()
+
+	// Wait until the server writes mcp.port.
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	payload := map[string]interface{}{
+		"agent_id":   "test-agent-auth",
+		"session_id": "sess-1",
+		"event_type": "start",
+		"model":      "claude-3",
+		"timestamp":  "2026-01-01T00:00:00Z",
+	}
+	body, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:noctx
+	if err != nil {
+		t.Fatalf("POST /ingest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if gotArgs == nil {
+		t.Fatal("handler was not called")
+	}
+	if gotArgs["agent_id"] != "test-agent-auth" {
+		t.Errorf("agent_id: got %v, want test-agent-auth", gotArgs["agent_id"])
 	}
 
 	cancel()

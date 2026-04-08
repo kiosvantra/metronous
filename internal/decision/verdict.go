@@ -55,8 +55,8 @@ func roiActive(model string, m benchmark.WindowMetrics, thresholds *config.Thres
 // Urgent triggers are checked first; then switch triggers; finally KEEP.
 //
 // For free models (price == 0) or when cost data is unreliable (TotalCostUSD == 0),
-// the ROI check is skipped so that only quality metrics (accuracy, error rate, latency,
-// tool success rate) can trigger a SWITCH or URGENT_SWITCH.
+// the ROI check is skipped so that only quality metrics (accuracy and error rate)
+// can trigger a SWITCH or URGENT_SWITCH.
 func EvaluateRules(m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers) store.VerdictType {
 	return EvaluateRulesWithPricing(m, thresholds, urgent, nil)
 }
@@ -106,7 +106,8 @@ func BuildReason(vt store.VerdictType, m benchmark.WindowMetrics, thresholds con
 }
 
 // BuildReasonWithPricing is the full-featured variant that includes a note in the
-// reason string when ROI is being ignored due to free model or unreliable cost data.
+// reason string when ROI is being ignored due to free model or unreliable cost data,
+// and surfaces only the metrics that participate in the decision path.
 func BuildReasonWithPricing(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, urgent config.UrgentTriggers, root *config.Thresholds) string {
 	roiEnabled := roiActive(m.Model, m, root)
 

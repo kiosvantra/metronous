@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -40,6 +41,34 @@ func setupStores(t *testing.T) (store.EventStore, store.BenchmarkStore) {
 	})
 	return es, bs
 }
+
+type failingQueryEventStore struct{}
+
+func (f failingQueryEventStore) InsertEvent(context.Context, store.Event) (string, error) {
+	return "", nil
+}
+func (f failingQueryEventStore) QueryEvents(context.Context, store.EventQuery) ([]store.Event, error) {
+	return nil, errors.New("query failed before benchmark persistence")
+}
+func (f failingQueryEventStore) CountEvents(context.Context, store.EventQuery) (int, error) {
+	return 0, nil
+}
+func (f failingQueryEventStore) QuerySessions(context.Context, store.SessionQuery) ([]store.SessionSummary, error) {
+	return nil, nil
+}
+func (f failingQueryEventStore) GetSessionEvents(context.Context, string) ([]store.Event, error) {
+	return nil, nil
+}
+func (f failingQueryEventStore) GetAgentEvents(context.Context, string, time.Time) ([]store.Event, error) {
+	return nil, nil
+}
+func (f failingQueryEventStore) GetAgentSummary(context.Context, string) (store.AgentSummary, error) {
+	return store.AgentSummary{}, nil
+}
+func (f failingQueryEventStore) QueryDailyCostByModel(context.Context, time.Time, time.Time) ([]store.DailyCostByModelRow, error) {
+	return nil, nil
+}
+func (f failingQueryEventStore) Close() error { return nil }
 
 // insertEvents inserts n events for the given agent in the last windowDays.
 func insertEvents(t *testing.T, ctx context.Context, es store.EventStore, agentID string, n int, eventType string) {
@@ -146,6 +175,48 @@ func TestRunnerNoAgentsNoRun(t *testing.T) {
 	}
 	if len(agents) != 0 {
 		t.Errorf("expected 0 runs, got %d agents", len(agents))
+	}
+}
+
+// TestRunnerRecordsFailedAttemptBeforeRunPersistence verifies that the operational
+// attempt state is written even when the benchmark fails before any runs are saved.
+func TestRunnerRecordsFailedAttemptBeforeRunPersistence(t *testing.T) {
+	ctx := context.Background()
+	es := failingQueryEventStore{}
+	bs, err := sqlitestore.NewBenchmarkStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewBenchmarkStore: %v", err)
+	}
+	t.Cleanup(func() { _ = bs.Close() })
+	tmpDir := t.TempDir()
+
+	thresholds := config.DefaultThresholdValues()
+	engine := decision.NewDecisionEngine(&thresholds)
+	r := runner.NewRunner(es, bs, engine, tmpDir, zap.NewNop())
+
+	if err := r.RunWeekly(ctx, 7); err == nil {
+		t.Fatal("expected RunWeekly to fail")
+	}
+
+	states, err := bs.GetBenchmarkAttemptStates(ctx)
+	if err != nil {
+		t.Fatalf("GetBenchmarkAttemptStates: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("expected 1 attempt state, got %d: %+v", len(states), states)
+	}
+	state := states[0]
+	if state.RunKind != store.RunKindWeekly {
+		t.Fatalf("RunKind = %q, want weekly", state.RunKind)
+	}
+	if state.LastAttemptAt.IsZero() {
+		t.Fatal("expected attempt timestamp to be persisted")
+	}
+	if state.LastAttemptStatus != store.BenchmarkAttemptFailed {
+		t.Fatalf("status = %q, want failed", state.LastAttemptStatus)
+	}
+	if state.LastAttemptError == "" {
+		t.Fatal("expected attempt error to be persisted")
 	}
 }
 

@@ -70,6 +70,63 @@ func TestIngestHandlerValidEvent(t *testing.T) {
 	t.Logf("result: %s", result.Content[0].Text)
 }
 
+// TestIngestHandlerWaitsForDurability verifies the MCP ACK is not returned
+// before the store commit finishes.
+func TestIngestHandlerWaitsForDurability(t *testing.T) {
+	bs := &blockingStore{
+		mockStore: mockStore{},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	q := newQueueWithStore(t, bs)
+
+	req := mcp.CallToolRequest{
+		Name:      "ingest",
+		Arguments: makeIngestArgs(nil),
+	}
+
+	done := make(chan struct {
+		result *mcp.CallToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := tracking.HandleIngest(context.Background(), req, q)
+		done <- struct {
+			result *mcp.CallToolResult
+			err    error
+		}{result: result, err: err}
+	}()
+
+	select {
+	case <-bs.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("store insert did not start")
+	}
+
+	select {
+	case got := <-done:
+		t.Fatalf("HandleIngest returned before persistence completed: %+v", got)
+	default:
+	}
+
+	close(bs.release)
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("HandleIngest: %v", got.err)
+		}
+		if got.result.IsError {
+			t.Fatalf("HandleIngest returned error: %v", got.result.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleIngest did not return after persistence")
+	}
+	if bs.Count() != 1 {
+		t.Fatalf("expected 1 persisted event, got %d", bs.Count())
+	}
+}
+
 // TestIngestHandlerRejectsMissingAgentID verifies validation of required agent_id.
 func TestIngestHandlerRejectsMissingAgentID(t *testing.T) {
 	ms := &mockStore{}

@@ -48,6 +48,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
   - `GET /tools` – returns list of supported tools (currently only `ingest`)
 - **Details**:
   - shim reads the port from `~/.metronous/data/mcp.port`
+  - if `METRONOUS_INGEST_TOKEN` is set, the shim includes `X-Metronous-Auth` on ingest requests and the daemon validates it during the transition
   - shim performs a health check (`GET /health`) before using a cached port to avoid dead daemon connections
   - shim uses a short HTTP timeout; on failure it treats the daemon as unhealthy and retries via the normal daemon startup path
 
@@ -72,9 +73,10 @@ This document describes the runtime architecture of Metronous, focusing on compo
    Plugin sends the event as an MCP `tools/call ingest` message to the `metronous mcp` shim over stdio.
 
 3. **Shim Processing**  
-   - Shim parses the MCP message, extracts the JSON payload.
-   - Shim reads the current daemon port from `~/.metronous/data/mcp.port`.
-   - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
+    - Shim parses the MCP message, extracts the JSON payload.
+    - Shim reads the current daemon port from `~/.metronous/data/mcp.port`.
+    - If `METRONOUS_INGEST_TOKEN` is set, Shim adds `X-Metronous-Auth` to the HTTP request.
+    - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
 
 4. **Daemon Ingestion**  
     - Daemon’s HTTP handler (`ingestHandler`) receives the POST, deserializes the JSON, and passes it to `tracking.HandleIngest`.

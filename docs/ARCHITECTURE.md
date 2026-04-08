@@ -103,6 +103,7 @@ The plugin sends events directly to the daemon via HTTP POST, bypassing the MCP 
 
 - **Endpoint**: `POST http://127.0.0.1:<port>/ingest`
 - **Body**: JSON payload with `agent_id`, `session_id`, `event_type`, `model`, `timestamp`, and optional cost/token fields
+- **Optional auth**: if `METRONOUS_INGEST_TOKEN` is set, the plugin and shim send `X-Metronous-Auth`; the daemon validates it and warns on missing or invalid tokens during the transition
 - **Reconnection**: on `ECONNREFUSED`, the plugin re-reads `mcp.port` and retries up to 3 times with 500ms backoff
 - **Pre-ready queue**: events emitted before the daemon is ready are buffered (max 500) and flushed once the port file appears
 

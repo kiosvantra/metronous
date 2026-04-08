@@ -402,7 +402,7 @@ func TestConfigViewKeymapPresetToggle(t *testing.T) {
 	}
 
 	// Move cursor to the keymap row (one position past the last field).
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	}
 
@@ -453,6 +453,32 @@ func TestConfigViewSaveReload(t *testing.T) {
 	}
 }
 
+func TestConfigViewSavePreservesDefaultSchedulerSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "thresholds.json")
+
+	m := tui.NewConfigModel(path)
+	m, _ = m.Update(tui.ConfigReloadedMsg{Thresholds: tui.DefaultThresholdValuesForTest()})
+
+	m, saveCmd := m.UpdateSave(tea.KeyMsg{})
+	if saveCmd == nil {
+		t.Fatal("expected save command")
+	}
+	result := saveCmd()
+	m, _ = m.Update(result)
+
+	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "benchmark_schedule: 0 0 2 * * 0") {
+		t.Fatalf("expected default benchmark schedule in config.yaml, got: %q", string(data))
+	}
+	if !strings.Contains(string(data), "window_days: 7") {
+		t.Fatalf("expected default window days in config.yaml, got: %q", string(data))
+	}
+}
+
 // TestConfigViewSaveReloadKeymapPreset verifies that toggling the keymap preset
 // in the Config view, saving to disk, and reloading keeps the preset
 // consistent. This exercises the full AppModel -> ConfigModel pipeline so the
@@ -474,7 +500,7 @@ func TestConfigViewSaveReloadKeymapPreset(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Move cursor down to the keymap preset row.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}
@@ -615,7 +641,7 @@ func TestConfigViewSaveKeepsPresetAcrossTabSwitch(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Move cursor down to the keymap preset row.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}
@@ -681,7 +707,7 @@ func TestConfigViewNvimPresetDoesNotSwitchTabsOnHjkl(t *testing.T) {
 	app = updated.(*tui.AppModel)
 
 	// Toggle the keymap preset to nvim inside the Config view.
-	for i := 0; i < 10; i++ {
+	for i := 0; i < tui.GetConfigFieldCountForTest(); i++ {
 		updated, _ = sendKey(app, "j")
 		app = updated.(*tui.AppModel)
 	}

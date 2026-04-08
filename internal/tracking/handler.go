@@ -182,10 +182,10 @@ func HandleIngest(ctx context.Context, req mcp.CallToolRequest, queue *EventQueu
 	// Convert to store event.
 	event := toStoreEvent(ingestReq)
 
-	// Enqueue for async storage.
-	if qErr := queue.Enqueue(event); qErr != nil {
+	// Enqueue and wait until the event is durably persisted before ACKing.
+	if qErr := queue.EnqueueAndWait(ctx, event); qErr != nil {
 		return &mcp.CallToolResult{
-			Content: []mcp.ContentItem{mcp.TextContent("failed to enqueue event: " + qErr.Error())},
+			Content: []mcp.ContentItem{mcp.TextContent("failed to persist event: " + qErr.Error())},
 			IsError: true,
 		}, nil
 	}

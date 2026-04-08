@@ -81,7 +81,9 @@ func generateLaunchdPlist(binaryPath, dataDir string) string {
 
 // NewInstallCommand creates the `metronous install` cobra command for macOS.
 func NewInstallCommand() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	var assumeYes bool
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Metronous as a launchd user agent (macOS)",
 		Long: `Install Metronous as a launchd user agent (macOS only).
@@ -100,16 +102,19 @@ OpenCode client is open.
 Re-running install is idempotent: if a previous version is loaded it will be
 unloaded first so the new binary and data-dir take effect immediately.
 
-After running this command, every OpenCode instance will automatically
-connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`,
+		After running this command, every OpenCode instance will automatically
+		connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall()
+			return runInstall(cmd, installOptions{dryRun: dryRun, yes: assumeYes})
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview the OpenCode and service changes without writing files")
+	cmd.Flags().BoolVar(&assumeYes, "yes", false, "Skip the confirmation prompt and apply the changes")
+	return cmd
 }
 
 // runInstall performs all macOS installation steps.
-func runInstall() error {
+func runInstall(cmd *cobra.Command, opts installOptions) error {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("get user home: %w", err)
@@ -117,35 +122,50 @@ func runInstall() error {
 
 	warnOpencodeConfig(userHome)
 
-	// Step 1: Initialize ~/.metronous (idempotent).
+	// Step 1: Determine paths (no filesystem mutations yet).
 	home := defaultMetronousHome()
-	fmt.Println("Initializing Metronous home directory...")
-	if err := runInit(home); err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-
-	// Step 2: Determine paths.
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
 	}
 	dataDir := defaultDataDir()
+	agentsDir := filepath.Join(userHome, "Library", "LaunchAgents")
+	plistPath := filepath.Join(agentsDir, launchAgentPlistName)
+	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
+	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
 
 	// Verify launchctl is available (sanity check on macOS).
 	if _, err := exec.LookPath("launchctl"); err != nil {
 		return fmt.Errorf("launchctl not found: macOS install requires launchd")
 	}
 
+	plan := []string{
+		fmt.Sprintf("- initialize %s", defaultMetronousHome()),
+		fmt.Sprintf("- write %s", plistPath),
+		"- bootstrap the launchd agent",
+		fmt.Sprintf("- update %s", configPath),
+		fmt.Sprintf("- install %s", pluginPath),
+	}
+	skip, err := reviewInstallPlan(cmd, plan, opts.dryRun, opts.yes)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
+	}
+
+	// Step 2: Initialize ~/.metronous (idempotent) after confirmation.
+	fmt.Println("Initializing Metronous home directory...")
+	if err := runInit(home); err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+
 	// Step 3: Prepare the LaunchAgents directory.
-	agentsDir := filepath.Join(userHome, "Library", "LaunchAgents")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
 	}
-	plistPath := filepath.Join(agentsDir, launchAgentPlistName)
 
 	// Step 4: Pre-flight backup of OpenCode files.
-	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
-	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
 	configBackup, err := backupFile(configPath)
 	if err != nil {
 		return fmt.Errorf("backup opencode.json: %w", err)

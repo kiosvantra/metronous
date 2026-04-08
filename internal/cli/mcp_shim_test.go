@@ -3,42 +3,84 @@
 package cli
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
-func TestShimReadPort(t *testing.T) {
-	tmpDir := t.TempDir()
+// TestShimForwardToolCallSetsAuthHeader verifies that shimForwardToolCall sends
+// the configured METRONOUS_INGEST_TOKEN as a transport-level header without
+// modifying the ingest payload schema.
+func TestShimForwardToolCallSetsAuthHeader(t *testing.T) {
+	const expectedToken = "test-token"
 
-	portFile := filepath.Join(tmpDir, "mcp.port")
-	if err := os.WriteFile(portFile, []byte("8765\n"), 0600); err != nil {
-		t.Fatal(err)
+	var sawHeader string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ingest" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		sawHeader = r.Header.Get("X-Metronous-Auth")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok": true}`)
+	}))
+	defer ts.Close()
+
+	params := struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{
+		Name:      "ingest",
+		Arguments: map[string]interface{}{"agent_id": "a1"},
 	}
 
-	data, err := os.ReadFile(portFile)
+	raw, err := json.Marshal(params)
 	if err != nil {
-		t.Fatalf("read port file: %v", err)
+		t.Fatalf("marshal params: %v", err)
 	}
 
-	var port int
-	if _, err := fmt.Sscanf(string(data), "%d", &port); err != nil {
-		t.Fatalf("parse port: %v", err)
+	if _, err := shimForwardToolCall(ts.URL, expectedToken, raw); err != nil {
+		t.Fatalf("shimForwardToolCall: %v", err)
 	}
-	if port != 8765 {
-		t.Errorf("expected 8765, got %d", port)
+
+	if sawHeader != expectedToken {
+		t.Fatalf("X-Metronous-Auth header = %q, want %q", sawHeader, expectedToken)
 	}
 }
 
-func TestShimReadPortMissing(t *testing.T) {
-	// Override the data dir env temporarily to a non-existent path.
-	// readShimPort uses defaultDataDir() which reads home dir — test in isolation.
-	tmpDir := t.TempDir()
-	portFile := filepath.Join(tmpDir, "mcp.port")
+// TestShimForwardToolCallNoAuthHeaderWhenTokenEmpty verifies that when the
+// auth token is empty the shim does not send the header, keeping behaviour
+// backward compatible.
+func TestShimForwardToolCallNoAuthHeaderWhenTokenEmpty(t *testing.T) {
+	var sawHeader string
 
-	data, err := os.ReadFile(portFile)
-	if err == nil {
-		t.Fatalf("expected error, got data: %s", data)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get("X-Metronous-Auth")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok": true}`)
+	}))
+	defer ts.Close()
+
+	params := struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{
+		Name:      "ingest",
+		Arguments: map[string]interface{}{"agent_id": "a1"},
+	}
+
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	if _, err := shimForwardToolCall(ts.URL, "", raw); err != nil {
+		t.Fatalf("shimForwardToolCall: %v", err)
+	}
+
+	if sawHeader != "" {
+		t.Fatalf("X-Metronous-Auth header = %q, want empty", sawHeader)
 	}
 }

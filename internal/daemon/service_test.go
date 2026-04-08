@@ -178,8 +178,6 @@ func TestDaemonWithCustomThresholdsFile(t *testing.T) {
 		"version": "1.0",
 		"defaults": {
 			"min_accuracy": 0.80,
-			"max_latency_p95_ms": 20000,
-			"min_tool_success_rate": 0.85,
 			"min_roi_score": 0.04,
 			"max_cost_usd_per_session": 0.40
 		},

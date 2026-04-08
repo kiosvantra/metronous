@@ -38,10 +38,16 @@ const METRONOUS_DATA_DIR = _rawDataDir.endsWith("/data") ? _rawDataDir : _rawDat
 
 const METRONOUS_DEBUG = process.env.METRONOUS_DEBUG === "true" || process.env.METRONOUS_DEBUG === "1"
 
+function ensureDataDir() {
+  const fs = require("fs") as typeof import("fs")
+  fs.mkdirSync(METRONOUS_DATA_DIR, { recursive: true })
+}
+
 // Log to file instead of console to avoid TUI interference
 const LOG_FILE = `${METRONOUS_DATA_DIR}/plugin.log`
 function writeLog(level: string, ...args: unknown[]) {
   try {
+    ensureDataDir()
     const fs = require("fs")
     const line = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`
     fs.appendFileSync(LOG_FILE, line)
@@ -123,6 +129,7 @@ function saveCostCache(sessionId: string, cost: number) {
       logError("saveCostCache: refusing to write non-finite cost:", cost)
       return
     }
+    ensureDataDir()
     const fs = require("fs") as typeof import("fs")
     costCache[sessionId] = cost
     fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(costCache))
@@ -196,13 +203,91 @@ function calculateQualityProxy(state: SessionState): number {
 const PORT_FILE = `${METRONOUS_DATA_DIR}/mcp.port`
 const MAX_PORT_WAIT_MS = 30_000
 const PORT_POLL_INTERVAL_MS = 200
-const MAX_PRE_READY_QUEUE = 500
+const POST_TIMEOUT_RECOVERY_POLL_MS = 2_000
+const PRE_READY_SPOOL_FILE = `${METRONOUS_DATA_DIR}/pre-ready-events.jsonl`
 
 let serverPort: number | null = null
 let serverReady = false
 
-// Pre-ready queue: events buffered while waiting for the server to start.
-let preReadyQueue: object[] = []
+type IngestPayload = Record<string, unknown>
+
+let preReadyLock = Promise.resolve()
+
+async function withPreReadyLock<T>(task: () => Promise<T> | T): Promise<T> {
+  const run = preReadyLock.then(task, task)
+  preReadyLock = run.then(() => undefined, () => undefined)
+  return run
+}
+
+function readQueuedPayloads(): IngestPayload[] {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (!fs.existsSync(PRE_READY_SPOOL_FILE)) return []
+    const raw = fs.readFileSync(PRE_READY_SPOOL_FILE, "utf8")
+    const payloads: IngestPayload[] = []
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          payloads.push(parsed as IngestPayload)
+        } else {
+          logError("readQueuedPayloads: skipping non-object payload")
+        }
+      } catch (err) {
+        logError("readQueuedPayloads: skipping malformed payload:", err)
+      }
+    }
+    return payloads
+  } catch (err) {
+    logError("readQueuedPayloads failed:", err)
+    return []
+  }
+}
+
+function clearQueuedPayloads() {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (fs.existsSync(PRE_READY_SPOOL_FILE)) {
+      fs.writeFileSync(PRE_READY_SPOOL_FILE, "")
+    }
+  } catch (err) {
+    logError("clearQueuedPayloads failed:", err)
+  }
+}
+
+function appendQueuedPayload(payload: IngestPayload) {
+  ensureDataDir()
+  const fs = require("fs") as typeof import("fs")
+  fs.appendFileSync(PRE_READY_SPOOL_FILE, `${JSON.stringify(payload)}\n`)
+}
+
+async function enqueuePreReadyPayload(payload: IngestPayload): Promise<void> {
+  await withPreReadyLock(async () => {
+    appendQueuedPayload(payload)
+  })
+}
+
+async function flushQueuedPayloads(): Promise<void> {
+  const queued = readQueuedPayloads()
+  if (queued.length === 0) return
+
+  log(`Flushing ${queued.length} persisted pre-ready event(s)`)
+  clearQueuedPayloads()
+
+  for (let i = 0; i < queued.length; i++) {
+    const payload = queued[i]
+    const sent = await httpPost(payload)
+    if (!sent) {
+      appendQueuedPayload(payload)
+      for (let j = i + 1; j < queued.length; j++) {
+        appendQueuedPayload(queued[j])
+      }
+      return
+    }
+  }
+}
 
 // sleep returns a promise that resolves after ms milliseconds.
 function sleep(ms: number): Promise<void> {
@@ -229,36 +314,36 @@ function readPortFile(): number | null {
   }
 }
 
-// waitForServer polls the port file until the server is ready or timeout is reached.
+// waitForServer polls the port file until the server is ready.
 // Once ready, flushes any buffered pre-ready events.
 async function waitForServer(agentId: string): Promise<void> {
   log(`Waiting for Metronous server (port file: ${PORT_FILE})`)
-  const deadline = Date.now() + MAX_PORT_WAIT_MS
+  const startedAt = Date.now()
+  let warned = false
   let attempt = 0
 
-  while (Date.now() < deadline) {
+  while (true) {
     attempt++
     const port = readPortFile()
     if (port !== null) {
-      serverPort = port
-      serverReady = true
-      log(`Server ready on port ${port} — agent: ${agentId} (found after ${attempt} attempts)`)
-
-      // Flush buffered pre-ready events.
-      if (preReadyQueue.length > 0) {
-        log(`Flushing ${preReadyQueue.length} buffered pre-ready event(s)`)
-        const queued = preReadyQueue.splice(0)
-        for (const payload of queued) {
-          await httpPost(payload)
-        }
-      }
+      await withPreReadyLock(async () => {
+        serverPort = port
+        serverReady = true
+        log(`Server ready on port ${port} — agent: ${agentId} (found after ${attempt} attempts)`)
+        await flushQueuedPayloads()
+      })
       return
     }
-    log(`waitForServer: attempt ${attempt}, port file not found yet, retrying in ${PORT_POLL_INTERVAL_MS}ms`)
-    await sleep(PORT_POLL_INTERVAL_MS)
-  }
 
-  logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session (tried ${attempt} times)`)
+    const elapsedMs = Date.now() - startedAt
+    if (!warned && elapsedMs >= MAX_PORT_WAIT_MS) {
+      warned = true
+      logError(`Metronous server still not ready after ${MAX_PORT_WAIT_MS / 1000}s — buffering continues on disk until readiness appears`)
+    }
+
+    log(`waitForServer: attempt ${attempt}, port file not found yet, retrying in ${warned ? POST_TIMEOUT_RECOVERY_POLL_MS : PORT_POLL_INTERVAL_MS}ms`)
+    await sleep(warned ? POST_TIMEOUT_RECOVERY_POLL_MS : PORT_POLL_INTERVAL_MS)
+  }
 }
 
 // MAX_RECONNECT_ATTEMPTS is how many times httpPost will try to re-read the
@@ -269,10 +354,10 @@ const RECONNECT_DELAY_MS = 500
 // httpPost sends a JSON payload to POST /ingest on the server.
 // On ECONNREFUSED it re-reads mcp.port (the daemon may have restarted and
 // changed ports) and retries up to MAX_RECONNECT_ATTEMPTS times.
-async function httpPost(payload: object): Promise<void> {
+async function httpPost(payload: object): Promise<boolean> {
   if (!serverPort) {
     log("httpPost: serverPort is null, dropping event")
-    return
+    return false
   }
   const http = require("http") as typeof import("http")
   const body = JSON.stringify(payload)
@@ -292,9 +377,35 @@ async function httpPost(payload: object): Promise<void> {
           },
         },
         (res) => {
-          // Drain the response body so Node.js doesn't leak the socket.
-          res.resume()
-          res.on("end", () => resolve(true))
+          let responseBody = ""
+          res.setEncoding("utf8")
+          res.on("data", (chunk: string) => {
+            responseBody += chunk
+          })
+          res.on("end", () => {
+            if ((res.statusCode ?? 0) >= 400) {
+              logError(`HTTP ingest rejected with status ${res.statusCode}: ${responseBody}`)
+              resolve(false)
+              return
+            }
+
+            if (responseBody.trim()) {
+              try {
+                const parsed = JSON.parse(responseBody) as { isError?: boolean }
+                if (parsed?.isError === true) {
+                  logError(`HTTP ingest returned isError=true: ${responseBody}`)
+                  resolve(false)
+                  return
+                }
+              } catch (err) {
+                logError("HTTP ingest returned invalid JSON:", (err as Error).message)
+                resolve(false)
+                return
+              }
+            }
+
+            resolve(true)
+          })
         }
       )
       req.setTimeout(5000, () => {
@@ -315,7 +426,7 @@ async function httpPost(payload: object): Promise<void> {
       req.end(body)
     })
 
-    if (success) return
+    if (success) return true
 
     if (attempt < MAX_RECONNECT_ATTEMPTS) {
       // Wait briefly then re-read the port file.
@@ -332,39 +443,47 @@ async function httpPost(payload: object): Promise<void> {
       logError(`httpPost: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`)
     }
   }
+
+  return false
 }
 
 async function callIngest(payload: object): Promise<void> {
   const eventType = (payload as { event_type?: string }).event_type
 
   if (!serverReady) {
-    // Daemon may have restarted — try to re-read the port file before buffering.
-    const port = readPortFile()
-    if (port !== null) {
-      serverPort = port
-      serverReady = true
-      log(`callIngest: daemon recovered on port ${port}, flushing pre-ready queue`)
-      // Flush any buffered events first.
-      if (preReadyQueue.length > 0) {
-        const queued = preReadyQueue.splice(0)
-        for (const buffered of queued) {
-          await httpPost(buffered)
-        }
+    await withPreReadyLock(async () => {
+      if (serverReady) return
+
+      // Daemon may have restarted — try to re-read the port file before buffering.
+      const port = readPortFile()
+      if (port !== null) {
+        serverPort = port
+        serverReady = true
+        log(`callIngest: daemon recovered on port ${port}, flushing pre-ready queue`)
+        await flushQueuedPayloads()
+        return
       }
-    } else {
-      // Still not ready — buffer the event.
-      if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
-        preReadyQueue.shift() // drop oldest to bound memory
-        writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
-      }
-      log(`Not ready yet, buffering ${eventType}`)
-      preReadyQueue.push(payload)
-      return
+
+      // Still not ready — persist the event durably.
+      log(`Not ready yet, buffering ${eventType} on disk`)
+      appendQueuedPayload(payload as IngestPayload)
+    })
+
+    if (!serverReady) return
+
+    log(`Sending ingest via HTTP after recovery: ${eventType}`)
+    const sent = await httpPost(payload)
+    if (!sent) {
+      await enqueuePreReadyPayload(payload as IngestPayload)
     }
+    return
   }
 
   log(`Sending ingest via HTTP: ${eventType}`)
-  await httpPost(payload)
+  const sent = await httpPost(payload)
+  if (!sent) {
+    await enqueuePreReadyPayload(payload as IngestPayload)
+  }
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -382,8 +501,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
   log(`Initializing — default agent: ${currentAgentId}, data: ${METRONOUS_DATA_DIR}`)
 
-  // Wait for the server OpenCode spawned (non-blocking — if it doesn't start,
-  // events are silently dropped after timeout).
+  // Wait for the server OpenCode spawned (non-blocking — if it does not start,
+  // events are persisted on disk until readiness appears).
   waitForServer(currentAgentId).catch((err: Error) => {
     logError("waitForServer error:", err.message)
   })

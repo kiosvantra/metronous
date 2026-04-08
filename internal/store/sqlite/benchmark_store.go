@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
 CREATE INDEX IF NOT EXISTS idx_benchmark_agent_ts ON benchmark_runs(agent_id, run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_run_at ON benchmark_runs(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_verdict ON benchmark_runs(verdict, run_at DESC);
+
+-- Operational state for the latest benchmark attempt per run kind.
+CREATE TABLE IF NOT EXISTS benchmark_run_state (
+    run_kind           TEXT PRIMARY KEY,
+    last_attempt_at    INTEGER NOT NULL DEFAULT 0,
+    last_attempt_status TEXT NOT NULL DEFAULT 'completed',
+    last_attempt_error  TEXT NOT NULL DEFAULT ''
+);
 `
 
 // addAvgQualityScoreColumn migrates existing databases that predate avg_quality_score.
@@ -543,6 +551,73 @@ func (bs *BenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.Benc
 	})
 
 	return rows, nil
+}
+
+// RecordBenchmarkAttempt persists the latest attempt state for a benchmark run kind.
+// It is used by the runner to capture operational visibility even when the run fails
+// before any BenchmarkRun rows are saved.
+func (bs *BenchmarkStore) RecordBenchmarkAttempt(ctx context.Context, runKind store.RunKindType, attemptedAt time.Time, status store.BenchmarkAttemptStatus, runErr string) error {
+	if runKind == "" {
+		runKind = store.RunKindWeekly
+	}
+	if status == "" {
+		status = store.BenchmarkAttemptCompleted
+	}
+
+	const q = `
+		INSERT INTO benchmark_run_state (run_kind, last_attempt_at, last_attempt_status, last_attempt_error)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(run_kind) DO UPDATE SET
+			last_attempt_at = excluded.last_attempt_at,
+			last_attempt_status = excluded.last_attempt_status,
+			last_attempt_error = excluded.last_attempt_error`
+
+	if _, err := bs.writeDB.ExecContext(ctx, q,
+		string(runKind),
+		attemptedAt.UTC().UnixMilli(),
+		string(status),
+		runErr,
+	); err != nil {
+		return fmt.Errorf("record benchmark attempt: %w", err)
+	}
+	return nil
+}
+
+// GetBenchmarkAttemptStates returns the latest attempt state for every known run kind.
+func (bs *BenchmarkStore) GetBenchmarkAttemptStates(ctx context.Context) ([]store.BenchmarkAttemptState, error) {
+	const q = `
+		SELECT run_kind, last_attempt_at, last_attempt_status, last_attempt_error
+		FROM benchmark_run_state
+		ORDER BY run_kind`
+
+	rows, err := bs.readDB.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("get benchmark attempt states: %w", err)
+	}
+	defer rows.Close()
+
+	states := make([]store.BenchmarkAttemptState, 0, 2)
+	for rows.Next() {
+		var (
+			runKind    string
+			attemptMs  int64
+			status     string
+			attemptErr string
+		)
+		if err := rows.Scan(&runKind, &attemptMs, &status, &attemptErr); err != nil {
+			return nil, fmt.Errorf("scan benchmark attempt state row: %w", err)
+		}
+		states = append(states, store.BenchmarkAttemptState{
+			RunKind:           store.RunKindType(runKind),
+			LastAttemptAt:     time.UnixMilli(attemptMs).UTC(),
+			LastAttemptStatus: store.BenchmarkAttemptStatus(status),
+			LastAttemptError:  attemptErr,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate benchmark attempt state rows: %w", err)
+	}
+	return states, nil
 }
 
 // Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.

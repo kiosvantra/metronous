@@ -76,6 +76,23 @@ func (m *mockStore) Count() int {
 	return len(m.events)
 }
 
+type blockingStore struct {
+	mockStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingStore) InsertEvent(ctx context.Context, e store.Event) (string, error) {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return b.mockStore.InsertEvent(ctx, e)
+}
+
 // --- Helpers ---
 
 func makeEvent(agentID string) store.Event {
@@ -207,6 +224,51 @@ func TestEventQueueStoreErrorDoesNotBlock(t *testing.T) {
 	// Expected: 1 persisted event (second one), first one dropped after max retries.
 	if ms.Count() != 1 {
 		t.Errorf("expected 1 persisted event (after error and retry), got %d", ms.Count())
+	}
+}
+
+// TestEventQueueEnqueueAndWaitBlocksUntilPersisted verifies that the caller is
+// not released until the store has durably written the event.
+func TestEventQueueEnqueueAndWaitBlocksUntilPersisted(t *testing.T) {
+	bs := &blockingStore{
+		mockStore: mockStore{},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	q := tracking.NewEventQueue(bs, 10, nil)
+	q.Start()
+	t.Cleanup(func() { q.Stop() })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- q.EnqueueAndWait(context.Background(), makeEvent("agent-1"))
+	}()
+
+	select {
+	case <-bs.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("store insert did not start")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("EnqueueAndWait returned before persistence completed: %v", err)
+	default:
+	}
+
+	close(bs.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EnqueueAndWait: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EnqueueAndWait did not return after persistence")
+	}
+
+	if bs.Count() != 1 {
+		t.Fatalf("expected 1 persisted event, got %d", bs.Count())
 	}
 }
 

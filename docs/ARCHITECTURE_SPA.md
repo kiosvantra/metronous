@@ -105,12 +105,13 @@ El plugin envía eventos directamente al daemon via HTTP POST, omitiendo complet
 
 - **Endpoint**: `POST http://127.0.0.1:<port>/ingest`
 - **Cuerpo**: payload JSON con `agent_id`, `session_id`, `event_type`, `model`, `timestamp` y campos opcionales de costo/token
+- **Autenticacion opcional**: si `METRONOUS_INGEST_TOKEN` esta definido, el plugin y el shim envian `X-Metronous-Auth`; el daemon lo valida y registra advertencias si falta o es invalido durante la transicion
 - **Reconexión**: ante `ECONNREFUSED`, el plugin vuelve a leer `mcp.port` y reintenta hasta 3 veces con un backoff de 500ms
 - **Cola previa a estar listo**: los eventos emitidos antes de que el daemon esté listo se almacenan en un buffer (máx. 500) y se vacían una vez que aparece el archivo de puerto
 
 ### Shim → Daemon (HTTP, para llamadas de origen MCP)
 
-El shim `metronous mcp` traduce mensajes MCP `tools/call ingest` de OpenCode en solicitudes HTTP POST al mismo endpoint `/ingest`.
+El shim `metronous mcp` traduce mensajes MCP `tools/call ingest` de OpenCode en solicitudes HTTP POST al mismo endpoint `/ingest` y replica el token opcional de ingesta.
 
 ### TUI / CLI → SQLite (directo)
 

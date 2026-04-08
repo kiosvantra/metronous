@@ -293,7 +293,7 @@ fi
 # Run metronous install to set up the service and configure OpenCode
 echo ""
 echo "Setting up Metronous service..."
-if "$INSTALLED_PATH" install; then
+if "$INSTALLED_PATH" install --yes; then
     echo ""
     echo "========================================"
     echo "Metronous installed successfully!"

@@ -39,11 +39,17 @@ type benchmarkTickMsg struct{ t time.Time }
 
 // BenchmarkDataMsg carries fetched benchmark runs.
 type BenchmarkDataMsg struct {
-	Runs      []store.BenchmarkRun
-	Cycles    []time.Time         // week-start timestamps, newest first (nil = no change)
-	TypeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
-	TrendByID map[string][]string // agentID → verdict trend (oldest first)
-	Err       error
+	Runs                       []store.BenchmarkRun
+	Cycles                     []time.Time         // week-start timestamps, newest first (nil = no change)
+	TypeByID                   map[string]string   // agentID → type label (primary/subagent/built-in/all)
+	TrendByID                  map[string][]string // agentID → verdict trend (oldest first)
+	LastWeeklyRunAt            time.Time
+	LastIntraweekRunAt         time.Time
+	LastWeeklyAttemptAt        time.Time
+	LastIntraweekAttemptAt     time.Time
+	LastWeeklyAttemptStatus    store.BenchmarkAttemptStatus
+	LastIntraweekAttemptStatus store.BenchmarkAttemptStatus
+	Err                        error
 }
 
 // Verdict colour styles.
@@ -151,12 +157,18 @@ func loadModelPricing(dataDir string) map[string]float64 {
 
 // BenchmarkModel is the Bubble Tea sub-model for the benchmark history tab.
 type BenchmarkModel struct {
-	bs        store.BenchmarkStore
-	runs      []store.BenchmarkRun // rows for the current cycle (one per agent+model combo, placeholder if no run)
-	agents    []discovery.AgentInfo
-	typeByID  map[string]string   // agentID → type label (primary/subagent/built-in/all)
-	trendByID map[string][]string // agentID → verdict trend (oldest first)
-	err       error
+	bs                         store.BenchmarkStore
+	runs                       []store.BenchmarkRun // rows for the current cycle (one per agent+model combo, placeholder if no run)
+	agents                     []discovery.AgentInfo
+	typeByID                   map[string]string   // agentID → type label (primary/subagent/built-in/all)
+	trendByID                  map[string][]string // agentID → verdict trend (oldest first)
+	lastWeeklyRunAt            time.Time
+	lastIntraweekRunAt         time.Time
+	lastWeeklyAttemptAt        time.Time
+	lastIntraweekAttemptAt     time.Time
+	lastWeeklyAttemptStatus    store.BenchmarkAttemptStatus
+	lastIntraweekAttemptStatus store.BenchmarkAttemptStatus
+	err                        error
 	// cursor is the absolute row index within m.runs.
 	// offset is the first visible row index (scroll window).
 	cursor  int
@@ -191,8 +203,9 @@ type BenchmarkModel struct {
 	minROI      float64
 	// width and height are updated from tea.WindowSizeMsg so the view can
 	// adapt column widths to the current terminal size.
-	width  int
-	height int
+	width         int
+	height        int
+	lastViewLines int
 }
 
 // NewBenchmarkModel creates a BenchmarkModel wired to the given BenchmarkStore.
@@ -252,6 +265,12 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 		m.err = msg.Err
 		if msg.Err == nil {
 			m.runs = msg.Runs
+			m.lastWeeklyRunAt = msg.LastWeeklyRunAt
+			m.lastIntraweekRunAt = msg.LastIntraweekRunAt
+			m.lastWeeklyAttemptAt = msg.LastWeeklyAttemptAt
+			m.lastIntraweekAttemptAt = msg.LastIntraweekAttemptAt
+			m.lastWeeklyAttemptStatus = msg.LastWeeklyAttemptStatus
+			m.lastIntraweekAttemptStatus = msg.LastIntraweekAttemptStatus
 			if msg.Cycles != nil {
 				m.cycles = msg.Cycles
 				// Clamp cycleIndex to valid range when cycles change.
@@ -390,6 +409,11 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		status, err := loadBenchmarkRunStatus(ctx, m.bs)
+		if err != nil {
+			return BenchmarkDataMsg{Err: err}
+		}
 
 		// ── 1. Build typeByID from discovered agents + DB agents ──────────────
 		typeByID := make(map[string]string, len(agents))
@@ -541,16 +565,31 @@ func (m BenchmarkModel) fetchRuns() tea.Cmd {
 			}
 		}
 
-		return BenchmarkDataMsg{Runs: page, Cycles: cycles, TypeByID: typeByID, TrendByID: trendByID}
+		return BenchmarkDataMsg{
+			Runs:                       page,
+			Cycles:                     cycles,
+			TypeByID:                   typeByID,
+			TrendByID:                  trendByID,
+			LastWeeklyRunAt:            status.lastWeeklyRunAt,
+			LastIntraweekRunAt:         status.lastIntraweekRunAt,
+			LastWeeklyAttemptAt:        status.lastWeeklyAttemptAt,
+			LastIntraweekAttemptAt:     status.lastIntraweekAttemptAt,
+			LastWeeklyAttemptStatus:    status.lastWeeklyAttemptStatus,
+			LastIntraweekAttemptStatus: status.lastIntraweekAttemptStatus,
+		}
 	}
 }
 
 // View renders the benchmark history tab.
-func (m BenchmarkModel) View() string {
+func (m *BenchmarkModel) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(titleStyle.Render("Run Cycle") + "\n")
 	sb.WriteString(dimStyle.Render("Current cycle snapshot — active model per agent with all historical model variants") + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last weekly saved run: %s", formatBenchmarkRunStatus(m.lastWeeklyRunAt))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last weekly attempt: %s", formatBenchmarkAttemptStatus(m.lastWeeklyAttemptAt, m.lastWeeklyAttemptStatus))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last intraweek saved run: %s", formatBenchmarkRunStatus(m.lastIntraweekRunAt))) + "\n")
+	sb.WriteString(dimStyle.Render(fmt.Sprintf("  Last intraweek attempt: %s", formatBenchmarkAttemptStatus(m.lastIntraweekAttemptAt, m.lastIntraweekAttemptStatus))) + "\n\n")
 
 	// F5 indicator — always visible below the title, same as Benchmark Summary.
 	f5TopStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("226")).Bold(true) // yellow
@@ -729,7 +768,13 @@ func (m BenchmarkModel) View() string {
 		sb.WriteString(renderDetailPanel(detailRun, m.pricing, trend, m.minAccuracy, m.minROI))
 	}
 
-	return sb.String()
+	out := sb.String()
+	lineCount := strings.Count(out, "\n")
+	if lineCount < m.lastViewLines {
+		out += strings.Repeat("\n", m.lastViewLines-lineCount)
+	}
+	m.lastViewLines = maxInt(m.lastViewLines, lineCount)
+	return out
 }
 
 // renderDetailPanel renders the decision rationale panel for the selected run.

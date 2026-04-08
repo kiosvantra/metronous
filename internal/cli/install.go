@@ -23,15 +23,15 @@ func shellQuote(s string) string {
 
 // generateUnitFile returns the rendered systemd unit file content.
 // BinaryPath and DataDir are shell-quoted for ExecStart (systemd uses shell-style
-// quoting for ExecStart tokens) but used raw for StandardOutput=append: which
-// does not support shell quoting and expects a literal filesystem path.
+// quoting for ExecStart tokens). Logs are written via StandardOutput=append: to
+// a path derived from the user's home directory using the %h specifier so that
+// data directories containing spaces remain supported.
 func generateUnitFile(binaryPath, dataDir string) (string, error) {
-	// Validate dataDir doesn't contain spaces which would break StandardOutput=append:
-	if strings.Contains(dataDir, " ") {
-		return "", fmt.Errorf("data directory %q contains spaces which is not supported", dataDir)
-	}
 	qBinary := shellQuote(binaryPath)
 	qData := shellQuote(dataDir)
+	// Use %h so that the expanded log path can contain spaces in the user's home
+	// directory without breaking systemd's whitespace parsing in unit files.
+	logPath := "%h/.metronous/metronous.log"
 	content := fmt.Sprintf(`[Unit]
 Description=Metronous Agent Intelligence Daemon
 After=network.target
@@ -41,18 +41,20 @@ Type=simple
 ExecStart=%s server --data-dir %s --daemon-mode
 Restart=on-failure
 RestartSec=5s
-StandardOutput=append:%s/metronous.log
+StandardOutput=append:%s
 StandardError=inherit
 
 [Install]
 WantedBy=default.target
-`, qBinary, qData, dataDir)
+	`, qBinary, qData, logPath)
 	return content, nil
 }
 
 // NewInstallCommand creates the `metronous install` cobra command.
 func NewInstallCommand() *cobra.Command {
-	return &cobra.Command{
+	var dryRun bool
+	var assumeYes bool
+	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Metronous as a systemd user service",
 		Long: `Install Metronous as a systemd user service (Linux only).
@@ -64,12 +66,15 @@ This command:
   4. Patches ~/.config/opencode/opencode.json to use this executable for MCP
   5. Installs the OpenCode plugin (metronous.ts)
 
-After running this command, every OpenCode instance will automatically
-connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`,
+		After running this command, every OpenCode instance will automatically
+		connect to the shared long-lived Metronous daemon via the 'metronous mcp' shim.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall()
+			return runInstall(cmd, installOptions{dryRun: dryRun, yes: assumeYes})
 		},
 	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview the OpenCode and service changes without writing files")
+	cmd.Flags().BoolVar(&assumeYes, "yes", false, "Skip the confirmation prompt and apply the changes")
+	return cmd
 }
 
 // warnOpencodeConfig prints an informational message if OpenCode does not appear
@@ -88,7 +93,7 @@ func warnOpencodeConfig(userHome string) {
 }
 
 // runInstall performs all installation steps.
-func runInstall() error {
+func runInstall(cmd *cobra.Command, opts installOptions) error {
 	if os.Geteuid() == 0 {
 		return fmt.Errorf("run 'metronous install' as your normal user, not with sudo or root")
 	}
@@ -100,14 +105,8 @@ func runInstall() error {
 	}
 	warnOpencodeConfig(userHome)
 
-	// Step 1: Initialize ~/.metronous (idempotent).
+	// Step 1: Determine paths (no filesystem mutations yet).
 	home := defaultMetronousHome()
-	fmt.Println("Initializing Metronous home directory...")
-	if err := runInit(home); err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-
-	// Step 2: Determine paths.
 	binaryPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
@@ -117,6 +116,31 @@ func runInstall() error {
 		return fmt.Errorf("systemctl not found: Linux install requires systemd user services")
 	}
 
+	systemdDir := filepath.Join(userHome, ".config", "systemd", "user")
+	unitPath := filepath.Join(systemdDir, "metronous.service")
+	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
+	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
+	plan := []string{
+		fmt.Sprintf("- initialize %s", defaultMetronousHome()),
+		fmt.Sprintf("- write %s", unitPath),
+		"- enable and start the systemd user service",
+		fmt.Sprintf("- update %s", configPath),
+		fmt.Sprintf("- install %s", pluginPath),
+	}
+	skip, err := reviewInstallPlan(cmd, plan, opts.dryRun, opts.yes)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
+	}
+
+	// Step 2: Initialize ~/.metronous (idempotent) after confirmation.
+	fmt.Println("Initializing Metronous home directory...")
+	if err := runInit(home); err != nil {
+		return fmt.Errorf("init: %w", err)
+	}
+
 	// Step 3: Generate unit file.
 	unitContent, err := generateUnitFile(binaryPath, dataDir)
 	if err != nil {
@@ -124,8 +148,6 @@ func runInstall() error {
 	}
 
 	// Step 4: Pre-flight backup of OpenCode files.
-	configPath := filepath.Join(userHome, ".config", "opencode", "opencode.json")
-	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
 	configBackup, err := backupFile(configPath)
 	if err != nil {
 		return fmt.Errorf("backup opencode.json: %w", err)
@@ -136,11 +158,9 @@ func runInstall() error {
 	}
 
 	// Step 5: Write unit file.
-	systemdDir := filepath.Join(userHome, ".config", "systemd", "user")
 	if err := os.MkdirAll(systemdDir, 0700); err != nil {
 		return fmt.Errorf("create systemd user dir: %w", err)
 	}
-	unitPath := filepath.Join(systemdDir, "metronous.service")
 	if err := os.WriteFile(unitPath, []byte(unitContent), 0644); err != nil {
 		return fmt.Errorf("write unit file: %w", err)
 	}

@@ -20,6 +20,8 @@ var forceInstall bool
 
 // NewInstallCommand creates the `metronous install` cobra command.
 func NewInstallCommand() *cobra.Command {
+	var dryRun bool
+	var assumeYes bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install Metronous as an experimental Windows service",
@@ -42,15 +44,17 @@ Linux remains the only officially supported installer path.
 
 Note: Run this from an elevated terminal (Run as Administrator) using the same Windows user account that runs OpenCode.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(forceInstall)
+			return runInstall(cmd, forceInstall, installOptions{dryRun: dryRun, yes: assumeYes})
 		},
 	}
 	cmd.Flags().BoolVar(&forceInstall, "force", false, "Force reinstall if service already exists")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview the OpenCode and service changes without writing files")
+	cmd.Flags().BoolVar(&assumeYes, "yes", false, "Skip the confirmation prompt and apply the changes")
 	return cmd
 }
 
 // runInstall performs all installation steps.
-func runInstall(force bool) error {
+func runInstall(cmd *cobra.Command, force bool, opts installOptions) error {
 	// Step 0: Validate prerequisites before any changes.
 	dataDir := defaultDataDir()
 	if err := validateDataDir(dataDir); err != nil {
@@ -59,6 +63,42 @@ func runInstall(force bool) error {
 
 	if err := validatePermissions(); err != nil {
 		return fmt.Errorf("permission validation failed: %w", err)
+	}
+
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get user home: %w", err)
+	}
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get executable path: %w", err)
+	}
+
+	// Step 1: Validate binary location before any changes.
+	if err := validateBinary(execPath); err != nil {
+		return fmt.Errorf("binary validation failed: %w", err)
+	}
+
+	// Step 2: Check if daemon is already running (daemon uses dynamic ports, not fixed 8844).
+	if err := checkDaemonRunning(); err != nil {
+		return fmt.Errorf("daemon conflict: %w (use 'metronous uninstall' first or --force to reinstall)", err)
+	}
+
+	configRoot := resolveOpenCodeRoot(userHome)
+	configPath := filepath.Join(configRoot, "opencode.json")
+	pluginPath := filepath.Join(configRoot, "plugins", "metronous.ts")
+	plan := []string{
+		fmt.Sprintf("- initialize %s", defaultMetronousHome()),
+		"- install or replace the Windows service metronous",
+		fmt.Sprintf("- update %s", configPath),
+		fmt.Sprintf("- install %s", pluginPath),
+	}
+	skip, err := reviewInstallPlan(cmd, plan, opts.dryRun, opts.yes)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return nil
 	}
 
 	// Step 1: Check if service already exists and auto-cleanup if not using --force
@@ -83,29 +123,6 @@ func runInstall(force bool) error {
 		return fmt.Errorf("init: %w", err)
 	}
 
-	// Step 3: Determine data directory.
-	dataDir = defaultDataDir()
-
-	// Step 4: Determine install paths.
-	userHome, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get user home: %w", err)
-	}
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("get executable path: %w", err)
-	}
-
-	// Step 5: Validate binary location.
-	if err := validateBinary(execPath); err != nil {
-		return fmt.Errorf("binary validation failed: %w", err)
-	}
-
-	// Step 6: Check if daemon is already running (daemon uses dynamic ports, not fixed 8844).
-	if err := checkDaemonRunning(); err != nil {
-		return fmt.Errorf("daemon conflict: %w (use 'metronous uninstall' first or --force to reinstall)", err)
-	}
-
 	// Step 7: Install the Windows service via kardianos/service.
 	fmt.Println("Installing Windows service...")
 	svc, err := buildService(dataDir)
@@ -124,12 +141,11 @@ func runInstall(force bool) error {
 	}
 	fmt.Println("ok: service started")
 
-	configRoot := resolveOpenCodeRoot(userHome)
-	configBackup, err := backupFile(filepath.Join(configRoot, "opencode.json"))
+	configBackup, err := backupFile(configPath)
 	if err != nil {
 		return fmt.Errorf("backup opencode.json: %w", err)
 	}
-	pluginBackup, err := backupFile(filepath.Join(configRoot, "plugins", "metronous.ts"))
+	pluginBackup, err := backupFile(pluginPath)
 	if err != nil {
 		return fmt.Errorf("backup plugin: %w", err)
 	}

@@ -40,9 +40,10 @@ type trackingSessionEventsMsg struct {
 
 // TrackingModel is the Bubble Tea sub-model for the real-time tracking tab.
 type TrackingModel struct {
-	es       store.EventStore
-	sessions []store.SessionSummary
-	err      error
+	es         store.EventStore
+	thresholds config.Thresholds
+	sessions   []store.SessionSummary
+	err        error
 	// cursor is the index into the sessions slice (one row per session, always collapsed).
 	cursor int
 	// pageOffset is the number of sessions skipped (newest first).
@@ -95,8 +96,9 @@ var (
 // NewTrackingModel creates a TrackingModel wired to the given EventStore.
 func NewTrackingModel(es store.EventStore) TrackingModel {
 	return TrackingModel{
-		es:      es,
-		loading: true,
+		es:         es,
+		thresholds: config.DefaultThresholdValues(),
+		loading:    true,
 	}
 }
 
@@ -150,6 +152,9 @@ func (m TrackingModel) Update(msg tea.Msg) (TrackingModel, tea.Cmd) {
 				m.popupEvents = msg.Events
 			}
 		}
+
+	case ConfigReloadedMsg:
+		m.thresholds = msg.Thresholds
 
 	case tea.KeyMsg:
 		// Esc always closes the popup first.
@@ -386,7 +391,8 @@ func (m *TrackingModel) renderBackground() string {
 		if isCursor {
 			baseStyle = cursorStyle
 		}
-		spentStyle, durationStyle := severityStylesForCostAndDuration(s.CostUSD, s.DurationMs)
+		effective := m.thresholds.EffectiveThresholds(s.AgentID)
+		spentStyle, durationStyle := severityStylesForCostAndDuration(effective, m.thresholds.TrackingDurationSeverity, m.thresholds.UrgentTriggers.MaxCostSpikeMultiplier, s.CostUSD, s.DurationMs)
 		sb.WriteString(renderSessionRowMain(cells, effectiveColWidths, baseStyle, isCursor, spentStyle, durationStyle))
 		sb.WriteString("\n")
 	}
@@ -631,12 +637,9 @@ func renderRowMain(cols []string, widths []int, style lipgloss.Style) string {
 	return sb.String()
 }
 
-func severityStylesForCostAndDuration(costUSD *float64, durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
+func severityStylesForCostAndDuration(thresholds config.DefaultThresholds, tracking config.TrackingDurationSeverityConfig, spikeMult float64, costUSD *float64, durationMs *int) (spentStyle lipgloss.Style, durationStyle lipgloss.Style) {
 	// Spent semaforo is based on configured cost thresholds.
-	// We use defaults here because Tracking has no direct access to live config changes.
-	t := config.DefaultThresholdValues()
-	maxCost := t.Defaults.MaxCostUSDPerSession
-	spikeMult := t.UrgentTriggers.MaxCostSpikeMultiplier
+	maxCost := thresholds.MaxCostUSDPerSession
 	maxSpike := maxCost * spikeMult
 
 	spentStyle = spentOkStyle
@@ -653,20 +656,22 @@ func severityStylesForCostAndDuration(costUSD *float64, durationMs *int) (spentS
 		}
 	}
 
-	// Duration semaforo (for latency-ish proxy).
-	durationStyle = sevRedStyle
+	// Duration semaforo uses the tracking UI display bands.
+	durationStyle = dimStyle
 	if durationMs == nil || *durationMs <= 0 {
 		return spentStyle, durationStyle
 	}
 
-	secs := float64(*durationMs) / 1000.0
-	if secs <= 10.0 {
+	switch tracking.Classify(float64(*durationMs)) {
+	case config.DurationSeverityGood:
 		return spentStyle, sevGreenStyle
-	}
-	if secs <= 30.0 {
+	case config.DurationSeverityWarn:
 		return spentStyle, sevAmberStyle
+	case config.DurationSeverityCritical:
+		return spentStyle, sevRedStyle
+	default:
+		return spentStyle, durationStyle
 	}
-	return spentStyle, sevRedStyle
 }
 
 func renderSessionRowMain(cols []string, widths []int, baseStyle lipgloss.Style, isCursor bool, spentStyle, durationStyle lipgloss.Style) string {
