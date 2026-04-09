@@ -506,20 +506,23 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 //   - HMAC signature (recommended): "sha256:<hex-signature>" where signature is
 //     HMAC-SHA256(secret, request-body)
 func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
-	// Try to get token from env, fall back to reading from ingest.key file
-	expectedToken := os.Getenv(ingestAuthEnvVar)
-	if expectedToken == "" {
-		// Try to read from ingest.key file
-		keyPath := s.ingestKeyPath()
-		if data, err := os.ReadFile(keyPath); err == nil {
-			expectedToken = strings.TrimSpace(string(data))
-		}
-	}
+	// Token is now resolved per-request to handle lazy key creation by plugin.
+	// The plugin creates ingest.key on first HTTP send, so we must read it
+	// at request time, not at handler registration time.
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
+		}
+
+		// Resolve token for this request - try env first, then file
+		expectedToken := os.Getenv(ingestAuthEnvVar)
+		if expectedToken == "" {
+			keyPath := s.ingestKeyPath()
+			if data, err := os.ReadFile(keyPath); err == nil {
+				expectedToken = strings.TrimSpace(string(data))
+			}
 		}
 
 		// Authenticate if token is configured
