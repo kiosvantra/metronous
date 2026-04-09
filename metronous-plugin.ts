@@ -64,6 +64,78 @@ function logError(...args: unknown[]) {
   writeLog("ERROR", ...args)
 }
 
+// ─── Shared Secret for Authenticated Ingest ───────────────────────────────────
+//
+// The plugin authenticates to the daemon using a shared secret stored in
+// {dataDir}/ingest.key. This prevents unauthorized local processes from
+// forging telemetry events or poisoning benchmark data.
+
+const INGEST_KEY_FILE = `${METRONOUS_DATA_DIR}/ingest.key`
+
+/**
+ * generateSecret generates a cryptographically secure random string (32 bytes hex = 64 chars).
+ */
+function generateSecret(): string {
+  const crypto = require("crypto")
+  return crypto.randomBytes(32).toString("hex")
+}
+
+/**
+ * getOrCreateSharedSecret reads the shared secret from disk, or generates
+ * a new one if it does not exist. The secret is created with restrictive
+ * permissions (owner read/write only).
+ */
+function getOrCreateSharedSecret(): string | null {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    // Read existing secret
+    if (fs.existsSync(INGEST_KEY_FILE)) {
+      const secret = fs.readFileSync(INGEST_KEY_FILE, "utf8").trim()
+      if (secret.length === 64) {
+        log(`Loaded existing ingest secret (${secret.length} chars)`)
+        return secret
+      }
+      // Invalid secret - regenerate
+      logError("Invalid ingest key file, regenerating")
+    }
+    // Generate new secret
+    ensureDataDir()
+    const newSecret = generateSecret()
+    fs.writeFileSync(INGEST_KEY_FILE, newSecret, { mode: 0o600 })
+    log(`Generated new ingest secret`)
+    return newSecret
+  } catch (err) {
+    logError("Failed to load/create ingest secret:", err)
+    return null
+  }
+}
+
+/**
+ * Sign the request body using HMAC-SHA256. The signature is sent in the
+ * X-Metronous-Auth header as "sha256:<hex-signature>".
+ */
+function signBody(secret: string, body: string): string {
+  const crypto = require("crypto")
+  const hmac = crypto.createHmac("sha256", secret)
+  hmac.update(body)
+  return `sha256:${hmac.digest("hex")}`
+}
+
+// Lazy-loaded shared secret (initialized on first HTTP request)
+let cachedSharedSecret: string | null = null
+let cachedSecretTime: number = 0
+const CACHE_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
+
+function getSharedSecret(): string | null {
+  const now = Date.now()
+  // Refresh if never cached or after cache interval
+  if (cachedSharedSecret === null || now - cachedSecretTime > CACHE_REFRESH_INTERVAL) {
+    cachedSharedSecret = getOrCreateSharedSecret()
+    cachedSecretTime = now
+  }
+  return cachedSharedSecret
+}
+
 // ─── Session State ────────────────────────────────────────────────────────────
 
 interface SessionState {
@@ -354,6 +426,7 @@ const RECONNECT_DELAY_MS = 500
 // httpPost sends a JSON payload to POST /ingest on the server.
 // On ECONNREFUSED it re-reads mcp.port (the daemon may have restarted and
 // changed ports) and retries up to MAX_RECONNECT_ATTEMPTS times.
+// Includes HMAC-SHA256 signature in X-Metronous-Auth header for authentication.
 async function httpPost(payload: object): Promise<boolean> {
   if (!serverPort) {
     log("httpPost: serverPort is null, dropping event")
@@ -361,6 +434,10 @@ async function httpPost(payload: object): Promise<boolean> {
   }
   const http = require("http") as typeof import("http")
   const body = JSON.stringify(payload)
+
+  // Sign the request body for authentication
+  const secret = getSharedSecret()
+  const authHeader = secret ? signBody(secret, body) : ""
 
   for (let attempt = 0; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
     const port = serverPort!
@@ -374,6 +451,7 @@ async function httpPost(payload: object): Promise<boolean> {
           headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
+            "X-Metronous-Auth": authHeader,
           },
         },
         (res) => {

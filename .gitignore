@@ -65,6 +65,10 @@ tui-debug.log
 .atl/*
 !.atl/skill-registry.md
 
+# OpenCode rules (user-specific, not committed)
+AGENTS.md
+CLAUDE.md
+
 # Environment
 .env
 .env.*
