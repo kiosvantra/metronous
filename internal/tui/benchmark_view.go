@@ -109,8 +109,33 @@ func formatDuration(ms float64) string {
 	return fmt.Sprintf("%dh %dm", hours, mins)
 }
 
-// maxBenchmarkRows is the maximum number of rows visible at once (scroll window).
+// maxBenchmarkRows is the upper bound for rows visible at once.
 const maxBenchmarkRows = 15
+
+// benchmarkDefaultVisibleRows keeps Detailed compact enough that the view and
+// table headers remain fixed on ordinary terminal sizes, matching Summary more closely.
+const benchmarkDefaultVisibleRows = 10
+
+// benchmarkReservedLines estimates the non-table lines in the Detailed view so
+// the visible row window can shrink to fit the terminal height.
+const benchmarkReservedLines = 38
+
+func (m BenchmarkModel) visibleBenchmarkRows() int {
+	rows := benchmarkDefaultVisibleRows
+	if m.height > 0 {
+		fit := m.height - benchmarkReservedLines
+		if fit < rows {
+			rows = fit
+		}
+	}
+	if rows < 3 {
+		rows = 3
+	}
+	if rows > maxBenchmarkRows {
+		rows = maxBenchmarkRows
+	}
+	return rows
+}
 
 // currentBenchmarkColWidths returns a copy of benchColWidths adjusted to fit
 // within the current terminal width. When the width is unknown (zero) the
@@ -292,9 +317,16 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 					m.cursor = 0
 				}
 			}
-			// Clamp offset.
-			if m.offset > m.cursor {
+			visibleRows := m.visibleBenchmarkRows()
+			if m.cursor < m.offset {
 				m.offset = m.cursor
+			}
+			if m.cursor >= m.offset+visibleRows {
+				m.offset = m.cursor - (visibleRows - 1)
+			}
+			maxOffset := maxInt(0, len(m.runs)-visibleRows)
+			if m.offset > maxOffset {
+				m.offset = maxOffset
 			}
 		}
 		return m, nil
@@ -319,11 +351,12 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
 		case "down", "j":
+			visibleRows := m.visibleBenchmarkRows()
 			// Move selection one row down within the current cycle.
 			if m.cursor < len(m.runs)-1 {
 				m.cursor++
-				if m.cursor >= m.offset+maxBenchmarkRows {
-					m.offset = m.cursor - maxBenchmarkRows + 1
+				if m.cursor >= m.offset+visibleRows {
+					m.offset = m.cursor - visibleRows + 1
 				}
 			}
 			// Unfreeze detail so it follows the cursor.
@@ -644,8 +677,10 @@ func (m *BenchmarkModel) View() string {
 		}
 	}
 
-	// Data rows — render only the visible window [offset, offset+maxBenchmarkRows).
-	end := m.offset + maxBenchmarkRows
+	visibleRows := m.visibleBenchmarkRows()
+
+	// Data rows — render only the visible window [offset, offset+visibleRows).
+	end := m.offset + visibleRows
 	if end > len(m.runs) {
 		end = len(m.runs)
 	}
@@ -671,7 +706,7 @@ func (m *BenchmarkModel) View() string {
 		if isNoDataRow {
 			baseStyle = dimStyle
 			if i == m.cursor {
-				baseStyle = cursorStyle
+				baseStyle = cursorStyle.Copy().Foreground(lipgloss.Color("252"))
 			}
 		} else if i == m.cursor {
 			baseStyle = cursorStyle
@@ -1394,7 +1429,8 @@ func padRenderedPanel(panel string, minLines int) string {
 	if lineCount >= minLines {
 		return panel
 	}
-	return panel + strings.Repeat("\n", minLines-lineCount)
+	blankLine := strings.Repeat(" ", totalWidth(benchColWidths)) + "\n"
+	return panel + strings.Repeat(blankLine, minLines-lineCount)
 }
 
 // writeDetailField writes a single label: value line to the string builder.

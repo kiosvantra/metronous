@@ -64,6 +64,48 @@ func TestBenchmarkDetailedOmitsExtraScrollIndicatorLines(t *testing.T) {
 	}
 }
 
+func TestBenchmarkDetailedNoDataDetailPanelClearsPreviousContent(t *testing.T) {
+	active := store.BenchmarkRun{
+		AgentID:      "agent-1",
+		Model:        "model-a",
+		RunAt:        time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC),
+		SampleSize:   120,
+		Accuracy:     0.93,
+		AvgTurnMs:    1250,
+		TotalCostUSD: 1.23,
+		Verdict:      store.VerdictKeep,
+		Status:       store.RunStatusActive,
+	}
+	noData := store.BenchmarkRun{AgentID: "agent-2"}
+	m := &BenchmarkModel{runs: []store.BenchmarkRun{active, noData}, cursor: 0, pricing: map[string]float64{"model-a": 0.01}}
+	_ = m.View()
+	m.cursor = 1
+	view := m.View()
+	if !strings.Contains(view, "No benchmark runs recorded yet for this agent.") {
+		t.Fatalf("expected NO DATA detail text, got %q", view)
+	}
+	if strings.Contains(view, "Cost:") {
+		t.Fatalf("expected previous detail content to be cleared for NO DATA row, got %q", view)
+	}
+}
+
+func TestBenchmarkDetailedUsesCompactDefaultVisibleWindow(t *testing.T) {
+	m := BenchmarkModel{}
+	if got := m.visibleBenchmarkRows(); got != benchmarkDefaultVisibleRows {
+		t.Fatalf("expected compact default visible rows %d, got %d", benchmarkDefaultVisibleRows, got)
+	}
+}
+
+func TestBenchmarkDetailedShrinksVisibleWindowToFitHeight(t *testing.T) {
+	m := BenchmarkModel{height: 42}
+	if got := m.visibleBenchmarkRows(); got >= benchmarkDefaultVisibleRows {
+		t.Fatalf("expected reduced visible rows for constrained height, got %d", got)
+	}
+	if got := m.visibleBenchmarkRows(); got < 3 {
+		t.Fatalf("expected minimum visible rows floor, got %d", got)
+	}
+}
+
 func TestBenchmarkDetailedCurrentMarkerUsesSameRowLayout(t *testing.T) {
 	runs := []store.BenchmarkRun{
 		{AgentID: "agent-1", Model: "model-a", RunAt: time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC), SampleSize: 120, Accuracy: 0.93, AvgTurnMs: 1250, TotalCostUSD: 1.23, Verdict: store.VerdictKeep, Status: store.RunStatusActive},
