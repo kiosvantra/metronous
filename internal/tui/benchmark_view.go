@@ -137,6 +137,59 @@ func (m BenchmarkModel) visibleBenchmarkRows() int {
 	return rows
 }
 
+func (m BenchmarkModel) benchmarkWindowEnd(offset int) int {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(m.runs) {
+		return len(m.runs)
+	}
+	lineBudget := m.visibleBenchmarkRows()
+	lines := 0
+	end := offset
+	for end < len(m.runs) {
+		add := 1
+		if end > offset && m.runs[end-1].AgentID != m.runs[end].AgentID {
+			add++
+		}
+		if lines+add > lineBudget && end > offset {
+			break
+		}
+		lines += add
+		end++
+		if lines >= lineBudget {
+			break
+		}
+	}
+	return end
+}
+
+func (m *BenchmarkModel) clampBenchmarkOffset() {
+	if len(m.runs) == 0 {
+		m.offset = 0
+		m.cursor = 0
+		return
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor >= len(m.runs) {
+		m.cursor = len(m.runs) - 1
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	if m.offset > m.cursor {
+		m.offset = m.cursor
+	}
+	for m.offset < m.cursor && m.cursor >= m.benchmarkWindowEnd(m.offset) {
+		m.offset++
+	}
+	if m.offset >= len(m.runs) {
+		m.offset = len(m.runs) - 1
+	}
+}
+
 // currentBenchmarkColWidths returns a copy of benchColWidths adjusted to fit
 // within the current terminal width. When the width is unknown (zero) the
 // original widths are returned unchanged.
@@ -317,17 +370,7 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 					m.cursor = 0
 				}
 			}
-			visibleRows := m.visibleBenchmarkRows()
-			if m.cursor < m.offset {
-				m.offset = m.cursor
-			}
-			if m.cursor >= m.offset+visibleRows {
-				m.offset = m.cursor - (visibleRows - 1)
-			}
-			maxOffset := maxInt(0, len(m.runs)-visibleRows)
-			if m.offset > maxOffset {
-				m.offset = maxOffset
-			}
+			m.clampBenchmarkOffset()
 		}
 		return m, nil
 
@@ -344,21 +387,16 @@ func (m BenchmarkModel) Update(msg tea.Msg) (BenchmarkModel, tea.Cmd) {
 			// Move selection one row up within the current cycle.
 			if m.cursor > 0 {
 				m.cursor--
-				if m.cursor < m.offset {
-					m.offset = m.cursor
-				}
 			}
+			m.clampBenchmarkOffset()
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
 		case "down", "j":
-			visibleRows := m.visibleBenchmarkRows()
 			// Move selection one row down within the current cycle.
 			if m.cursor < len(m.runs)-1 {
 				m.cursor++
-				if m.cursor >= m.offset+visibleRows {
-					m.offset = m.cursor - visibleRows + 1
-				}
 			}
+			m.clampBenchmarkOffset()
 			// Unfreeze detail so it follows the cursor.
 			m.detailFrozen = false
 		case "pgdown":
@@ -677,13 +715,7 @@ func (m *BenchmarkModel) View() string {
 		}
 	}
 
-	visibleRows := m.visibleBenchmarkRows()
-
-	// Data rows — render only the visible window [offset, offset+visibleRows).
-	end := m.offset + visibleRows
-	if end > len(m.runs) {
-		end = len(m.runs)
-	}
+	end := m.benchmarkWindowEnd(m.offset)
 	for i := m.offset; i < end; i++ {
 		// Insert a faint divider between agent groups so that contiguous
 		// rows for the same agent are visually grouped together.

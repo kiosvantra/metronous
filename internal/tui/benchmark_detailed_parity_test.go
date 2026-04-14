@@ -106,6 +106,19 @@ func TestBenchmarkDetailedShrinksVisibleWindowToFitHeight(t *testing.T) {
 	}
 }
 
+func TestBenchmarkDetailedWindowEndCountsGroupDividers(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		{AgentID: "a", RunAt: time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC)},
+		{AgentID: "b", RunAt: time.Date(2026, 4, 6, 10, 1, 0, 0, time.UTC)},
+		{AgentID: "c", RunAt: time.Date(2026, 4, 6, 10, 2, 0, 0, time.UTC)},
+		{AgentID: "d", RunAt: time.Date(2026, 4, 6, 10, 3, 0, 0, time.UTC)},
+	}
+	m := BenchmarkModel{runs: runs, height: benchmarkReservedLines + 3}
+	if end := m.benchmarkWindowEnd(0); end != 2 {
+		t.Fatalf("expected divider-aware end=2 with tight budget, got %d", end)
+	}
+}
+
 func TestBenchmarkDetailedCurrentMarkerUsesSameRowLayout(t *testing.T) {
 	runs := []store.BenchmarkRun{
 		{AgentID: "agent-1", Model: "model-a", RunAt: time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC), SampleSize: 120, Accuracy: 0.93, AvgTurnMs: 1250, TotalCostUSD: 1.23, Verdict: store.VerdictKeep, Status: store.RunStatusActive},
