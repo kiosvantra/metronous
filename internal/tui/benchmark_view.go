@@ -786,6 +786,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 	// view when switching rows. Use a generous limit so multi-line fields like
 	// the trend legend are never truncated.
 	const maxDetailValueLen = 200
+	const benchmarkDetailPanelMinLines = 22
 	clamp := func(s string) string {
 		s = strings.TrimSpace(s)
 		if len(s) <= maxDetailValueLen {
@@ -795,15 +796,18 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 	}
 
 	divider := strings.Repeat("─", totalWidth(benchColWidths))
-	sb.WriteString(dimStyle.Render(divider) + "\n")
-	sb.WriteString(detailLabelStyle.Render("Decision Rationale") + "\n")
-	sb.WriteString(dimStyle.Render(divider) + "\n")
+	appendHeader := func() {
+		sb.WriteString(dimStyle.Render(divider) + "\n")
+		sb.WriteString(detailLabelStyle.Render("Decision Rationale") + "\n")
+		sb.WriteString(dimStyle.Render(divider) + "\n")
+	}
+	appendHeader()
 
 	// Handle NO_DATA placeholder rows.
 	if isNoData(run) {
 		writeDetailField(&sb, "Agent", run.AgentID)
 		writeDetailField(&sb, "Status", "No benchmark runs recorded yet for this agent.")
-		return sb.String()
+		return padRenderedPanel(sb.String(), benchmarkDetailPanelMinLines)
 	}
 
 	// Reason is always derived dynamically from numeric fields so historical
@@ -859,7 +863,7 @@ func renderDetailPanel(run store.BenchmarkRun, pricing map[string]float64, trend
 		writeDetailField(&sb, "Weekly Trend", clamp(trendStr))
 	}
 
-	return sb.String()
+	return padRenderedPanel(sb.String(), benchmarkDetailPanelMinLines)
 }
 
 // verdictAbbrev returns a single-character abbreviation for a verdict.
@@ -1393,6 +1397,14 @@ func evaluateAgentContext(run store.BenchmarkRun) string {
 		}
 		return insufficientPrefix + "Performance below expected thresholds for this role"
 	}
+}
+
+func padRenderedPanel(panel string, minLines int) string {
+	lineCount := strings.Count(panel, "\n")
+	if lineCount >= minLines {
+		return panel
+	}
+	return panel + strings.Repeat("\n", minLines-lineCount)
 }
 
 // writeDetailField writes a single label: value line to the string builder.
