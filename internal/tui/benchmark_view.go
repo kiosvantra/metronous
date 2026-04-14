@@ -628,10 +628,8 @@ func (m *BenchmarkModel) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", totalWidth(widths)) + "\n")
 
-	// Scroll indicator above if there are rows above the visible window.
-	if m.offset > 0 {
-		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ↑ %d more above", m.offset)) + "\n")
-	}
+	// Keep the visible table window compact and stable, matching Summary.
+	// Do not insert extra scroll-indicator lines above the table while moving.
 
 	// Compute current model per agent (highest run_at with Status='active').
 	// Index invariant: currentModelByAgent stores absolute indexes into m.runs
@@ -667,12 +665,13 @@ func (m *BenchmarkModel) View() string {
 		baseStyle := lipgloss.NewStyle()
 		isNoDataRow := isNoData(run)
 		isSuperseded := !isNoDataRow && run.Status == store.RunStatusSuperseded
-		// For NO DATA rows: keep grey text, but if the cursor is on the row
-		// show only the background highlight (so the cursor doesn't disappear).
+		// For NO DATA rows: keep grey text when idle, but use the same cursor
+		// highlight as other selected rows so the placeholder row remains legible
+		// instead of collapsing into low-contrast grey blocks.
 		if isNoDataRow {
 			baseStyle = dimStyle
 			if i == m.cursor {
-				baseStyle = dimStyle.Copy().Background(lipgloss.Color("236"))
+				baseStyle = cursorStyle
 			}
 		} else if i == m.cursor {
 			baseStyle = cursorStyle
@@ -684,14 +683,21 @@ func (m *BenchmarkModel) View() string {
 		// Add visual marker (●) to agent cell if this is the current active run for the agent.
 		isCurrent := !isNoDataRow && run.Status == store.RunStatusActive && currentModelByAgent[run.AgentID] == i
 
-		// Render the row. Keep the marker inline with the rest of the row so the
-		// layout stays identical to the summary view and the selected-row detail
-		// does not alter the visible table height when moving with arrows.
+		// Render the row using the same active-marker layout strategy as Summary.
 		var rendered string
 		if isCurrent {
-			row[0] = "● " + row[0]
+			agentCell := row[0]
+			maxAgentLen := widths[0] - 2 // reserve 2 visible chars for "● "
+			if len(agentCell) > maxAgentLen {
+				agentCell = agentCell[:maxAgentLen-1] + "…"
+			}
+			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
+			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
+			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
+			rendered = agentColRendered + " " + renderRow(row[1:verdictColIdx], widths[1:verdictColIdx], baseStyle)
+		} else {
+			rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)
 		}
-		rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)
 
 		// Verdict column: coloured independently.
 		var verdictCell string
@@ -712,12 +718,6 @@ func (m *BenchmarkModel) View() string {
 		sb.WriteString("\n")
 	}
 
-	// Scroll indicator below if there are rows below the visible window.
-	below := len(m.runs) - end
-	if below > 0 {
-		sb.WriteString(dimStyle.Render(fmt.Sprintf("  ↓ %d more below", below)) + "\n")
-	}
-
 	// Pagination footer: show cycle number (1-based from newest).
 	sb.WriteString("\n")
 	totalCycles := len(m.cycles)
@@ -732,8 +732,12 @@ func (m *BenchmarkModel) View() string {
 	} else {
 		cycleLabel = "cycle 1/1"
 	}
-	footerText := fmt.Sprintf("  %d rows  |  %s  (↑↓ scroll, PgUp/PgDn cycle, Enter freeze detail)",
-		len(m.runs), cycleLabel)
+	windowStart := 0
+	if len(m.runs) > 0 {
+		windowStart = m.offset + 1
+	}
+	footerText := fmt.Sprintf("  %d rows  |  showing %d-%d  |  %s  (↑↓ scroll, PgUp/PgDn cycle, Enter freeze detail)",
+		len(m.runs), windowStart, end, cycleLabel)
 	sb.WriteString(dimStyle.Render(footerText))
 	sb.WriteString("\n")
 
