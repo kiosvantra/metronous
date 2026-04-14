@@ -684,28 +684,14 @@ func (m *BenchmarkModel) View() string {
 		// Add visual marker (●) to agent cell if this is the current active run for the agent.
 		isCurrent := !isNoDataRow && run.Status == store.RunStatusActive && currentModelByAgent[run.AgentID] == i
 
-		// Render the row. When isCurrent, the agent column is rendered manually so
-		// that the ANSI-colored marker prefix does not interfere with renderRow's
-		// byte-length truncation logic (len(cell) counts bytes including escape codes).
+		// Render the row. Keep the marker inline with the rest of the row so the
+		// layout stays identical to the summary view and the selected-row detail
+		// does not alter the visible table height when moving with arrows.
 		var rendered string
 		if isCurrent {
-			// Truncate plain agentCell to (width-2) visible chars, then prepend the marker.
-			// This keeps the total visible width equal to widths[0].
-			agentCell := row[0]
-			maxAgentLen := widths[0] - 2 // reserve 2 visible chars for "● "
-			if len(agentCell) > maxAgentLen {
-				agentCell = agentCell[:maxAgentLen-1] + "…"
-			}
-			greenMarker := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("●")
-			// Pad the plain agentCell to (width-2) so the full column is exactly width chars.
-			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
-			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
-			// Render remaining columns 1..verdictColIdx-1 via renderRow (safe: no ANSI in those cells).
-			rendered = agentColRendered + renderRow(row[1:verdictColIdx], widths[1:verdictColIdx], baseStyle)
-		} else {
-			// No marker: render all columns 0..verdictColIdx-1 uniformly.
-			rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)
+			row[0] = "● " + row[0]
 		}
+		rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)
 
 		// Verdict column: coloured independently.
 		var verdictCell string
