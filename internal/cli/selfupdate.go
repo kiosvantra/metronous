@@ -267,12 +267,30 @@ func downloadAndInstallBinary(url, destPath string) error {
 
 	// Atomic replace.
 	if err := os.Rename(tmpPath, destPath); err != nil {
+		if isPermissionError(err) {
+			return permissionDeniedUpdateError(destPath, err)
+		}
+
 		// Cross-volume fallback.
 		if copyErr := copyFile(tmpPath, destPath); copyErr != nil {
+			if isPermissionError(copyErr) {
+				return permissionDeniedUpdateError(destPath, copyErr)
+			}
 			return fmt.Errorf("rename failed (%v) and copy also failed: %w", err, copyErr)
 		}
 	}
 	return nil
+}
+
+func permissionDeniedUpdateError(destPath string, err error) error {
+	return fmt.Errorf("cannot update %s without write permission: %w. Re-run with sudo, or reinstall Metronous in a user-writable location such as ~/.local/bin", destPath, err)
+}
+
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return os.IsPermission(err) || strings.Contains(strings.ToLower(err.Error()), "permission denied")
 }
 
 func copyFile(src, dst string) error {
