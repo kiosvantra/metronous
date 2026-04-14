@@ -701,7 +701,7 @@ func (m *BenchmarkModel) View() string {
 			agentPadded := fmt.Sprintf("%-*s", maxAgentLen, agentCell)
 			agentColRendered := baseStyle.Render(greenMarker + " " + agentPadded)
 			// Render remaining columns 1..verdictColIdx-1 via renderRow (safe: no ANSI in those cells).
-			rendered = agentColRendered + " " + renderRow(row[1:verdictColIdx], widths[1:verdictColIdx], baseStyle)
+			rendered = agentColRendered + renderRow(row[1:verdictColIdx], widths[1:verdictColIdx], baseStyle)
 		} else {
 			// No marker: render all columns 0..verdictColIdx-1 uniformly.
 			rendered = renderRow(row[:verdictColIdx], widths[:verdictColIdx], baseStyle)

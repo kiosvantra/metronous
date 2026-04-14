@@ -101,3 +101,18 @@ func TestBenchmarkViewKeepsHeaderVisibleWhenMovingUpFromBottom(t *testing.T) {
 		t.Fatalf("line count changed after moving up from bottom: bottom=%d up=%d", bottomLines, upLines)
 	}
 }
+
+func TestBenchmarkViewCurrentRowDoesNotInsertExtraSeparator(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		{AgentID: "agent-1", Model: "model-a", RunAt: time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC), SampleSize: 120, Accuracy: 0.93, AvgTurnMs: 1250, TotalCostUSD: 1.23, Verdict: store.VerdictKeep, Status: store.RunStatusActive},
+		{AgentID: "agent-2", Model: "model-b", RunAt: time.Date(2026, 4, 6, 11, 0, 0, 0, time.UTC), SampleSize: 120, Accuracy: 0.93, AvgTurnMs: 1250, TotalCostUSD: 1.23, Verdict: store.VerdictKeep, Status: store.RunStatusActive},
+	}
+	m := &BenchmarkModel{runs: runs, cursor: 0, pricing: map[string]float64{"model-a": 0.01, "model-b": 0.01}}
+	view := m.View()
+	if strings.Contains(view, "● Agent") {
+		t.Fatalf("unexpected separator between marker and agent cell: %q", view)
+	}
+	if !strings.Contains(view, "● agent-1") {
+		t.Fatalf("expected active marker on current row, got: %q", view)
+	}
+}
