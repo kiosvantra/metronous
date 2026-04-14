@@ -57,9 +57,14 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("could not determine current executable path: %w", err)
 	}
+	currentInstallPath := installPath
+	installPath = managedBinaryPath(installPath)
 
 	if err := downloadAndInstallBinary(downloadURL, installPath); err != nil {
 		return fmt.Errorf("failed to download update: %w", err)
+	}
+	if currentInstallPath != installPath {
+		fmt.Printf("  Migrated managed binary to %s\n", installPath)
 	}
 
 	// Also update the plugin file if it exists at the known OpenCode plugin path.
@@ -69,10 +74,17 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 		fmt.Println("  You can update it manually from: https://raw.githubusercontent.com/kiosvantra/metronous/main/metronous-plugin.ts")
 	}
 
+	if err := postUpdateInstallMigration(installPath); err != nil {
+		fmt.Printf("  Warning: could not migrate service/config references automatically: %v\n", err)
+	}
+
 	// Restart the systemd user service so the daemon picks up the new binary.
 	restartService()
 
 	fmt.Printf("\nMetronous has been updated to %s.\n", latestTag)
+	if currentInstallPath != installPath {
+		fmt.Printf("  Future launches should use: %s\n", installPath)
+	}
 	fmt.Println("  Close and reopen the dashboard to use the new version.")
 	return nil
 }
@@ -200,6 +212,10 @@ func downloadAndInstallBinary(url, destPath string) error {
 
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("failed to prepare install directory: %w", err)
 	}
 
 	// Decompress and extract binary from tar.gz

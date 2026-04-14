@@ -192,19 +192,30 @@ func detectSelfUpdateCapability() (bool, string) {
 	if err != nil {
 		return false, "could not determine executable path"
 	}
-	dir := filepath.Dir(exePath)
-	probe, err := os.CreateTemp(dir, ".metronous-self-update-check-*")
-	if err != nil {
-		msg := fmt.Sprintf("installed in %s without write permission", dir)
-		if !os.IsPermission(err) && !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
-			msg = fmt.Sprintf("cannot verify self-update permissions for %s", dir)
+	canWriteDir := func(dir string) bool {
+		probe, err := os.CreateTemp(dir, ".metronous-self-update-check-*")
+		if err != nil {
+			return false
 		}
-		return false, msg
+		name := probe.Name()
+		_ = probe.Close()
+		_ = os.Remove(name)
+		return true
 	}
-	name := probe.Name()
-	_ = probe.Close()
-	_ = os.Remove(name)
-	return true, ""
+	currentDir := filepath.Dir(exePath)
+	if canWriteDir(currentDir) {
+		return true, ""
+	}
+	managedPath := filepath.Join(os.Getenv("HOME"), ".local", "bin", filepath.Base(exePath))
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		managedPath = filepath.Join(home, ".local", "bin", filepath.Base(exePath))
+	}
+	managedDir := filepath.Dir(managedPath)
+	if err := os.MkdirAll(managedDir, 0o755); err == nil && canWriteDir(managedDir) {
+		return true, fmt.Sprintf("current install at %s is not writable, but update can migrate to %s", currentDir, managedPath)
+	}
+	msg := fmt.Sprintf("installed in %s without write permission", currentDir)
+	return false, msg
 }
 
 func (m AppModel) startSelfUpdate() tea.Cmd {

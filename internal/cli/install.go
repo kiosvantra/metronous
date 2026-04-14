@@ -111,6 +111,10 @@ func runInstall(cmd *cobra.Command, opts installOptions) error {
 	if err != nil {
 		return fmt.Errorf("get executable path: %w", err)
 	}
+	canonicalBinaryPath := managedBinaryPath(binaryPath)
+	migrateBinary := canonicalBinaryPath != binaryPath
+	currentBinaryPath := binaryPath
+	binaryPath = canonicalBinaryPath
 	dataDir := defaultDataDir()
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf("systemctl not found: Linux install requires systemd user services")
@@ -122,11 +126,16 @@ func runInstall(cmd *cobra.Command, opts installOptions) error {
 	pluginPath := filepath.Join(userHome, ".config", "opencode", "plugins", "metronous.ts")
 	plan := []string{
 		fmt.Sprintf("- initialize %s", defaultMetronousHome()),
+	}
+	if migrateBinary {
+		plan = append(plan, fmt.Sprintf("- install binary to %s", binaryPath))
+	}
+	plan = append(plan,
 		fmt.Sprintf("- write %s", unitPath),
 		"- enable and start the systemd user service",
 		fmt.Sprintf("- update %s", configPath),
 		fmt.Sprintf("- install %s", pluginPath),
-	}
+	)
 	skip, err := reviewInstallPlan(cmd, plan, opts.dryRun, opts.yes)
 	if err != nil {
 		return err
@@ -139,6 +148,11 @@ func runInstall(cmd *cobra.Command, opts installOptions) error {
 	fmt.Println("Initializing Metronous home directory...")
 	if err := runInit(home); err != nil {
 		return fmt.Errorf("init: %w", err)
+	}
+	if _, migrated, err := installBinaryToManagedPath(currentBinaryPath); err != nil {
+		return err
+	} else if migrated {
+		fmt.Printf("installed: %s\n", binaryPath)
 	}
 
 	// Step 3: Generate unit file.
