@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -122,6 +123,10 @@ type AppModel struct {
 	LatestVersion string
 	// CurrentVersion is the currently running version.
 	CurrentVersion string
+	// SelfUpdateAllowed reports whether the running install location appears writable.
+	SelfUpdateAllowed bool
+	// SelfUpdateHint explains why in-place self-update is unavailable.
+	SelfUpdateHint string
 
 	// dataDir is the Metronous data directory (e.g. ~/.metronous/data).
 	// It is used when restarting the daemon after configuration changes.
@@ -160,21 +165,75 @@ func NewAppModel(es store.EventStore, bs store.BenchmarkStore, configPath string
 		iwr = runner.NewRunnerWithModelLookup(es, bs, engine, dataDir, nil, agentModelLookup)
 	}
 
+	selfUpdateAllowed, selfUpdateHint := detectSelfUpdateCapability()
+
 	return AppModel{
-		CurrentTab:       TabBenchmarkSummary,
-		tracking:         NewTrackingModel(es),
-		benchmarkSummary: NewBenchmarkSummaryModel(bs, iwr),
-		benchmark:        NewBenchmarkModel(bs, dataDir, workDir, iwr),
-		config:           NewConfigModel(configPath),
-		charts:           NewChartsModel(es, bs),
-		CurrentVersion:   version,
-		dataDir:          dataDir,
-		needsClear:       true,
-		showLanding:      true,
-		landingCursor:    0,
-		landingQuitIndex: 6,
-		UpdateAvailable:  false,
-		LatestVersion:    "",
+		CurrentTab:        TabBenchmarkSummary,
+		tracking:          NewTrackingModel(es),
+		benchmarkSummary:  NewBenchmarkSummaryModel(bs, iwr),
+		benchmark:         NewBenchmarkModel(bs, dataDir, workDir, iwr),
+		config:            NewConfigModel(configPath),
+		charts:            NewChartsModel(es, bs),
+		CurrentVersion:    version,
+		SelfUpdateAllowed: selfUpdateAllowed,
+		SelfUpdateHint:    selfUpdateHint,
+		dataDir:           dataDir,
+		needsClear:        true,
+		showLanding:       true,
+		landingCursor:     0,
+		landingQuitIndex:  6,
+		UpdateAvailable:   false,
+		LatestVersion:     "",
+	}
+}
+
+func detectSelfUpdateCapability() (bool, string) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return false, "could not determine executable path"
+	}
+	dir := filepath.Dir(exePath)
+	probe, err := os.CreateTemp(dir, ".metronous-self-update-check-*")
+	if err != nil {
+		msg := fmt.Sprintf("installed in %s without write permission", dir)
+		if !os.IsPermission(err) && !strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+			msg = fmt.Sprintf("cannot verify self-update permissions for %s", dir)
+		}
+		return false, msg
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
+	return true, ""
+}
+
+func (m AppModel) startSelfUpdate() tea.Cmd {
+	if !m.SelfUpdateAllowed {
+		hint := m.SelfUpdateHint
+		if hint == "" {
+			hint = "install location is not writable"
+		}
+		return func() tea.Msg {
+			return updateDoneMsg{msg: fmt.Sprintf("Update unavailable here: %s. Reinstall Metronous in ~/.local/bin or run a privileged update outside the dashboard.", hint), isError: true}
+		}
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return func() tea.Msg {
+			return updateDoneMsg{msg: "Error: could not find executable", isError: true}
+		}
+	}
+	return func() tea.Msg {
+		updateCmd := exec.Command(exePath, "self-update")
+		out, err := updateCmd.CombinedOutput()
+		outStr := strings.TrimSpace(string(out))
+		if err != nil {
+			return updateDoneMsg{msg: "Update failed: " + outStr, isError: true}
+		}
+		if strings.Contains(outStr, "Already up to date") {
+			return updateDoneMsg{msg: "Already up to date — no update needed.", isError: false}
+		}
+		return updateDoneMsg{msg: "Update complete! Restart the dashboard to use the new version.", isError: false}
 	}
 }
 
@@ -385,24 +444,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "u":
-			// Use absolute path to avoid PATH issues
-			exePath, err := os.Executable()
-			if err != nil {
-				m.StatusMsg = "Error: could not find executable"
-				return m, nil
-			}
-			return m, func() tea.Msg {
-				updateCmd := exec.Command(exePath, "self-update")
-				out, err := updateCmd.CombinedOutput()
-				outStr := strings.TrimSpace(string(out))
-				if err != nil {
-					return updateDoneMsg{msg: "Update failed: " + outStr, isError: true}
-				}
-				if strings.Contains(outStr, "Already up to date") {
-					return updateDoneMsg{msg: "Already up to date — no update needed.", isError: false}
-				}
-				return updateDoneMsg{msg: "Update complete! Restart the dashboard to use the new version.", isError: false}
-			}
+			return m, m.startSelfUpdate()
 
 		case "1":
 			// Pressing the key for the currently active tab should be a no-op
@@ -548,23 +590,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Update option (index 5).
 				if m.landingCursor == m.landingQuitIndex-1 {
-					exePath, err := os.Executable()
-					if err != nil {
-						m.StatusMsg = "Error: could not find executable"
-						return m, nil
-					}
-					return m, func() tea.Msg {
-						updateCmd := exec.Command(exePath, "self-update")
-						out, err := updateCmd.CombinedOutput()
-						outStr := strings.TrimSpace(string(out))
-						if err != nil {
-							return updateDoneMsg{msg: "Update failed: " + outStr, isError: true}
-						}
-						if strings.Contains(outStr, "Already up to date") {
-							return updateDoneMsg{msg: "Already up to date — no update needed.", isError: false}
-						}
-						return updateDoneMsg{msg: "Update complete! Restart the dashboard to use the new version.", isError: false}
-					}
+					return m, m.startSelfUpdate()
 				}
 				m.CurrentTab = Tab(m.landingCursor)
 				m.showLanding = false
@@ -690,8 +716,13 @@ func (m *AppModel) View() string {
 		bannerStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("yellow")).
 			Bold(true)
-		banner = bannerStyle.Render(fmt.Sprintf("Update available: %s (current: %s). Press 'u' to update.",
-			m.LatestVersion, m.CurrentVersion))
+		bannerText := fmt.Sprintf("Update available: %s (current: %s).", m.LatestVersion, m.CurrentVersion)
+		if m.SelfUpdateAllowed {
+			bannerText += " Press 'u' to update."
+		} else {
+			bannerText += " In-place update disabled for this install."
+		}
+		banner = bannerStyle.Render(bannerText)
 		banner += "\n"
 	}
 
@@ -699,8 +730,10 @@ func (m *AppModel) View() string {
 	var hint string
 	if m.showLanding {
 		hint = statusBarStyle.Render("1/2/3/4/5 or ↑/↓: select  Enter: open/quit  q: quit")
-	} else {
+	} else if m.SelfUpdateAllowed {
 		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs  u: update")
+	} else {
+		hint = statusBarStyle.Render("↑/↓: navigate  q: quit  1/2/3/4/5 or ←/→: switch tabs")
 	}
 
 	statusLine := ""
@@ -749,7 +782,11 @@ func (m *AppModel) renderLanding() string {
 	}
 	var updateStatus string
 	if m.UpdateAvailable {
-		updateStatus = fmt.Sprintf("Update  (%s available)", m.LatestVersion)
+		if m.SelfUpdateAllowed {
+			updateStatus = fmt.Sprintf("Update  (%s available)", m.LatestVersion)
+		} else {
+			updateStatus = fmt.Sprintf("Update  (%s available, manual install)", m.LatestVersion)
+		}
 	} else {
 		updateStatus = "Update  (up to date)"
 	}
@@ -770,12 +807,18 @@ func (m *AppModel) renderLanding() string {
 		if e.idx == m.landingCursor {
 			bullet = "▶"
 			if e.idx == 5 && m.UpdateAvailable {
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+				if m.SelfUpdateAllowed {
+					style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("226"))
+				} else {
+					style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("240"))
+				}
 			} else {
 				style = cursorStyle
 			}
 		} else if e.idx == 5 && m.UpdateAvailable {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+			if m.SelfUpdateAllowed {
+				style = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
+			}
 		}
 		menuLines = append(menuLines, style.Render(fmt.Sprintf("%s %s", bullet, e.name)))
 	}
