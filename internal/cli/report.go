@@ -3,15 +3,18 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kiosvantra/metronous/internal/exporting"
 	"github.com/kiosvantra/metronous/internal/store"
 	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
 )
@@ -42,6 +45,7 @@ Use --format=json for machine-readable output.`,
 		"Directory for SQLite databases (default: ~/.metronous/data)")
 
 	cmd.AddCommand(newReportSemanticCommand())
+	cmd.AddCommand(newReportExportCommand())
 
 	return cmd
 }
@@ -141,6 +145,86 @@ func printJSON(runs []store.BenchmarkRun) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+var ErrExportOptInRequired = errors.New("export is disabled by default; pass --allow-export to explicitly opt-in")
+
+func newReportExportCommand() *cobra.Command {
+	var agentID string
+	var dataDir string
+	var outPath string
+	var allowExport bool
+
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export sanitized benchmark + telemetry summary to a local JSON contract",
+		Long: `Export a sanitized, shareable JSON contract from local metronous data.
+
+Safety defaults:
+  - Export is disabled by default.
+  - No network transmission is performed.
+  - You must explicitly opt-in using --allow-export.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runReportExport(dataDir, agentID, outPath, allowExport)
+		},
+	}
+
+	cmd.Flags().StringVar(&agentID, "agent", "", "Filter export to a specific agent ID (optional)")
+	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(), "Directory for SQLite databases (default: ~/.metronous/data)")
+	cmd.Flags().StringVar(&outPath, "out", "", "Output path for exported JSON contract (required)")
+	cmd.Flags().BoolVar(&allowExport, "allow-export", false, "Explicit opt-in required to write export output")
+	_ = cmd.MarkFlagRequired("out")
+	return cmd
+}
+
+func runReportExport(dataDir, agentID, outPath string, allowExport bool) error {
+	if exporting.ExportDisabledByDefault() && !allowExport {
+		return ErrExportOptInRequired
+	}
+
+	benchmarkDBPath := filepath.Join(dataDir, "benchmark.db")
+	trackingDBPath := filepath.Join(dataDir, "tracking.db")
+
+	bs, err := sqlitestore.NewBenchmarkStore(benchmarkDBPath)
+	if err != nil {
+		return fmt.Errorf("open benchmark.db: %w", err)
+	}
+	defer func() { _ = bs.Close() }()
+
+	es, err := sqlitestore.NewEventStore(trackingDBPath)
+	if err != nil {
+		return fmt.Errorf("open tracking.db: %w", err)
+	}
+	defer func() { _ = es.Close() }()
+
+	ctx := context.Background()
+	runs, err := bs.GetRuns(ctx, agentID, 0)
+	if err != nil {
+		return fmt.Errorf("query benchmark runs: %w", err)
+	}
+	events, err := es.QueryEvents(ctx, store.EventQuery{AgentID: agentID})
+	if err != nil {
+		return fmt.Errorf("query tracking events: %w", err)
+	}
+
+	contract := exporting.BuildContract(time.Now().UTC(), runs, events, agentID)
+
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		return fmt.Errorf("create export directory: %w", err)
+	}
+	f, err := os.Create(outPath)
+	if err != nil {
+		return fmt.Errorf("create export file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(contract); err != nil {
+		return fmt.Errorf("write export contract: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "Export written: %s\n", outPath)
+	return nil
 }
 
 func newReportSemanticCommand() *cobra.Command {
