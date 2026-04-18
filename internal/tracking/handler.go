@@ -125,7 +125,7 @@ func validateIngestRequest(args map[string]interface{}) (*IngestRequest, error) 
 	}
 
 	if meta, ok := args["metadata"].(map[string]interface{}); ok {
-		req.Metadata = meta
+		req.Metadata = store.NormalizeMetadataSemanticPhase(meta)
 	}
 
 	return req, nil

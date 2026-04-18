@@ -464,6 +464,60 @@ type BenchmarkStore interface {
 	Close() error
 }
 
+// SemanticPhaseMetaKey is the canonical metadata key used for optional
+// SDD semantic phase tagging on ingest events.
+const SemanticPhaseMetaKey = "sdd_phase"
+
+var validSemanticPhases = map[string]struct{}{
+	"propose":   {},
+	"spec":      {},
+	"design":    {},
+	"implement": {},
+	"verify":    {},
+}
+
+// NormalizeSemanticPhase returns the canonical lowercase semantic phase and
+// whether it is one of the supported phase values.
+func NormalizeSemanticPhase(raw string) (string, bool) {
+	phase := strings.ToLower(strings.TrimSpace(raw))
+	if phase == "" {
+		return "", false
+	}
+	_, ok := validSemanticPhases[phase]
+	if !ok {
+		return "", false
+	}
+	return phase, true
+}
+
+// NormalizeMetadataSemanticPhase normalizes the optional semantic phase tag
+// (sdd_phase) in metadata while preserving backward compatibility.
+//
+// Behavior:
+//   - nil metadata => nil
+//   - missing/non-string phase key => unchanged metadata
+//   - known phase value => normalized to lowercase canonical form
+//   - unknown phase value => preserved unchanged (non-breaking)
+func NormalizeMetadataSemanticPhase(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata[SemanticPhaseMetaKey]
+	if !ok {
+		return metadata
+	}
+	phase, ok := raw.(string)
+	if !ok {
+		return metadata
+	}
+	normalized, valid := NormalizeSemanticPhase(phase)
+	if !valid {
+		return metadata
+	}
+	metadata[SemanticPhaseMetaKey] = normalized
+	return metadata
+}
+
 // MetadataFromJSON deserializes a JSON string into a metadata map.
 // Returns nil if the input is empty or invalid JSON.
 func MetadataFromJSON(raw string) map[string]interface{} {

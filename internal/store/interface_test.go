@@ -55,6 +55,63 @@ func TestEventMetadataFromJSONInvalid(t *testing.T) {
 	}
 }
 
+// TestNormalizeSemanticPhase verifies canonical normalization for known phases.
+func TestNormalizeSemanticPhase(t *testing.T) {
+	tests := []struct {
+		name  string
+		raw   string
+		want  string
+		valid bool
+	}{
+		{name: "design mixed case", raw: " DeSign ", want: "design", valid: true},
+		{name: "propose", raw: "propose", want: "propose", valid: true},
+		{name: "verify", raw: "VERIFY", want: "verify", valid: true},
+		{name: "unknown", raw: "review", want: "", valid: false},
+		{name: "empty", raw: "  ", want: "", valid: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := store.NormalizeSemanticPhase(tc.raw)
+			if ok != tc.valid {
+				t.Fatalf("valid mismatch: got %v, want %v", ok, tc.valid)
+			}
+			if got != tc.want {
+				t.Fatalf("phase mismatch: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeMetadataSemanticPhase verifies metadata tag normalization is additive and safe.
+func TestNormalizeMetadataSemanticPhase(t *testing.T) {
+	meta := map[string]interface{}{
+		"other":                    "keep",
+		store.SemanticPhaseMetaKey: " Implement ",
+	}
+	got := store.NormalizeMetadataSemanticPhase(meta)
+	if got == nil {
+		t.Fatal("NormalizeMetadataSemanticPhase returned nil")
+	}
+	if got["other"] != "keep" {
+		t.Fatalf("unexpected mutation on unrelated key: %v", got["other"])
+	}
+	if got[store.SemanticPhaseMetaKey] != "implement" {
+		t.Fatalf("phase was not normalized: got %v", got[store.SemanticPhaseMetaKey])
+	}
+}
+
+// TestNormalizeMetadataSemanticPhaseUnknownPreservesValue verifies unknown phase values are preserved.
+func TestNormalizeMetadataSemanticPhaseUnknownPreservesValue(t *testing.T) {
+	meta := map[string]interface{}{
+		store.SemanticPhaseMetaKey: "custom-phase",
+	}
+	got := store.NormalizeMetadataSemanticPhase(meta)
+	if got[store.SemanticPhaseMetaKey] != "custom-phase" {
+		t.Fatalf("unknown phase should be preserved, got %v", got[store.SemanticPhaseMetaKey])
+	}
+}
+
 // TestEventMetadataToJSONNil verifies that nil map returns empty string.
 func TestEventMetadataToJSONNil(t *testing.T) {
 	result := store.MetadataToJSON(nil)

@@ -168,6 +168,36 @@ func TestInsertQueryAndSummary(t *testing.T) {
 	}
 }
 
+// TestQueryEventsLegacyRowsWithoutMetadata verifies backward compatibility with
+// old rows where metadata is NULL/absent.
+func TestQueryEventsLegacyRowsWithoutMetadata(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := es.InsertEvent(ctx, store.Event{
+		AgentID:   "legacy-agent",
+		SessionID: "legacy-session",
+		EventType: "complete",
+		Model:     "claude-sonnet-4-5",
+		Timestamp: time.Now().UTC(),
+		// Metadata intentionally nil to simulate legacy/older rows
+	})
+	if err != nil {
+		t.Fatalf("InsertEvent legacy row: %v", err)
+	}
+
+	events, err := es.QueryEvents(ctx, store.EventQuery{AgentID: "legacy-agent"})
+	if err != nil {
+		t.Fatalf("QueryEvents legacy row: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 legacy event, got %d", len(events))
+	}
+	if events[0].Metadata != nil {
+		t.Fatalf("expected nil metadata for legacy row, got %v", events[0].Metadata)
+	}
+}
+
 // TestQueryEventsFiltersAndLimits verifies that EventQuery filters work correctly.
 func TestQueryEventsFiltersAndLimits(t *testing.T) {
 	es := newTestStore(t)

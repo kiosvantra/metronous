@@ -278,7 +278,10 @@ func TestIngestHandlerOptionalFieldsAreParsed(t *testing.T) {
 		"rework_count":      float64(1),
 		"tool_name":         "bash",
 		"tool_success":      true,
-		"metadata":          map[string]interface{}{"key": "value"},
+		"metadata": map[string]interface{}{
+			"key":                      "value",
+			store.SemanticPhaseMetaKey: " DeSign ",
+		},
 	})
 
 	req := mcp.CallToolRequest{
@@ -292,6 +295,17 @@ func TestIngestHandlerOptionalFieldsAreParsed(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("HandleIngest isError=true: %v", result.Content)
+	}
+
+	events, err := ms.QueryEvents(context.Background(), store.EventQuery{})
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 stored event, got %d", len(events))
+	}
+	if events[0].Metadata[store.SemanticPhaseMetaKey] != "design" {
+		t.Fatalf("semantic phase not normalized: got %v", events[0].Metadata[store.SemanticPhaseMetaKey])
 	}
 }
 
