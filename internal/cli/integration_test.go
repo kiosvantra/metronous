@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -347,7 +348,11 @@ func TestIngestHighThroughput(t *testing.T) {
 		return tracking.HandleIngest(ctx, req, queue)
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	timeout := 30 * time.Second
+	if runtime.GOOS == "windows" {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if err := srv.ServeStdio(ctx); err != nil && err != context.DeadlineExceeded {
