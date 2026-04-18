@@ -2,7 +2,10 @@ package cli
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +55,7 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 	goarch := runtime.GOARCH
 	filename := fmt.Sprintf("metronous_%s_%s_%s.tar.gz", versionNoV, goos, goarch)
 	downloadURL := fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/%s", latestTag, filename)
+	checksumsURL := releaseChecksumsURL(latestTag)
 
 	installPath, err := os.Executable()
 	if err != nil {
@@ -60,8 +64,8 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 	currentInstallPath := installPath
 	installPath = managedBinaryPath(installPath)
 
-	if err := downloadAndInstallBinary(downloadURL, installPath); err != nil {
-		return fmt.Errorf("failed to download update: %w", err)
+	if err := downloadAndInstallBinary(downloadURL, checksumsURL, filename, installPath); err != nil {
+		return fmt.Errorf("failed to download or verify update: %w", err)
 	}
 	if currentInstallPath != installPath {
 		fmt.Printf("  Migrated managed binary to %s\n", installPath)
@@ -200,26 +204,119 @@ func fetchLatestTag() (string, error) {
 	return tag, nil
 }
 
-// downloadAndInstallBinary downloads a .tar.gz asset, extracts the metronous
-// binary from it, and atomically replaces destPath.
-func downloadAndInstallBinary(url, destPath string) error {
+// downloadAndInstallBinary downloads a .tar.gz asset, verifies it against the
+// release checksums file, extracts the metronous binary from it, and atomically
+// replaces destPath.
+func downloadAndInstallBinary(url, checksumsURL, assetName, destPath string) error {
+	archivePath, archiveChecksum, err := downloadArchive(url)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(archivePath)
+
+	expectedChecksum, err := fetchExpectedChecksum(checksumsURL, assetName)
+	if err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
+	}
+	if !strings.EqualFold(expectedChecksum, archiveChecksum) {
+		return fmt.Errorf("checksum verification failed: checksum mismatch for %s", assetName)
+	}
+
+	if err := extractAndInstallBinary(archivePath, url, destPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func releaseChecksumsURL(tag string) string {
+	return fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/checksums.txt", tag)
+}
+
+func downloadArchive(url string) (archivePath string, checksum string, err error) {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		return "", "", fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
+		return "", "", fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
 	}
 
+	archiveFile, err := os.CreateTemp(os.TempDir(), "metronous-archive-*.tar.gz")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create archive temp file: %w", err)
+	}
+	archivePath = archiveFile.Name()
+	cleanup := true
+	defer func() {
+		_ = archiveFile.Close()
+		if cleanup {
+			_ = os.Remove(archivePath)
+		}
+	}()
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(archiveFile, h), resp.Body); err != nil {
+		return "", "", fmt.Errorf("failed to read download: %w", err)
+	}
+	checksum = hex.EncodeToString(h.Sum(nil))
+
+	if err := archiveFile.Close(); err != nil {
+		return "", "", fmt.Errorf("failed to flush archive temp file: %w", err)
+	}
+
+	cleanup = false
+	return archivePath, checksum, nil
+}
+
+func fetchExpectedChecksum(checksumsURL, assetName string) (string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(checksumsURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch checksums: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("failed to fetch checksums: HTTP %d from %s", resp.StatusCode, checksumsURL)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == assetName {
+			return fields[0], nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to read checksums: %w", err)
+	}
+	return "", fmt.Errorf("checksum for %s not found in checksums file", assetName)
+}
+
+func extractAndInstallBinary(archivePath, sourceURL, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return fmt.Errorf("failed to prepare install directory: %w", err)
 	}
 
-	// Decompress and extract binary from tar.gz
-	gzr, err := gzip.NewReader(resp.Body)
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open downloaded archive: %w", err)
+	}
+	defer archiveFile.Close()
+
+	// Decompress and extract binary from tar.gz.
+	gzr, err := gzip.NewReader(archiveFile)
 	if err != nil {
 		return fmt.Errorf("failed to read gzip stream: %w", err)
 	}
@@ -274,7 +371,7 @@ func downloadAndInstallBinary(url, destPath string) error {
 		return fmt.Errorf("failed to flush temp file: %w", err)
 	}
 	if !found {
-		return fmt.Errorf("binary %q not found in archive %s", binaryName, url)
+		return fmt.Errorf("binary %q not found in archive %s", binaryName, sourceURL)
 	}
 
 	if err := os.Chmod(tmpPath, 0755); err != nil {
