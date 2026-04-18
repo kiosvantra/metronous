@@ -156,6 +156,7 @@ func newReportExportCommand() *cobra.Command {
 	var dataDir string
 	var outPath string
 	var allowExport bool
+	var dryRun bool
 
 	cmd := &cobra.Command{
 		Use:   "export",
@@ -167,7 +168,7 @@ Safety defaults:
   - No network transmission is performed.
   - You must explicitly opt-in using --allow-export.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runReportExport(dataDir, agentID, outPath, allowExport)
+			return runReportExport(dataDir, agentID, outPath, allowExport, dryRun)
 		},
 	}
 
@@ -175,12 +176,14 @@ Safety defaults:
 	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(), "Directory for SQLite databases (default: ~/.metronous/data)")
 	cmd.Flags().StringVar(&outPath, "out", "", "Output path for exported JSON contract (required)")
 	cmd.Flags().BoolVar(&allowExport, "allow-export", false, "Explicit opt-in required to write export output")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview sanitized sharing contract without writing output")
 	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }
 
-func runReportExport(dataDir, agentID, outPath string, allowExport bool) error {
+func runReportExport(dataDir, agentID, outPath string, allowExport, dryRun bool) error {
 	if exporting.ExportDisabledByDefault() && !allowExport {
+		_ = appendSharingAudit(dataDir, "blocked", "opt_in_required")
 		return ErrExportOptInRequired
 	}
 
@@ -210,6 +213,21 @@ func runReportExport(dataDir, agentID, outPath string, allowExport bool) error {
 	}
 
 	contract := exporting.BuildContract(time.Now().UTC(), runs, events, agentID)
+	if err := exporting.ValidateContract(contract); err != nil {
+		_ = appendSharingAudit(dataDir, "rejected", "contract_validation_failed")
+		return fmt.Errorf("validate export contract: %w", err)
+	}
+
+	if dryRun {
+		fmt.Fprintln(os.Stdout, "dry-run preview (no file written, no network send):")
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(contract); err != nil {
+			return fmt.Errorf("render dry-run preview: %w", err)
+		}
+		_ = appendSharingAudit(dataDir, "preview", "dry_run")
+		return nil
+	}
 
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return fmt.Errorf("create export directory: %w", err)
@@ -225,8 +243,33 @@ func runReportExport(dataDir, agentID, outPath string, allowExport bool) error {
 	if err := enc.Encode(contract); err != nil {
 		return fmt.Errorf("write export contract: %w", err)
 	}
+	_ = appendSharingAudit(dataDir, "written", outPath)
 	fmt.Fprintf(os.Stdout, "Export written: %s\n", outPath)
 	return nil
+}
+
+func appendSharingAudit(dataDir, action, detail string) error {
+	auditPath := filepath.Join(dataDir, "sharing_audit.log")
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	payload := map[string]string{
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"action":    action,
+		"detail":    detail,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(b, '\n'))
+	return err
 }
 
 func newReportArchiveUsageCommand() *cobra.Command {

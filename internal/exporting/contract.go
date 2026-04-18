@@ -3,6 +3,8 @@ package exporting
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -21,8 +23,16 @@ type Contract struct {
 	SchemaVersion        string                 `json:"schema_version"`
 	GeneratedAt          string                 `json:"generated_at"`
 	AgentFilter          string                 `json:"agent_filter,omitempty"`
+	Provenance           ProvenanceContract     `json:"provenance"`
 	BenchmarkRuns        []BenchmarkRunContract `json:"benchmark_runs"`
 	SemanticPhaseSummary []PhaseSummaryContract `json:"semantic_phase_summary"`
+}
+
+type ProvenanceContract struct {
+	Contract            string `json:"contract"`
+	ConsentMode         string `json:"consent_mode"`
+	Egress              string `json:"egress"`
+	SanitizationProfile string `json:"sanitization_profile"`
 }
 
 type BenchmarkRunContract struct {
@@ -52,9 +62,15 @@ type PhaseSummaryContract struct {
 
 func BuildContract(now time.Time, runs []store.BenchmarkRun, events []store.Event, agentFilter string) Contract {
 	contract := Contract{
-		SchemaVersion:        SchemaVersion,
-		GeneratedAt:          now.UTC().Format(time.RFC3339),
-		AgentFilter:          strings.TrimSpace(agentFilter),
+		SchemaVersion: SchemaVersion,
+		GeneratedAt:   now.UTC().Format(time.RFC3339),
+		AgentFilter:   strings.TrimSpace(agentFilter),
+		Provenance: ProvenanceContract{
+			Contract:            "sharing-leaderboard",
+			ConsentMode:         "explicit-opt-in",
+			Egress:              "local-file-only",
+			SanitizationProfile: "sanitized-v1",
+		},
 		BenchmarkRuns:        make([]BenchmarkRunContract, 0, len(runs)),
 		SemanticPhaseSummary: buildPhaseSummary(events),
 	}
@@ -174,4 +190,44 @@ func buildPhaseSummary(events []store.Event) []PhaseSummaryContract {
 		out = append(out, row)
 	}
 	return out
+}
+
+// ValidateContract enforces the sanitized sharing contract before any submission/write path.
+func ValidateContract(contract Contract) error {
+	if strings.TrimSpace(contract.SchemaVersion) == "" {
+		return errors.New("missing schema_version")
+	}
+	if contract.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("unsupported schema_version %q", contract.SchemaVersion)
+	}
+	if _, err := time.Parse(time.RFC3339, contract.GeneratedAt); err != nil {
+		return fmt.Errorf("invalid generated_at: %w", err)
+	}
+	if !isValidProvenance(contract.Provenance) {
+		return errors.New("invalid provenance")
+	}
+	for i, run := range contract.BenchmarkRuns {
+		if !strings.HasPrefix(run.AgentID, "anon-") {
+			return fmt.Errorf("benchmark_runs[%d].agent_id must be sanitized", i)
+		}
+		if strings.TrimSpace(run.DecisionReason) != "" {
+			return fmt.Errorf("benchmark_runs[%d].decision_reason must be omitted", i)
+		}
+		if strings.TrimSpace(run.ArtifactPath) != "" {
+			return fmt.Errorf("benchmark_runs[%d].artifact_path must be omitted", i)
+		}
+	}
+	for i, row := range contract.SemanticPhaseSummary {
+		if sanitizePhase(row.Phase) != row.Phase {
+			return fmt.Errorf("semantic_phase_summary[%d].phase is not normalized", i)
+		}
+	}
+	return nil
+}
+
+func isValidProvenance(p ProvenanceContract) bool {
+	return p.Contract == "sharing-leaderboard" &&
+		p.ConsentMode == "explicit-opt-in" &&
+		p.Egress == "local-file-only" &&
+		p.SanitizationProfile == "sanitized-v1"
 }

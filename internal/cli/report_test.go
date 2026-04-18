@@ -444,6 +444,29 @@ func TestReportExportWritesSanitizedContractWhenOptedIn(t *testing.T) {
 	}
 }
 
+func TestReportExportDryRunPreviewsAndDoesNotWriteFile(t *testing.T) {
+	tmpDir := setupReportTest(t, []store.BenchmarkRun{sampleBenchmarkRun("agent-sensitive", store.VerdictSwitch)})
+	trackingDir := setupSemanticReportTest(t, nil)
+	if err := os.Rename(filepath.Join(trackingDir, "tracking.db"), filepath.Join(tmpDir, "tracking.db")); err != nil {
+		t.Fatalf("move tracking.db fixture: %v", err)
+	}
+
+	outPath := filepath.Join(tmpDir, "exports", "contract.json")
+	output, err := runReportCmd(t, []string{"export", "--data-dir", tmpDir, "--out", outPath, "--allow-export", "--dry-run"})
+	if err != nil {
+		t.Fatalf("report export dry-run command: %v\nstdout: %s", err, output)
+	}
+	if !strings.Contains(output, "dry-run preview") {
+		t.Fatalf("expected dry-run preview marker in output, got: %s", output)
+	}
+	if !strings.Contains(output, "\"schema_version\"") {
+		t.Fatalf("expected contract json in dry-run output, got: %s", output)
+	}
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Fatalf("dry-run must not write export file, statErr=%v", statErr)
+	}
+}
+
 func TestReportArchiveUsageCommandShowsStageMetrics(t *testing.T) {
 	home := t.TempDir()
 	dataDir := filepath.Join(home, "data")
