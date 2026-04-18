@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func setupReportTest(t *testing.T, runs []store.BenchmarkRun) string {
 	t.Helper()
 
 	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/benchmark.db"
+	dbPath := filepath.Join(tmpDir, "benchmark.db")
 
 	bs, err := sqlitestore.NewBenchmarkStore(dbPath)
 	if err != nil {
@@ -57,6 +58,28 @@ func sampleBenchmarkRun(agentID string, verdict store.VerdictType) store.Benchma
 		RecommendedModel: "claude-haiku",
 		DecisionReason:   "All thresholds passed",
 	}
+}
+
+func setupSemanticReportTest(t *testing.T, events []store.Event) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "tracking.db")
+
+	es, err := sqlitestore.NewEventStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewEventStore: %v", err)
+	}
+	defer func() { _ = es.Close() }()
+
+	ctx := context.Background()
+	for _, ev := range events {
+		if _, err := es.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+	}
+
+	return tmpDir
 }
 
 // runReportCmd executes the report command with given args, capturing stdout.
@@ -192,5 +215,125 @@ func TestReportCommandAgentNoRunsMessage(t *testing.T) {
 
 	if !strings.Contains(output, "No benchmark runs found for agent") {
 		t.Errorf("expected agent-specific no-runs message, got:\n%s", output)
+	}
+}
+
+func TestReportSemanticCommandSummarizesTaggedAndUntagged(t *testing.T) {
+	durationA := 100
+	durationB := 200
+	costA := 0.10
+	costB := 0.20
+	qualityA := 0.90
+	qualityB := 0.80
+
+	events := []store.Event{
+		{
+			AgentID:      "sdd-agent",
+			SessionID:    "sess-1",
+			EventType:    "complete",
+			Model:        "claude-sonnet-4-5",
+			Timestamp:    time.Now().UTC(),
+			DurationMs:   &durationA,
+			CostUSD:      &costA,
+			QualityScore: &qualityA,
+			Metadata: map[string]interface{}{
+				store.SemanticPhaseMetaKey: "design",
+			},
+		},
+		{
+			AgentID:      "sdd-agent",
+			SessionID:    "sess-2",
+			EventType:    "complete",
+			Model:        "claude-sonnet-4-5",
+			Timestamp:    time.Now().UTC().Add(time.Second),
+			DurationMs:   &durationB,
+			CostUSD:      &costB,
+			QualityScore: &qualityB,
+			Metadata: map[string]interface{}{
+				store.SemanticPhaseMetaKey: "implement",
+			},
+		},
+		{
+			AgentID:    "sdd-agent",
+			SessionID:  "sess-3",
+			EventType:  "complete",
+			Model:      "claude-sonnet-4-5",
+			Timestamp:  time.Now().UTC().Add(2 * time.Second),
+			DurationMs: &durationA,
+			CostUSD:    &costA,
+			Metadata:   nil,
+		},
+	}
+	tmpDir := setupSemanticReportTest(t, events)
+
+	output, err := runReportCmd(t, []string{"semantic", "--data-dir", tmpDir})
+	if err != nil {
+		t.Fatalf("report semantic command: %v", err)
+	}
+
+	if !strings.Contains(output, "design") {
+		t.Errorf("output should contain design phase, got:\n%s", output)
+	}
+	if !strings.Contains(output, "implement") {
+		t.Errorf("output should contain implement phase, got:\n%s", output)
+	}
+	if !strings.Contains(output, "untagged") {
+		t.Errorf("output should contain untagged phase, got:\n%s", output)
+	}
+}
+
+func TestReportSemanticCommandJSONIncludesMissingTagsAsUntagged(t *testing.T) {
+	duration := 120
+	cost := 0.15
+
+	events := []store.Event{
+		{
+			AgentID:    "phase-agent",
+			SessionID:  "sess-1",
+			EventType:  "tool_call",
+			Model:      "claude-sonnet-4-5",
+			Timestamp:  time.Now().UTC(),
+			DurationMs: &duration,
+			CostUSD:    &cost,
+			Metadata: map[string]interface{}{
+				store.SemanticPhaseMetaKey: "verify",
+			},
+		},
+		{
+			AgentID:    "phase-agent",
+			SessionID:  "sess-2",
+			EventType:  "tool_call",
+			Model:      "claude-sonnet-4-5",
+			Timestamp:  time.Now().UTC().Add(time.Second),
+			DurationMs: &duration,
+			CostUSD:    &cost,
+		},
+	}
+	tmpDir := setupSemanticReportTest(t, events)
+
+	output, err := runReportCmd(t, []string{"semantic", "--data-dir", tmpDir, "--agent", "phase-agent", "--format", "json"})
+	if err != nil {
+		t.Fatalf("report semantic command: %v", err)
+	}
+
+	var result []map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &result); err != nil {
+		t.Fatalf("output is not valid JSON: %v\nOutput:\n%s", err, output)
+	}
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 summary rows, got %d", len(result))
+	}
+
+	phases := map[string]bool{}
+	for _, row := range result {
+		phase, _ := row["phase"].(string)
+		phases[phase] = true
+	}
+	if !phases["verify"] {
+		t.Fatalf("expected verify phase in JSON output, got %+v", result)
+	}
+	if !phases["untagged"] {
+		t.Fatalf("expected untagged phase in JSON output, got %+v", result)
 	}
 }

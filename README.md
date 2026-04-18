@@ -211,6 +211,19 @@ Key behaviors:
 METRONOUS_DATA_DIR=~/.metronous/data go run cmd/run-benchmark/main.go
 ```
 
+### Offline semantic phase report (local-only)
+
+```bash
+# Summarize telemetry by semantic phase tag (sdd_phase)
+metronous report semantic --data-dir ~/.metronous/data
+
+# Optional: filter by agent and output JSON
+metronous report semantic --agent sdd-apply --format json
+```
+
+This command is local-only: it reads `tracking.db` on your machine and performs offline aggregation.
+No report data is sent to remote services.
+
 ## Data directory
 
 All data lives in `~/.metronous/`:

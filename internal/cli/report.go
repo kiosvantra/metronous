@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -39,6 +40,8 @@ Use --format=json for machine-readable output.`,
 		"Output format: table or json")
 	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(),
 		"Directory for SQLite databases (default: ~/.metronous/data)")
+
+	cmd.AddCommand(newReportSemanticCommand())
 
 	return cmd
 }
@@ -138,4 +141,162 @@ func printJSON(runs []store.BenchmarkRun) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+func newReportSemanticCommand() *cobra.Command {
+	var agentID string
+	var format string
+	var dataDir string
+
+	cmd := &cobra.Command{
+		Use:   "semantic",
+		Short: "Summarize local telemetry by semantic phase",
+		Long: `Summarize local telemetry from tracking.db by semantic phase tag (sdd_phase).
+
+This command is fully local/offline and reads only your local SQLite database.
+No telemetry is sent over the network.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSemanticReport(dataDir, agentID, format)
+		},
+	}
+
+	cmd.Flags().StringVar(&agentID, "agent", "", "Filter report to a specific agent ID (optional)")
+	cmd.Flags().StringVar(&format, "format", "table", "Output format: table or json")
+	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(), "Directory for SQLite databases (default: ~/.metronous/data)")
+	return cmd
+}
+
+type semanticPhaseSummary struct {
+	Phase         string  `json:"phase"`
+	Events        int     `json:"events"`
+	AvgDurationMs float64 `json:"avg_duration_ms"`
+	AvgQuality    float64 `json:"avg_quality"`
+	TotalCostUSD  float64 `json:"total_cost_usd"`
+}
+
+func runSemanticReport(dataDir, agentID, format string) error {
+	trackingDBPath := filepath.Join(dataDir, "tracking.db")
+	es, err := sqlitestore.NewEventStore(trackingDBPath)
+	if err != nil {
+		return fmt.Errorf("open tracking.db: %w", err)
+	}
+	defer func() { _ = es.Close() }()
+
+	events, err := es.QueryEvents(context.Background(), store.EventQuery{AgentID: agentID})
+	if err != nil {
+		return fmt.Errorf("query tracking events: %w", err)
+	}
+
+	summaries := buildSemanticPhaseSummaries(events)
+	if len(summaries) == 0 {
+		if agentID != "" {
+			fmt.Fprintf(os.Stdout, "No tracking events found for agent %q.\n", agentID)
+		} else {
+			fmt.Fprintln(os.Stdout, "No tracking events found.")
+		}
+		return nil
+	}
+
+	switch strings.ToLower(format) {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(summaries)
+	default:
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "PHASE\tEVENTS\tAVG_DURATION_MS\tAVG_QUALITY\tTOTAL_COST_USD")
+		fmt.Fprintln(w, "─────\t──────\t───────────────\t───────────\t──────────────")
+		for _, row := range summaries {
+			fmt.Fprintf(w, "%s\t%d\t%.2f\t%.3f\t%.4f\n", row.Phase, row.Events, row.AvgDurationMs, row.AvgQuality, row.TotalCostUSD)
+		}
+		return w.Flush()
+	}
+}
+
+func buildSemanticPhaseSummaries(events []store.Event) []semanticPhaseSummary {
+	type agg struct {
+		events      int
+		durationSum float64
+		durationN   int
+		qualitySum  float64
+		qualityN    int
+		costSum     float64
+	}
+
+	byPhase := make(map[string]*agg)
+	for _, ev := range events {
+		phase := semanticPhaseFromMetadata(ev.Metadata)
+		if _, ok := byPhase[phase]; !ok {
+			byPhase[phase] = &agg{}
+		}
+		a := byPhase[phase]
+		a.events++
+		if ev.DurationMs != nil {
+			a.durationSum += float64(*ev.DurationMs)
+			a.durationN++
+		}
+		if ev.QualityScore != nil {
+			a.qualitySum += *ev.QualityScore
+			a.qualityN++
+		}
+		if ev.CostUSD != nil {
+			a.costSum += *ev.CostUSD
+		}
+	}
+
+	phases := make([]string, 0, len(byPhase))
+	for phase := range byPhase {
+		phases = append(phases, phase)
+	}
+	sort.Slice(phases, func(i, j int) bool {
+		return semanticPhaseSortKey(phases[i]) < semanticPhaseSortKey(phases[j])
+	})
+
+	out := make([]semanticPhaseSummary, 0, len(phases))
+	for _, phase := range phases {
+		a := byPhase[phase]
+		row := semanticPhaseSummary{Phase: phase, Events: a.events, TotalCostUSD: a.costSum}
+		if a.durationN > 0 {
+			row.AvgDurationMs = a.durationSum / float64(a.durationN)
+		}
+		if a.qualityN > 0 {
+			row.AvgQuality = a.qualitySum / float64(a.qualityN)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func semanticPhaseFromMetadata(metadata map[string]interface{}) string {
+	if metadata == nil {
+		return "untagged"
+	}
+	raw, ok := metadata[store.SemanticPhaseMetaKey]
+	if !ok {
+		return "untagged"
+	}
+	phase, ok := raw.(string)
+	if !ok {
+		return "untagged"
+	}
+	phase = strings.ToLower(strings.TrimSpace(phase))
+	if phase == "" {
+		return "untagged"
+	}
+	return phase
+}
+
+func semanticPhaseSortKey(phase string) string {
+	order := map[string]int{
+		"propose":   0,
+		"spec":      1,
+		"design":    2,
+		"implement": 3,
+		"verify":    4,
+		"untagged":  5,
+	}
+	if rank, ok := order[phase]; ok {
+		return fmt.Sprintf("%02d-%s", rank, phase)
+	}
+	return fmt.Sprintf("99-%s", phase)
 }
