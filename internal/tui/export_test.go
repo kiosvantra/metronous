@@ -209,29 +209,6 @@ func TrendDirection(verdicts []string) string {
 	return trendDirection(verdicts)
 }
 
-// FormatBenchmarkRowForTest exposes formatBenchmarkRow for testing.
-func FormatBenchmarkRowForTest(run store.BenchmarkRun, agentType string, pricing map[string]float64) []string {
-	return formatBenchmarkRow(run, agentType, pricing)
-}
-
-// BenchColNames exposes benchColNames for index verification.
-func BenchColNames() []string { return benchColNames }
-
-// BenchColWidths exposes benchColWidths for index verification.
-func BenchColWidths() []int { return benchColWidths }
-
-// VerdictColIdxForTest exposes the verdict column index.
-const VerdictColIdxForTest = verdictColIdx
-
-// ScoreColIdx is the expected index of the Score column.
-const ScoreColIdx = 3
-
-// GetBenchmarkComparing returns whether comparison mode is active.
-func GetBenchmarkComparing(m BenchmarkModel) bool { return m.comparing }
-
-// GetBenchmarkComparisonResult returns the ranked comparison runs.
-func GetBenchmarkComparisonResult(m BenchmarkModel) interface{} { return m.comparisonRuns }
-
 // GetBenchmarkCycleIndex returns the current cycleIndex for tests.
 func GetBenchmarkCycleIndex(m BenchmarkModel) int {
 	return m.cycleIndex

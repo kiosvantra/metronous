@@ -14,12 +14,6 @@
     "max_error_rate": 0.30,
     "max_cost_spike_multiplier": 3.0
   },
-  "score_weights": {
-    "accuracy": 0.40,
-    "latency": 0.20,
-    "tool_success_rate": 0.20,
-    "roi_score": 0.20
-  },
   "per_agent": {},
   "model_pricing": {
     "note": "Output price per 1M tokens in USD. A value of 0 means the model is free — ROI/cost checks are skipped. Update when prices change.",

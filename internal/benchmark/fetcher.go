@@ -212,18 +212,6 @@ func AggregateMetrics(logger *zap.Logger, agentID string, events []store.Event) 
 	return m
 }
 
-// GroupEventsByModel partitions events into separate slices keyed by model.
-// This enables per-model metric computation instead of mixing all models
-// together and picking a "dominant" one.
-func GroupEventsByModel(events []store.Event) map[string][]store.Event {
-	groups := make(map[string][]store.Event)
-	for _, e := range events {
-		normalized := NormalizeModelName(e.Model)
-		groups[normalized] = append(groups[normalized], e)
-	}
-	return groups
-}
-
 // dominantModel returns the model with the highest event count.
 func dominantModel(counts map[string]int) string {
 	var best string

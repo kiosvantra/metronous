@@ -18,6 +18,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/kiosvantra/metronous/internal/mcp"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
@@ -276,7 +277,7 @@ func runMCPShim(in io.Reader, out io.Writer) error {
 				Result: map[string]interface{}{
 					"protocolVersion": "2024-11-05",
 					"capabilities":    map[string]interface{}{"tools": map[string]interface{}{"listChanged": false}},
-					"serverInfo":      map[string]interface{}{"name": "metronous", "version": "0.9.0"},
+					"serverInfo":      map[string]interface{}{"name": mcp.ServerName, "version": mcp.ServerVersion},
 				},
 			})
 

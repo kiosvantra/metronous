@@ -93,29 +93,11 @@ func TestVerdictNoSwitchLowToolRate(t *testing.T) {
 func TestVerdictSwitchLowROI(t *testing.T) {
 	defaults := config.DefaultThresholdValues()
 	m := goodMetrics("agent-a")
-	m.TotalCostUSD = 2.0
 	m.ROIScore = 0.02 // Below MinROIScore=0.05
 
 	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
 	if vt != store.VerdictSwitch {
 		t.Errorf("expected VerdictSwitch, got %s", vt)
-	}
-}
-
-// TestVerdictKeepWhenCostMissingAndLowROI verifies that ROI is ignored when
-// TotalCostUSD==0 (cost data unreliable), so low ROIScore should not force a SWITCH.
-func TestVerdictKeepWhenCostMissingAndLowROI(t *testing.T) {
-	defaults := config.DefaultThresholdValues()
-	m := goodMetrics("agent-a")
-	m.TotalCostUSD = 0
-	m.ROIScore = 0.02 // would fail if ROI were considered
-	m.Accuracy = 0.92
-	m.P95LatencyMs = 15000
-	m.ToolSuccessRate = 0.95
-
-	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
-	if vt != store.VerdictKeep {
-		t.Errorf("expected VerdictKeep, got %s", vt)
 	}
 }
 
@@ -176,7 +158,6 @@ func TestVerdictTableDriven(t *testing.T) {
 		// tool_success_rate no longer triggers SWITCH — always 1.0 in practice.
 		{"no switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictKeep},
 		{"switch low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01 }, store.VerdictSwitch},
-		{"keep low roi when cost missing", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01; m.TotalCostUSD = 0 }, store.VerdictKeep},
 	}
 
 	for _, tc := range tests {
@@ -285,62 +266,6 @@ func TestLoadThresholdsNotFound(t *testing.T) {
 	_, err := decision.LoadThresholds("/nonexistent/path/thresholds.json")
 	if err == nil {
 		t.Error("expected error for missing file, got nil")
-	}
-}
-
-// TestDecisionEngine_ScoreWeights_UsesConfigWhenPresent verifies that ScoreWeights()
-// returns the configured weights when ScoreWeights.Accuracy is set.
-func TestDecisionEngine_ScoreWeights_UsesConfigWhenPresent(t *testing.T) {
-	thresholds := config.DefaultThresholdValues()
-	thresholds.ScoreWeights = config.ScoreWeights{
-		Accuracy: 0.60, Latency: 0.10, ToolSuccessRate: 0.20, ROIScore: 0.10,
-	}
-	engine := decision.NewDecisionEngine(&thresholds)
-
-	got := engine.ScoreWeights()
-	if got.Accuracy != 0.60 {
-		t.Errorf("ScoreWeights().Accuracy = %v, want 0.60", got.Accuracy)
-	}
-}
-
-// TestDecisionEngine_ScoreWeights_FallsBackToDefault verifies that ScoreWeights()
-// returns DefaultScoreWeights() when the config ScoreWeights is zero-valued.
-func TestDecisionEngine_ScoreWeights_FallsBackToDefault(t *testing.T) {
-	thresholds := config.DefaultThresholdValues()
-	thresholds.ScoreWeights = config.ScoreWeights{} // zero → fall back to defaults
-	engine := decision.NewDecisionEngine(&thresholds)
-
-	got := engine.ScoreWeights()
-	defaults := config.DefaultScoreWeights()
-	if got.Accuracy != defaults.Accuracy {
-		t.Errorf("ScoreWeights().Accuracy = %v, want %v (default)", got.Accuracy, defaults.Accuracy)
-	}
-}
-
-// TestDecisionEngine_EffectiveMaxLatencyP95_Global verifies the global default is returned
-// when no per-agent override exists.
-func TestDecisionEngine_EffectiveMaxLatencyP95_Global(t *testing.T) {
-	thresholds := config.DefaultThresholdValues()
-	engine := decision.NewDecisionEngine(&thresholds)
-
-	got := engine.EffectiveMaxLatencyP95("unknown-agent")
-	if got != thresholds.Defaults.MaxLatencyP95Ms {
-		t.Errorf("EffectiveMaxLatencyP95 = %d, want %d", got, thresholds.Defaults.MaxLatencyP95Ms)
-	}
-}
-
-// TestDecisionEngine_EffectiveMaxLatencyP95_PerAgent verifies that the per-agent override is returned.
-func TestDecisionEngine_EffectiveMaxLatencyP95_PerAgent(t *testing.T) {
-	thresholds := config.DefaultThresholdValues()
-	maxLat := 5000
-	thresholds.PerAgent["fast-agent"] = config.AgentThresholds{
-		MaxLatencyP95Ms: &maxLat,
-	}
-	engine := decision.NewDecisionEngine(&thresholds)
-
-	got := engine.EffectiveMaxLatencyP95("fast-agent")
-	if got != 5000 {
-		t.Errorf("EffectiveMaxLatencyP95(fast-agent) = %d, want 5000", got)
 	}
 }
 
