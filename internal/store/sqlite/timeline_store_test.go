@@ -152,6 +152,50 @@ func TestTimelineStoreAckCompletedMarksHandoffCompleted(t *testing.T) {
 	}
 }
 
+func TestTimelineStoreRejectsAckWithoutExistingHandoff(t *testing.T) {
+	ctx := context.Background()
+	store := newTimelineStore(t)
+	now := time.Now().UTC()
+	if err := store.EnsureConversation(ctx, timeline.Conversation{ID: "conv-1", Title: "Test", Kind: "igris_beru", Status: timeline.ConversationStatusActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertAck(ctx, timeline.TaskAck{ConversationID: "conv-1", HandoffID: "missing", AckAgentID: "BERU", State: timeline.AckStateAccepted, CreatedAt: now}); err == nil {
+		t.Fatal("expected missing handoff error")
+	}
+	items, err := store.ListTimelineItems(ctx, timeline.TimelineQuery{ConversationID: "conv-1", Kind: timeline.KindAck, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no ack items, got %d", len(items))
+	}
+}
+
+func TestTimelineStoreRejectsAckWithWrongConversation(t *testing.T) {
+	ctx := context.Background()
+	store := newTimelineStore(t)
+	now := time.Now().UTC()
+	for _, id := range []string{"conv-1", "conv-2"} {
+		if err := store.EnsureConversation(ctx, timeline.Conversation{ID: id, Title: "Test", Kind: "igris_beru", Status: timeline.ConversationStatusActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handoff, err := store.InsertHandoff(ctx, timeline.TaskHandoff{ConversationID: "conv-1", FromAgentID: "IGRIS", ToAgentID: "BERU", TaskKey: "task-1", Title: "Title", Body: "Body", CreatedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertAck(ctx, timeline.TaskAck{ConversationID: "conv-2", HandoffID: handoff.ID, AckAgentID: "BERU", State: timeline.AckStateAccepted, CreatedAt: now}); err == nil {
+		t.Fatal("expected conversation mismatch error")
+	}
+	items, err := store.ListTimelineItems(ctx, timeline.TimelineQuery{ConversationID: "conv-2", Kind: timeline.KindAck, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no ack items, got %d", len(items))
+	}
+}
+
 func TestTimelineStoreWithRealFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "timeline.db")

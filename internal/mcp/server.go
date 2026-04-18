@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -382,9 +383,9 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	s.registerRoutes(mux)
 
 	httpSrv := &http.Server{
-		Handler:      mux,
+		Handler:      withPerRouteWriteDeadline(mux, 5*time.Second),
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		WriteTimeout: 0,
 	}
 
 	go func() {
@@ -467,9 +468,9 @@ func (s *Server) ServeDaemon(outerCtx context.Context) error {
 	s.registerRoutes(mux)
 
 	httpSrv := &http.Server{
-		Handler:      mux,
+		Handler:      withPerRouteWriteDeadline(mux, 15*time.Second),
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 0,
 	}
 
 	serveDone := make(chan error, 1)
@@ -504,6 +505,23 @@ type healthResponse struct {
 	Status  string `json:"status"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
+}
+
+func withPerRouteWriteDeadline(next http.Handler, timeout time.Duration) http.Handler {
+	if next == nil || timeout <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		deadline := time.Now().Add(timeout)
+		if r.URL.Path == "/api/timeline/stream" {
+			deadline = time.Time{}
+		}
+		if err := controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			log.Printf("metronous: set write deadline for %s: %v", r.URL.Path, err)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // healthHandler handles GET /health and GET /status requests.

@@ -18,7 +18,6 @@ Metronous now ships a minimal portal backed by `timeline.db`.
 ```yaml
 server:
   listen_address: "127.0.0.1:0"
-  public_base_url: ""
   enable_timeline_lan: false
 ```
 
@@ -33,6 +32,8 @@ server:
 ```
 
 Without `enable_timeline_lan: true`, Metronous falls back to loopback binding even if `listen_address` is broader.
+
+When LAN access is enabled, `GET /timeline`, `GET /api/timeline/conversations`, `GET /api/timeline/items`, `GET /api/timeline/messages`, and `GET /api/timeline/stream` are readable by anything that can reach the bound socket. Only ingest POSTs use `X-Metronous-Auth`.
 
 ## Seed a conversation
 

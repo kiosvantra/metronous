@@ -173,7 +173,6 @@ type schedulerConfig struct {
 
 type networkConfig struct {
 	ListenAddress     string `yaml:"listen_address"`
-	PublicBaseURL     string `yaml:"public_base_url"`
 	EnableTimelineLAN bool   `yaml:"enable_timeline_lan"`
 }
 

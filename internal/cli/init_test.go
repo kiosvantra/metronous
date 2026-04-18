@@ -94,6 +94,9 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 	if !strings.Contains(configStr, "listen_address: \"127.0.0.1:0\"") {
 		t.Fatalf("config.yaml must default listen_address to loopback ephemeral")
 	}
+	if strings.Contains(configStr, "public_base_url") {
+		t.Fatalf("config.yaml must not include removed server.public_base_url")
+	}
 	if !strings.Contains(configStr, "enabled: false") {
 		t.Fatalf("config.yaml must default archive.enabled to false")
 	}

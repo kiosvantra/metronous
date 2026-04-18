@@ -15,57 +15,77 @@ type Store interface {
 	InsertMessage(ctx context.Context, msg Message) (Message, error)
 	InsertHandoff(ctx context.Context, handoff TaskHandoff) (TaskHandoff, error)
 	InsertAck(ctx context.Context, ack TaskAck) (TaskAck, error)
+	GetHandoff(ctx context.Context, handoffID string) (TaskHandoff, error)
 	ListConversations(ctx context.Context) ([]ConversationSummary, error)
 	ListMessages(ctx context.Context, query MessageQuery) ([]Message, error)
 	ListTimelineItems(ctx context.Context, query TimelineQuery) ([]TimelineItem, error)
 }
 
+type brokerSubscriber struct {
+	mu     sync.Mutex
+	ch     chan TimelineEvent
+	closed bool
+}
+
 type Broker struct {
 	mu   sync.RWMutex
-	subs map[string]map[chan TimelineEvent]struct{}
+	subs map[string]map[*brokerSubscriber]struct{}
 }
 
 func NewBroker() *Broker {
-	return &Broker{subs: make(map[string]map[chan TimelineEvent]struct{})}
+	return &Broker{subs: make(map[string]map[*brokerSubscriber]struct{})}
 }
 
 func (b *Broker) Subscribe(conversationID string, buffer int) (<-chan TimelineEvent, func()) {
 	if buffer <= 0 {
 		buffer = 1
 	}
-	ch := make(chan TimelineEvent, buffer)
+	sub := &brokerSubscriber{ch: make(chan TimelineEvent, buffer)}
 	b.mu.Lock()
 	if b.subs[conversationID] == nil {
-		b.subs[conversationID] = make(map[chan TimelineEvent]struct{})
+		b.subs[conversationID] = make(map[*brokerSubscriber]struct{})
 	}
-	b.subs[conversationID][ch] = struct{}{}
+	b.subs[conversationID][sub] = struct{}{}
 	b.mu.Unlock()
-	return ch, func() {
+	return sub.ch, func() {
 		b.mu.Lock()
-		defer b.mu.Unlock()
 		if subs := b.subs[conversationID]; subs != nil {
-			delete(subs, ch)
+			delete(subs, sub)
 			if len(subs) == 0 {
 				delete(b.subs, conversationID)
 			}
 		}
-		close(ch)
+		b.mu.Unlock()
+
+		sub.mu.Lock()
+		defer sub.mu.Unlock()
+		if sub.closed {
+			return
+		}
+		sub.closed = true
+		close(sub.ch)
 	}
 }
 
 func (b *Broker) Publish(event TimelineEvent) {
 	b.mu.RLock()
 	subs := b.subs[event.ConversationID]
-	channels := make([]chan TimelineEvent, 0, len(subs))
-	for ch := range subs {
-		channels = append(channels, ch)
+	targets := make([]*brokerSubscriber, 0, len(subs))
+	for sub := range subs {
+		targets = append(targets, sub)
 	}
 	b.mu.RUnlock()
-	for _, ch := range channels {
+	for _, sub := range targets {
+		sub.mu.Lock()
+		if sub.closed {
+			sub.mu.Unlock()
+			continue
+		}
 		select {
-		case ch <- event:
+		case sub.ch <- event:
 		default:
 		}
+		sub.mu.Unlock()
 	}
 }
 
@@ -238,6 +258,13 @@ func (s *Service) ingestAck(ctx context.Context, req IngestRequest, createdAt ti
 	}
 	if req.State == "" {
 		return TimelineItem{}, errors.New("state is required for ack")
+	}
+	handoff, err := s.store.GetHandoff(ctx, req.HandoffID)
+	if err != nil {
+		return TimelineItem{}, fmt.Errorf("resolve handoff: %w", err)
+	}
+	if handoff.ConversationID != req.ConversationID {
+		return TimelineItem{}, fmt.Errorf("ack conversation_id %q does not match handoff conversation %q", req.ConversationID, handoff.ConversationID)
 	}
 	ack, err := s.store.InsertAck(ctx, TaskAck{
 		ConversationID: req.ConversationID,

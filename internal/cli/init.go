@@ -98,7 +98,6 @@ func runInit(home string) error {
 server:
   mcp_transport: stdio
   listen_address: "127.0.0.1:0"
-  public_base_url: ""
   enable_timeline_lan: false
 
 database:

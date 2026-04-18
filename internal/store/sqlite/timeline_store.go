@@ -220,6 +220,18 @@ func (s *TimelineStore) InsertAck(ctx context.Context, ack timeline.TaskAck) (ti
 	if err != nil {
 		return timeline.TaskAck{}, err
 	}
+	var handoffConversationID string
+	if err := tx.QueryRowContext(ctx, `SELECT conversation_id FROM task_handoffs WHERE id = ?`, ack.HandoffID).Scan(&handoffConversationID); err != nil {
+		_ = tx.Rollback()
+		if err == sql.ErrNoRows {
+			return timeline.TaskAck{}, fmt.Errorf("handoff %q does not exist", ack.HandoffID)
+		}
+		return timeline.TaskAck{}, fmt.Errorf("lookup handoff: %w", err)
+	}
+	if handoffConversationID != ack.ConversationID {
+		_ = tx.Rollback()
+		return timeline.TaskAck{}, fmt.Errorf("ack conversation_id %q does not match handoff conversation %q", ack.ConversationID, handoffConversationID)
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO task_acks (id, handoff_id, conversation_id, ack_agent_id, state, note, created_at, metadata)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -249,6 +261,44 @@ func (s *TimelineStore) InsertAck(ctx context.Context, ack timeline.TaskAck) (ti
 		return timeline.TaskAck{}, fmt.Errorf("commit ack: %w", err)
 	}
 	return ack, nil
+}
+
+func (s *TimelineStore) GetHandoff(ctx context.Context, handoffID string) (timeline.TaskHandoff, error) {
+	var handoff timeline.TaskHandoff
+	var threadID sql.NullString
+	var traceMessageID sql.NullString
+	var createdAt int64
+	var metadata sql.NullString
+	err := s.readDB.QueryRowContext(ctx, `
+		SELECT id, conversation_id, thread_id, from_agent_id, to_agent_id, task_key, title, body, status, priority, trace_message_id, created_at, metadata
+		FROM task_handoffs
+		WHERE id = ?
+	`, handoffID).Scan(
+		&handoff.ID,
+		&handoff.ConversationID,
+		&threadID,
+		&handoff.FromAgentID,
+		&handoff.ToAgentID,
+		&handoff.TaskKey,
+		&handoff.Title,
+		&handoff.Body,
+		&handoff.Status,
+		&handoff.Priority,
+		&traceMessageID,
+		&createdAt,
+		&metadata,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return timeline.TaskHandoff{}, fmt.Errorf("handoff %q does not exist", handoffID)
+		}
+		return timeline.TaskHandoff{}, fmt.Errorf("get handoff: %w", err)
+	}
+	handoff.ThreadID = threadID.String
+	handoff.TraceMessageID = traceMessageID.String
+	handoff.CreatedAt = time.UnixMilli(createdAt).UTC()
+	handoff.Metadata = parseJSONMap(metadata.String)
+	return handoff, nil
 }
 
 func (s *TimelineStore) ListConversations(ctx context.Context) ([]timeline.ConversationSummary, error) {

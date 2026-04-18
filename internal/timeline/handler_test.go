@@ -152,3 +152,44 @@ func TestTimelineStreamSendsSnapshotAndLiveEvents(t *testing.T) {
 		t.Fatalf("stream body missing conversation payload: %s", resp.Body.String())
 	}
 }
+
+func TestTimelineHandlerRejectsAckForMissingOrWrongConversationHandoff(t *testing.T) {
+	_, handler := newTimelineHandler(t)
+	mux := http.NewServeMux()
+	handler.Register(mux)
+
+	handoffBody := `{"kind":"handoff","conversation_id":"conv-1","from_agent_id":"IGRIS","to_agent_id":"BERU","task_key":"portal-mvp","title":"Build portal","body":"Ship it"}`
+	handoffReq := httptest.NewRequest(http.MethodPost, "/api/timeline/ingest", strings.NewReader(handoffBody))
+	handoffReq.Header.Set("X-Metronous-Auth", "secret-token")
+	handoffResp := httptest.NewRecorder()
+	mux.ServeHTTP(handoffResp, handoffReq)
+	if handoffResp.Code != http.StatusCreated {
+		t.Fatalf("handoff status=%d body=%s", handoffResp.Code, handoffResp.Body.String())
+	}
+	var handoffCreated map[string]any
+	if err := json.Unmarshal(handoffResp.Body.Bytes(), &handoffCreated); err != nil {
+		t.Fatalf("decode handoff response: %v", err)
+	}
+	handoffID, _ := handoffCreated["id"].(string)
+	if handoffID == "" {
+		t.Fatal("missing handoff id")
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing handoff", body: `{"kind":"ack","conversation_id":"conv-1","handoff_id":"missing","ack_agent_id":"BERU","state":"accepted"}`},
+		{name: "wrong conversation", body: `{"kind":"ack","conversation_id":"conv-2","handoff_id":"` + handoffID + `","ack_agent_id":"BERU","state":"accepted"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/timeline/ingest", strings.NewReader(tc.body))
+			req.Header.Set("X-Metronous-Auth", "secret-token")
+			resp := httptest.NewRecorder()
+			mux.ServeHTTP(resp, req)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+		})
+	}
+}
