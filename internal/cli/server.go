@@ -8,11 +8,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/service"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 
+	"github.com/kiosvantra/metronous/internal/archive"
 	"github.com/kiosvantra/metronous/internal/daemon"
 	"github.com/kiosvantra/metronous/internal/mcp"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
@@ -26,6 +29,65 @@ func defaultDataDir() string {
 		return ".metronous/data"
 	}
 	return filepath.Join(home, ".metronous", "data")
+}
+
+type serverArchiveConfig struct {
+	Enabled            bool     `yaml:"enabled"`
+	CaptureFullPayload bool     `yaml:"capture_full_payload"`
+	BlockOnSensitive   bool     `yaml:"block_on_sensitive"`
+	RedactPatterns     []string `yaml:"redact_patterns"`
+	MaxFilesPerStage   int      `yaml:"max_files_per_stage"`
+	MaxBytesPerStage   int64    `yaml:"max_bytes_per_stage"`
+	MaxAgeDays         int      `yaml:"max_age_days"`
+}
+
+type serverAppConfig struct {
+	Archive serverArchiveConfig `yaml:"archive"`
+}
+
+func loadArchiveConfig(dataDir string, logger *zap.Logger) archive.Config {
+	cfg := archive.Config{Enabled: false}
+	configPath := filepath.Join(filepath.Dir(dataDir), "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return cfg
+	}
+	var appCfg serverAppConfig
+	if err := yaml.Unmarshal(data, &appCfg); err != nil {
+		if logger != nil {
+			logger.Warn("failed to parse config for archive pipeline", zap.Error(err))
+		}
+		return cfg
+	}
+
+	cfg.Enabled = appCfg.Archive.Enabled
+	cfg.BaseDir = filepath.Join(filepath.Dir(dataDir), "archive")
+	cfg.CaptureFullPayload = appCfg.Archive.CaptureFullPayload
+	cfg.BlockOnSensitive = appCfg.Archive.BlockOnSensitive
+	cfg.RedactPatterns = append([]string(nil), appCfg.Archive.RedactPatterns...)
+	if appCfg.Archive.MaxFilesPerStage > 0 {
+		cfg.MaxFilesPerStage = map[archive.Stage]int{
+			archive.StageBronze: appCfg.Archive.MaxFilesPerStage,
+			archive.StageSilver: appCfg.Archive.MaxFilesPerStage,
+			archive.StageGold:   appCfg.Archive.MaxFilesPerStage,
+		}
+	}
+	if appCfg.Archive.MaxBytesPerStage > 0 {
+		cfg.MaxBytesPerStage = map[archive.Stage]int64{
+			archive.StageBronze: appCfg.Archive.MaxBytesPerStage,
+			archive.StageSilver: appCfg.Archive.MaxBytesPerStage,
+			archive.StageGold:   appCfg.Archive.MaxBytesPerStage,
+		}
+	}
+	if appCfg.Archive.MaxAgeDays > 0 {
+		maxAge := time.Duration(appCfg.Archive.MaxAgeDays) * 24 * time.Hour
+		cfg.MaxAgePerStage = map[archive.Stage]time.Duration{
+			archive.StageBronze: maxAge,
+			archive.StageSilver: maxAge,
+			archive.StageGold:   maxAge,
+		}
+	}
+	return cfg
 }
 
 // NewServerCommand creates the `metronous server` cobra command.
@@ -132,6 +194,17 @@ func runServer(dataDir string, daemonMode bool) error {
 	queue := tracking.NewEventQueue(es, tracking.DefaultBufferSize, logger)
 	queue.Start()
 
+	var archiver archive.EventArchiver
+	archiveCfg := loadArchiveConfig(dataDir, logger)
+	if archiveCfg.Enabled {
+		pipeline, err := archive.NewPipeline(archiveCfg)
+		if err != nil {
+			logger.Warn("archive pipeline disabled due to init error", zap.Error(err))
+		} else {
+			archiver = pipeline
+		}
+	}
+
 	// Create MCP server.
 	srv := mcp.NewStdioServer(logger)
 	// Set data-dir so the port file is instance-scoped (avoids collisions when
@@ -140,7 +213,7 @@ func runServer(dataDir string, daemonMode bool) error {
 
 	// Register the ingest handler wired to the real queue.
 	mcp.RegisterIngestHandler(srv, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return tracking.HandleIngest(ctx, req, queue)
+		return tracking.HandleIngestWithArchive(ctx, req, queue, archiver)
 	})
 
 	// Register report and model_changes with real benchmark store handlers.

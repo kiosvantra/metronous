@@ -37,12 +37,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/kardianos/service"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
+	"github.com/kiosvantra/metronous/internal/archive"
 	"github.com/kiosvantra/metronous/internal/config"
 	"github.com/kiosvantra/metronous/internal/decision"
 	"github.com/kiosvantra/metronous/internal/mcp"
@@ -166,9 +168,21 @@ type schedulerConfig struct {
 	WindowDays        int    `yaml:"window_days"`
 }
 
+// archiveConfig mirrors the archive section in ~/.metronous/config.yaml.
+type archiveConfig struct {
+	Enabled            bool     `yaml:"enabled"`
+	CaptureFullPayload bool     `yaml:"capture_full_payload"`
+	BlockOnSensitive   bool     `yaml:"block_on_sensitive"`
+	RedactPatterns     []string `yaml:"redact_patterns"`
+	MaxFilesPerStage   int      `yaml:"max_files_per_stage"`
+	MaxBytesPerStage   int64    `yaml:"max_bytes_per_stage"`
+	MaxAgeDays         int      `yaml:"max_age_days"`
+}
+
 // appConfig is a minimal representation of ~/.metronous/config.yaml.
 type appConfig struct {
 	Scheduler schedulerConfig `yaml:"scheduler"`
+	Archive   archiveConfig   `yaml:"archive"`
 }
 
 // loadSchedulerConfig reads scheduler settings from config.yaml located next to
@@ -180,21 +194,9 @@ func (p *Program) loadSchedulerConfig() (schedule string, windowDays int) {
 	schedule = scheduler.DefaultWeeklySchedule
 	windowDays = scheduler.DefaultWindowDays
 
-	configPath := filepath.Join(filepath.Dir(p.cfg.DataDir), "config.yaml")
-
-	data, err := os.ReadFile(configPath)
+	cfg, configPath, err := p.loadAppConfig()
 	if err != nil {
-		// Config file is optional; log at info level and use defaults.
 		p.logger.Info("config file not found, using scheduler defaults",
-			zap.String("path", configPath),
-			zap.Error(err),
-		)
-		return
-	}
-
-	var cfg appConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		p.logger.Warn("failed to parse config file, using scheduler defaults",
 			zap.String("path", configPath),
 			zap.Error(err),
 		)
@@ -222,6 +224,64 @@ func (p *Program) loadSchedulerConfig() (schedule string, windowDays int) {
 	}
 
 	return
+}
+
+// loadArchiveConfig returns the local archive pipeline configuration.
+// It is disabled by default and only enabled with explicit config.yaml opt-in.
+func (p *Program) loadArchiveConfig() archive.Config {
+	cfg := archive.Config{Enabled: false}
+
+	appCfg, configPath, err := p.loadAppConfig()
+	if err != nil {
+		return cfg
+	}
+
+	cfg.Enabled = appCfg.Archive.Enabled
+	cfg.BaseDir = filepath.Join(filepath.Dir(p.cfg.DataDir), "archive")
+	cfg.CaptureFullPayload = appCfg.Archive.CaptureFullPayload
+	cfg.BlockOnSensitive = appCfg.Archive.BlockOnSensitive
+	cfg.RedactPatterns = append([]string(nil), appCfg.Archive.RedactPatterns...)
+	if appCfg.Archive.MaxFilesPerStage > 0 {
+		cfg.MaxFilesPerStage = map[archive.Stage]int{
+			archive.StageBronze: appCfg.Archive.MaxFilesPerStage,
+			archive.StageSilver: appCfg.Archive.MaxFilesPerStage,
+			archive.StageGold:   appCfg.Archive.MaxFilesPerStage,
+		}
+	}
+	if appCfg.Archive.MaxBytesPerStage > 0 {
+		cfg.MaxBytesPerStage = map[archive.Stage]int64{
+			archive.StageBronze: appCfg.Archive.MaxBytesPerStage,
+			archive.StageSilver: appCfg.Archive.MaxBytesPerStage,
+			archive.StageGold:   appCfg.Archive.MaxBytesPerStage,
+		}
+	}
+	if appCfg.Archive.MaxAgeDays > 0 {
+		maxAge := time.Duration(appCfg.Archive.MaxAgeDays) * 24 * time.Hour
+		cfg.MaxAgePerStage = map[archive.Stage]time.Duration{
+			archive.StageBronze: maxAge,
+			archive.StageSilver: maxAge,
+			archive.StageGold:   maxAge,
+		}
+	}
+	p.logger.Info("archive config loaded", zap.String("path", configPath), zap.Bool("enabled", cfg.Enabled))
+	return cfg
+}
+
+func (p *Program) loadAppConfig() (appConfig, string, error) {
+	configPath := filepath.Join(filepath.Dir(p.cfg.DataDir), "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return appConfig{}, configPath, err
+	}
+	var cfg appConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		p.logger.Warn("failed to parse config file, using defaults",
+			zap.String("path", configPath),
+			zap.Error(err),
+		)
+		return appConfig{}, configPath, err
+	}
+	return cfg, configPath, nil
 }
 
 // run is the main daemon loop: it starts the event store, queue, MCP server,
@@ -307,10 +367,21 @@ func (p *Program) run(ctx context.Context) error {
 	queue.Start()
 	defer queue.Stop()
 
+	var archiver archive.EventArchiver
+	archiveCfg := p.loadArchiveConfig()
+	if archiveCfg.Enabled {
+		pipeline, err := archive.NewPipeline(archiveCfg)
+		if err != nil {
+			p.logger.Warn("archive pipeline disabled due to init error", zap.Error(err))
+		} else {
+			archiver = pipeline
+		}
+	}
+
 	srv := mcp.NewStdioServer(p.logger)
 	srv.SetDataDir(p.cfg.DataDir)
 	mcp.RegisterIngestHandler(srv, func(innerCtx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return tracking.HandleIngest(innerCtx, req, queue)
+		return tracking.HandleIngestWithArchive(innerCtx, req, queue, archiver)
 	})
 	mcp.RegisterBenchmarkHandlers(srv, bs)
 

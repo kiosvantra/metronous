@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kiosvantra/metronous/internal/archive"
 	"github.com/kiosvantra/metronous/internal/exporting"
 	"github.com/kiosvantra/metronous/internal/store"
 	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
@@ -46,6 +47,7 @@ Use --format=json for machine-readable output.`,
 
 	cmd.AddCommand(newReportSemanticCommand())
 	cmd.AddCommand(newReportExportCommand())
+	cmd.AddCommand(newReportArchiveUsageCommand())
 
 	return cmd
 }
@@ -225,6 +227,56 @@ func runReportExport(dataDir, agentID, outPath string, allowExport bool) error {
 	}
 	fmt.Fprintf(os.Stdout, "Export written: %s\n", outPath)
 	return nil
+}
+
+func newReportArchiveUsageCommand() *cobra.Command {
+	var dataDir string
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "archive-usage",
+		Short: "Show local bronze/silver/gold archive usage",
+		Long: `Display local archive usage metrics for bronze/silver/gold stages.
+
+This command is fully local and does not perform any network operations.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runArchiveUsageReport(dataDir, format)
+		},
+	}
+	cmd.Flags().StringVar(&dataDir, "data-dir", defaultDataDir(), "Directory for SQLite databases (default: ~/.metronous/data)")
+	cmd.Flags().StringVar(&format, "format", "table", "Output format: table or json")
+	return cmd
+}
+
+func runArchiveUsageReport(dataDir, format string) error {
+	archiveDir := filepath.Join(filepath.Dir(dataDir), "archive")
+	usage, err := archive.UsageForBaseDir(archiveDir)
+	if err != nil {
+		return fmt.Errorf("read archive usage: %w", err)
+	}
+
+	switch strings.ToLower(format) {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(usage)
+	default:
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "STAGE\tFILES\tBYTES\tOLDEST\tNEWEST")
+		fmt.Fprintln(w, "─────\t─────\t─────\t──────\t──────")
+		for _, stage := range []archive.Stage{archive.StageBronze, archive.StageSilver, archive.StageGold} {
+			u := usage.Stage(stage)
+			fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\n", stage, u.Files, u.Bytes, emptyDash(u.Oldest), emptyDash(u.Newest))
+		}
+		return w.Flush()
+	}
+}
+
+func emptyDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
 }
 
 func newReportSemanticCommand() *cobra.Command {
