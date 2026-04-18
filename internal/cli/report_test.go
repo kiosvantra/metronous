@@ -218,6 +218,39 @@ func TestReportCommandAgentNoRunsMessage(t *testing.T) {
 	}
 }
 
+func TestReportCommandBackwardCompatibilityUnaffectedByValuationData(t *testing.T) {
+	runs := []store.BenchmarkRun{
+		sampleBenchmarkRun("stable-agent", store.VerdictKeep),
+	}
+	tmpDir := setupReportTest(t, runs)
+
+	bs, err := sqlitestore.NewBenchmarkStore(filepath.Join(tmpDir, "benchmark.db"))
+	if err != nil {
+		t.Fatalf("NewBenchmarkStore: %v", err)
+	}
+	defer func() { _ = bs.Close() }()
+
+	if _, err := bs.SaveCuratedValuation(context.Background(), store.CuratedValuationRecord{
+		AgentID:       "stable-agent",
+		CriteriaMet:   0,
+		CriteriaTotal: 1,
+		KillSwitch:    true,
+	}); err != nil {
+		t.Fatalf("SaveCuratedValuation: %v", err)
+	}
+
+	output, err := runReportCmd(t, []string{"--data-dir", tmpDir})
+	if err != nil {
+		t.Fatalf("report command: %v", err)
+	}
+	if !strings.Contains(output, "stable-agent") {
+		t.Fatalf("expected benchmark output unchanged, got:\n%s", output)
+	}
+	if strings.Contains(strings.ToLower(output), "valuation") {
+		t.Fatalf("report output unexpectedly changed by valuation records:\n%s", output)
+	}
+}
+
 func TestReportSemanticCommandSummarizesTaggedAndUntagged(t *testing.T) {
 	durationA := 100
 	durationB := 200
