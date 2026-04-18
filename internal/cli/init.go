@@ -103,8 +103,22 @@ database:
   benchmark_path: %s
 
 scheduler:
-  benchmark_schedule: "0 0 2 * * 0"
+  benchmark_schedule: "0 0 2 * * 1"
   window_days: 7
+
+archive:
+  enabled: false
+  capture_full_payload: false
+  block_on_sensitive: false
+  redact_patterns:
+    - "(?i)api[_-]?key"
+    - "(?i)authorization"
+    - "(?i)password"
+    - "(?i)secret"
+    - "(?i)token"
+  max_files_per_stage: 500
+  max_bytes_per_stage: 104857600
+  max_age_days: 30
 
 log:
   level: info

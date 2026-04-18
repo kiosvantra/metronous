@@ -42,8 +42,8 @@ func LoadThresholds(path string) (*config.Thresholds, error) {
 // Per-agent overrides are applied automatically.
 //
 // Free-model behaviour: if the model reported in m.Model is listed in model_pricing with
-// price == 0, ROI/cost checks are skipped — only quality metrics (accuracy, error rate,
-// latency, tool success rate) can trigger a SWITCH or URGENT_SWITCH.
+// price == 0, ROI/cost checks are skipped — only quality metrics (accuracy and error rate)
+// can trigger a SWITCH or URGENT_SWITCH.
 //
 // Unreliable-cost safeguard: for paid models, if m.TotalCostUSD == 0 (no billing data
 // was collected), the ROI check is also suppressed to avoid false positives.
@@ -74,35 +74,32 @@ func (e *DecisionEngine) Evaluate(ctx context.Context, m benchmark.WindowMetrics
 // failed. Returns an empty string when no switch is needed.
 //
 // For free models or when cost data is unreliable, ROI failures do not drive the
-// recommendation — only quality failures (accuracy, latency, tool success) do.
+// recommendation — only quality failures (accuracy) do.
 //
-// Heuristic:
-//   - Accuracy or error-rate failures → recommend a stronger/smarter model
-//   - Latency failures                → recommend a faster/cheaper model
-//   - ROI failure (paid + reliable)   → recommend a faster/cheaper model
-//   - Both accuracy and latency fail  → accuracy takes precedence (correctness first)
+// Heuristic (accuracy-first, cost second):
+//   - Accuracy failure → recommend a stronger/smarter model (AccuracyModel)
+//   - ROI failure (paid model, reliable cost data) → recommend a cheaper model (PerformanceModel)
 func recommendModel(vt store.VerdictType, m benchmark.WindowMetrics, thresholds config.DefaultThresholds, models config.ModelRecommendations, root *config.Thresholds) string {
 	if vt != store.VerdictSwitch && vt != store.VerdictUrgentSwitch {
 		return ""
 	}
 
 	accuracyFailed := m.Accuracy < thresholds.MinAccuracy
-	latencyFailed := m.P95LatencyMs > float64(thresholds.MaxLatencyP95Ms)
 
 	// ROI is only considered when the model is paid AND cost data is reliable.
 	roiFailed := roiActive(m.Model, m, root) && m.ROIScore < thresholds.MinROIScore
 
-	// Accuracy issues require a stronger model regardless of other failures.
+	// Accuracy issues require a stronger/smarter model.
 	if accuracyFailed {
 		return models.AccuracyModel
 	}
 
-	// Latency or cost/ROI issues → cheaper, faster model.
-	if latencyFailed || roiFailed {
+	// ROI failure → cheaper model that delivers similar accuracy at lower cost.
+	if roiFailed {
 		return models.PerformanceModel
 	}
 
-	// Fallback for other switch triggers (tool success rate, etc.).
+	// Fallback.
 	return models.DefaultModel
 }
 

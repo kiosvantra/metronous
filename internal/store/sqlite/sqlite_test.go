@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,6 +13,8 @@ import (
 	"github.com/kiosvantra/metronous/internal/store"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
 )
+
+var timeLocalMu sync.Mutex
 
 // newTestStore creates an in-memory EventStore for testing.
 func newTestStore(t *testing.T) *sqlite.EventStore {
@@ -26,6 +29,30 @@ func newTestStore(t *testing.T) *sqlite.EventStore {
 		}
 	})
 	return es
+}
+
+func assertFloatClose(t *testing.T, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("got %.9f, want %.9f", got, want)
+	}
+}
+
+func withLocalTimezone(t *testing.T, tz string, fn func(loc *time.Location)) {
+	t.Helper()
+	t.Setenv("TZ", tz)
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	timeLocalMu.Lock()
+	oldLocal := time.Local
+	time.Local = loc
+	t.Cleanup(func() {
+		time.Local = oldLocal
+		timeLocalMu.Unlock()
+	})
+	fn(loc)
 }
 
 // sampleEvent returns a valid Event for use in tests.
@@ -138,6 +165,36 @@ func TestInsertQueryAndSummary(t *testing.T) {
 	}
 	if summary.TotalEvents != 1 {
 		t.Errorf("Summary.TotalEvents: got %d, want 1", summary.TotalEvents)
+	}
+}
+
+// TestQueryEventsLegacyRowsWithoutMetadata verifies backward compatibility with
+// old rows where metadata is NULL/absent.
+func TestQueryEventsLegacyRowsWithoutMetadata(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := es.InsertEvent(ctx, store.Event{
+		AgentID:   "legacy-agent",
+		SessionID: "legacy-session",
+		EventType: "complete",
+		Model:     "claude-sonnet-4-5",
+		Timestamp: time.Now().UTC(),
+		// Metadata intentionally nil to simulate legacy/older rows
+	})
+	if err != nil {
+		t.Fatalf("InsertEvent legacy row: %v", err)
+	}
+
+	events, err := es.QueryEvents(ctx, store.EventQuery{AgentID: "legacy-agent"})
+	if err != nil {
+		t.Fatalf("QueryEvents legacy row: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 legacy event, got %d", len(events))
+	}
+	if events[0].Metadata != nil {
+		t.Fatalf("expected nil metadata for legacy row, got %v", events[0].Metadata)
 	}
 }
 
@@ -534,13 +591,13 @@ func TestGetAgentSummaryAggregationAccuracy(t *testing.T) {
 	ctx := context.Background()
 
 	const numEvents = 5
-	totalCost := 0.0
+	expectedTotalCost := 0.0
 	totalQuality := 0.0
 
 	for i := 0; i < numEvents; i++ {
 		cost := 0.01 * float64(i+1)
 		quality := 0.80 + 0.04*float64(i)
-		totalCost += cost
+		expectedTotalCost = cost // costs are cumulative per session; agent summary stores MAX per session
 		totalQuality += quality
 
 		e := sampleEvent("agent-agg", "session-agg", "complete")
@@ -561,9 +618,9 @@ func TestGetAgentSummaryAggregationAccuracy(t *testing.T) {
 		t.Errorf("TotalEvents: got %d, want %d", summary.TotalEvents, numEvents)
 	}
 
-	// Total cost should match sum within float precision.
-	if diff := summary.TotalCostUSD - totalCost; diff < -0.001 || diff > 0.001 {
-		t.Errorf("TotalCostUSD: got %.4f, want %.4f", summary.TotalCostUSD, totalCost)
+	// Total cost should match MAX within float precision.
+	if diff := summary.TotalCostUSD - expectedTotalCost; diff < -0.001 || diff > 0.001 {
+		t.Errorf("TotalCostUSD: got %.4f, want %.4f", summary.TotalCostUSD, expectedTotalCost)
 	}
 
 	// Average quality should be within 1% of expected.
@@ -571,6 +628,415 @@ func TestGetAgentSummaryAggregationAccuracy(t *testing.T) {
 	if diff := summary.AvgQuality - expectedAvg; diff < -0.01 || diff > 0.01 {
 		t.Errorf("AvgQuality: got %.4f, want %.4f", summary.AvgQuality, expectedAvg)
 	}
+}
+
+// TestGetAgentSummaryTotalCostUsesSessionMax verifies that total_cost_usd
+// in agent_summaries does not double-count when a session emits multiple
+// complete events with cumulative cost_usd values.
+func TestGetAgentSummaryTotalCostUsesSessionMax(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	// Same session emits two complete events with cumulative costs.
+	cost1 := 0.10
+	cost2 := 0.50
+
+	e1 := sampleEvent("agent-1", "session-1", "complete")
+	e1.CostUSD = &cost1
+	e1.QualityScore = nil // keep deterministic
+	if _, err := es.InsertEvent(ctx, e1); err != nil {
+		t.Fatalf("InsertEvent e1: %v", err)
+	}
+
+	e2 := sampleEvent("agent-1", "session-1", "complete")
+	e2.CostUSD = &cost2
+	e2.QualityScore = nil
+	if _, err := es.InsertEvent(ctx, e2); err != nil {
+		t.Fatalf("InsertEvent e2: %v", err)
+	}
+
+	summary, err := es.GetAgentSummary(ctx, "agent-1")
+	if err != nil {
+		t.Fatalf("GetAgentSummary: %v", err)
+	}
+
+	// Should equal MAX(cost_usd) for session-1, not cost1+cost2.
+	assertFloatClose(t, summary.TotalCostUSD, cost2)
+}
+
+// TestGetAgentSummaryIgnoresNonCompleteCosts verifies that only events
+// with event_type='complete' contribute to agent_summaries.total_cost_usd.
+func TestGetAgentSummaryIgnoresNonCompleteCosts(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	// One session: tool_call reports intermediate cumulative cost, complete
+	// reports the final cumulative cost.
+	intermediate := 0.10
+	finalCost := 0.50
+
+	toolCall := sampleEvent("agent-1", "session-1", "tool_call")
+	toolCall.CostUSD = &intermediate
+	if _, err := es.InsertEvent(ctx, toolCall); err != nil {
+		t.Fatalf("InsertEvent tool_call: %v", err)
+	}
+
+	complete := sampleEvent("agent-1", "session-1", "complete")
+	complete.CostUSD = &finalCost
+	if _, err := es.InsertEvent(ctx, complete); err != nil {
+		t.Fatalf("InsertEvent complete: %v", err)
+	}
+
+	summary, err := es.GetAgentSummary(ctx, "agent-1")
+	if err != nil {
+		t.Fatalf("GetAgentSummary: %v", err)
+	}
+	assertFloatClose(t, summary.TotalCostUSD, finalCost)
+}
+
+func TestQueryDailyCostByModelBucketsUTC(t *testing.T) {
+	// Day buckets are computed in UTC; this test validates that the day
+	// derived from an event's UTC timestamp matches expectations when the
+	// caller provides UTC month boundaries.
+	withLocalTimezone(t, "Etc/GMT+5", func(loc *time.Location) {
+		es := newTestStore(t)
+		ctx := context.Background()
+
+		model := "m1"
+		costDec31 := 1.23
+		costJan1 := 2.34
+
+		// Local month boundaries (converted to UTC for the query window).
+		monthStartLocal := time.Date(2026, 1, 1, 0, 0, 0, 0, loc)
+		monthEndLocal := monthStartLocal.AddDate(0, 1, 0)
+
+		// UTC timestamps:
+		// - 2026-01-01 04:00 UTC should be excluded by the provided window.
+		// - 2026-01-01 06:00 UTC should be included.
+		evDec31 := store.Event{
+			AgentID:   "agent",
+			SessionID: "s1",
+			EventType: "complete",
+			Model:     model,
+			Timestamp: time.Date(2026, 1, 1, 4, 0, 0, 0, time.UTC),
+			CostUSD:   &costDec31,
+		}
+		if _, err := es.InsertEvent(ctx, evDec31); err != nil {
+			t.Fatalf("InsertEvent dec31: %v", err)
+		}
+
+		evJan1 := store.Event{
+			AgentID:   "agent",
+			SessionID: "s2",
+			EventType: "complete",
+			Model:     model,
+			Timestamp: time.Date(2026, 1, 1, 6, 0, 0, 0, time.UTC),
+			CostUSD:   &costJan1,
+		}
+		if _, err := es.InsertEvent(ctx, evJan1); err != nil {
+			t.Fatalf("InsertEvent jan1: %v", err)
+		}
+
+		rows, err := es.QueryDailyCostByModel(ctx, monthStartLocal.UTC(), monthEndLocal.UTC())
+		if err != nil {
+			t.Fatalf("QueryDailyCostByModel: %v", err)
+		}
+
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+		}
+		if rows[0].Day.Format("2006-01-02") != "2026-01-01" {
+			t.Fatalf("expected day 2026-01-01, got %s", rows[0].Day.Format("2006-01-02"))
+		}
+		assertFloatClose(t, rows[0].TotalCostUSD, costJan1)
+	})
+}
+
+func TestQueryDailyCostByModelUsesLocalDayBucketForReturnedDayBucket(t *testing.T) {
+	// Timezone UTC-5: 2026-01-02 04:30 UTC == 2026-01-01 23:30 local.
+	// Bucketing uses local time, so the day bucket must be 2026-01-01.
+	withLocalTimezone(t, "Etc/GMT+5", func(loc *time.Location) {
+		es := newTestStore(t)
+		ctx := context.Background()
+
+		cost := 0.75
+		// 2026-01-02 04:30 UTC == 2026-01-01 23:30 local (UTC-5)
+		ts := time.Date(2026, 1, 2, 4, 30, 0, 0, time.UTC)
+		event := store.Event{
+			AgentID:   "agent",
+			SessionID: "s-local-bucket",
+			EventType: "complete",
+			Model:     "m1",
+			Timestamp: ts,
+			CostUSD:   &cost,
+		}
+		if _, err := es.InsertEvent(ctx, event); err != nil {
+			t.Fatalf("InsertEvent: %v", err)
+		}
+
+		windowStart := time.Date(2026, 1, 1, 0, 0, 0, 0, loc)
+		windowEnd := windowStart.AddDate(0, 0, 2)
+		rows, err := es.QueryDailyCostByModel(ctx, windowStart.UTC(), windowEnd.UTC())
+		if err != nil {
+			t.Fatalf("QueryDailyCostByModel: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+		}
+		// Local day must be 2026-01-01 (not 2026-01-02 which is the UTC date).
+		if rows[0].Day.Format("2006-01-02") != "2026-01-01" {
+			t.Fatalf("expected local bucket 2026-01-01, got %s", rows[0].Day.Format("2006-01-02"))
+		}
+		assertFloatClose(t, rows[0].TotalCostUSD, cost)
+	})
+}
+
+func TestQueryDailyCostByModelUsesSessionCostDeltaSameDay(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	firstCost := 0.10
+	secondCost := 0.50
+	ts1 := time.Date(2026, 2, 10, 10, 0, 0, 0, time.UTC)
+	ts2 := ts1.Add(2 * time.Hour)
+
+	e1 := store.Event{
+		AgentID:   "agent",
+		SessionID: "session-1",
+		EventType: "complete",
+		Model:     "m1",
+		Timestamp: ts1,
+		CostUSD:   &firstCost,
+	}
+	if _, err := es.InsertEvent(ctx, e1); err != nil {
+		t.Fatalf("InsertEvent e1: %v", err)
+	}
+
+	e2 := store.Event{
+		AgentID:   "agent",
+		SessionID: "session-1",
+		EventType: "complete",
+		Model:     "m1",
+		Timestamp: ts2,
+		CostUSD:   &secondCost,
+	}
+	if _, err := es.InsertEvent(ctx, e2); err != nil {
+		t.Fatalf("InsertEvent e2: %v", err)
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx, ts1.Add(-time.Hour), ts2.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, secondCost)
+}
+
+func TestQueryDailyCostByModelUsesPreviousSessionMaxBeforeWindow(t *testing.T) {
+	withLocalTimezone(t, "UTC", func(_ *time.Location) {
+		es := newTestStore(t)
+		ctx := context.Background()
+
+		previousCost := 0.20
+		currentCost := 0.50
+		prevTs := time.Date(2026, 3, 31, 23, 0, 0, 0, time.UTC)
+		currentTs := time.Date(2026, 4, 1, 1, 0, 0, 0, time.UTC)
+
+		previous := store.Event{
+			AgentID:   "agent",
+			SessionID: "session-1",
+			EventType: "complete",
+			Model:     "m1",
+			Timestamp: prevTs,
+			CostUSD:   &previousCost,
+		}
+		if _, err := es.InsertEvent(ctx, previous); err != nil {
+			t.Fatalf("InsertEvent previous: %v", err)
+		}
+
+		current := store.Event{
+			AgentID:   "agent",
+			SessionID: "session-1",
+			EventType: "complete",
+			Model:     "m1",
+			Timestamp: currentTs,
+			CostUSD:   &currentCost,
+		}
+		if _, err := es.InsertEvent(ctx, current); err != nil {
+			t.Fatalf("InsertEvent current: %v", err)
+		}
+
+		rows, err := es.QueryDailyCostByModel(ctx, currentTs.Add(-time.Minute), currentTs.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("QueryDailyCostByModel: %v", err)
+		}
+
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+		}
+		expectedDelta := currentCost - previousCost
+		assertFloatClose(t, rows[0].TotalCostUSD, expectedDelta)
+	})
+}
+
+func TestQueryDailyCostByModelHandlesNullCostBetweenCompleteEvents(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	cost1 := 0.10
+	cost3 := 0.30
+
+	ts1 := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	ts2 := ts1.Add(30 * time.Minute)
+	ts3 := ts1.Add(2 * time.Hour)
+
+	e1 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: ts1, CostUSD: &cost1}
+	// cost_usd is NULL in the middle event.
+	e2 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: ts2, CostUSD: nil}
+	e3 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: ts3, CostUSD: &cost3}
+
+	for i, event := range []store.Event{e1, e2, e3} {
+		if _, err := es.InsertEvent(ctx, event); err != nil {
+			t.Fatalf("InsertEvent %d: %v", i, err)
+		}
+	}
+
+	// Query only the last event window; the earlier non-null event is outside the
+	// window but must still provide the prev_max baseline.
+	rows, err := es.QueryDailyCostByModel(ctx, ts3.Add(-time.Minute), ts3.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+	}
+	// delta = cost3 - cost1
+	assertFloatClose(t, rows[0].TotalCostUSD, cost3-cost1)
+}
+
+func TestQueryDailyCostByModelSplitsSameSessionAcrossDays(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	day1Cost := 0.10
+	day2Cost := 0.30
+	day1Ts := time.Date(2026, 4, 10, 8, 0, 0, 0, time.UTC)
+	day2Ts := day1Ts.Add(24 * time.Hour)
+
+	e1 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: day1Ts, CostUSD: &day1Cost}
+	e2 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: day2Ts, CostUSD: &day2Cost}
+	if _, err := es.InsertEvent(ctx, e1); err != nil {
+		t.Fatalf("InsertEvent day1: %v", err)
+	}
+	if _, err := es.InsertEvent(ctx, e2); err != nil {
+		t.Fatalf("InsertEvent day2: %v", err)
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx, day1Ts.Add(-time.Hour), day2Ts.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Day.Format("2006-01-02") != "2026-04-10" {
+		t.Fatalf("expected first day 2026-04-10, got %s", rows[0].Day.Format("2006-01-02"))
+	}
+	if rows[1].Day.Format("2006-01-02") != "2026-04-11" {
+		t.Fatalf("expected second day 2026-04-11, got %s", rows[1].Day.Format("2006-01-02"))
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, day1Cost)
+	assertFloatClose(t, rows[1].TotalCostUSD, day2Cost-day1Cost)
+}
+
+func TestQueryDailyCostByModelAggregatesMultipleSessionsSameDay(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	costA := 0.40
+	costB := 0.25
+	ts := time.Date(2026, 4, 12, 15, 0, 0, 0, time.UTC)
+
+	events := []store.Event{
+		{AgentID: "agent-a", SessionID: "session-a", EventType: "complete", Model: "m1", Timestamp: ts, CostUSD: &costA},
+		{AgentID: "agent-b", SessionID: "session-b", EventType: "complete", Model: "m1", Timestamp: ts.Add(10 * time.Minute), CostUSD: &costB},
+	}
+	for i, event := range events {
+		if _, err := es.InsertEvent(ctx, event); err != nil {
+			t.Fatalf("InsertEvent %d: %v", i, err)
+		}
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx, ts.Add(-time.Hour), ts.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, costA+costB)
+}
+
+func TestQueryDailyCostByModelClampsNegativeDeltaToZero(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	previousCost := 0.80
+	currentCost := 0.50
+	prevTs := time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC)
+	currentTs := prevTs.Add(2 * time.Hour)
+
+	previous := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: prevTs, CostUSD: &previousCost}
+	current := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: currentTs, CostUSD: &currentCost}
+	if _, err := es.InsertEvent(ctx, previous); err != nil {
+		t.Fatalf("InsertEvent previous: %v", err)
+	}
+	if _, err := es.InsertEvent(ctx, current); err != nil {
+		t.Fatalf("InsertEvent current: %v", err)
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx, currentTs.Add(-time.Minute), currentTs.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %+v", len(rows), rows)
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, 0)
+}
+
+func TestQueryDailyCostByModelTracksModelSwitchWithinSession(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	modelACost := 0.10
+	modelBCost := 0.30
+	ts := time.Date(2026, 4, 14, 9, 0, 0, 0, time.UTC)
+
+	e1 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m1", Timestamp: ts, CostUSD: &modelACost}
+	e2 := store.Event{AgentID: "agent", SessionID: "session-1", EventType: "complete", Model: "m2", Timestamp: ts.Add(time.Hour), CostUSD: &modelBCost}
+	if _, err := es.InsertEvent(ctx, e1); err != nil {
+		t.Fatalf("InsertEvent model A: %v", err)
+	}
+	if _, err := es.InsertEvent(ctx, e2); err != nil {
+		t.Fatalf("InsertEvent model B: %v", err)
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx, ts.Add(-time.Hour), ts.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Model != "m1" || rows[1].Model != "m2" {
+		t.Fatalf("expected rows for m1 and m2, got %+v", rows)
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, modelACost)
+	assertFloatClose(t, rows[1].TotalCostUSD, modelBCost-modelACost)
 }
 
 // TestConcurrentInsertHighLoad verifies no SQLITE_BUSY errors under high concurrency.
@@ -716,6 +1182,47 @@ func TestInsertEventWithExplicitID(t *testing.T) {
 	if len(events) == 0 || events[0].ID != "custom-uuid-1234" {
 		t.Errorf("event with explicit ID not found")
 	}
+}
+
+func TestQueryDailyCostByModelNormalizesProviderPrefixes(t *testing.T) {
+	es := newTestStore(t)
+	ctx := context.Background()
+
+	cost := 0.50
+	ts := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+
+	// Same model, three different prefix variants
+	variants := []struct{ model, session string }{
+		{"opencode/claude-sonnet-4-6", "sess-opencode"},
+		{"anthropic/claude-sonnet-4-6", "sess-anthropic"},
+		{"claude-sonnet-4-6", "sess-bare"},
+	}
+	for _, v := range variants {
+		c := cost
+		ev := store.Event{
+			AgentID: "agent", SessionID: v.session, EventType: "complete",
+			Model: v.model, Timestamp: ts, CostUSD: &c,
+		}
+		if _, err := es.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("InsertEvent %s: %v", v.model, err)
+		}
+		ts = ts.Add(time.Minute)
+	}
+
+	rows, err := es.QueryDailyCostByModel(ctx,
+		time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 16, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("QueryDailyCostByModel: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row (all variants merged), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("expected normalized model claude-sonnet-4-6, got %q", rows[0].Model)
+	}
+	assertFloatClose(t, rows[0].TotalCostUSD, cost*3)
 }
 
 // TestWALModeIsEnabled verifies WAL journal mode is applied.

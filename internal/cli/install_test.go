@@ -26,14 +26,27 @@ func TestGenerateUnitFile(t *testing.T) {
 		"ExecStart='/usr/local/bin/metronous' server --data-dir '/home/user/.metronous/data'",
 		"WantedBy=default.target",
 		"Restart=on-failure",
-		// StandardOutput=append: uses a raw (unquoted) filesystem path.
-		"StandardOutput=append:/home/user/.metronous/data/metronous.log",
+		// StandardOutput=append: uses a path derived from the user's home via %h.
+		"StandardOutput=append:%h/.metronous/metronous.log",
 		"Description=Metronous Agent Intelligence Daemon",
 	}
 	for _, want := range checks {
 		if !strings.Contains(content, want) {
 			t.Errorf("unit file missing %q\ngot:\n%s", want, content)
 		}
+	}
+}
+
+func TestGenerateUnitFile_AllowsSpacesInDataDir(t *testing.T) {
+	binaryPath := "/usr/local/bin/metronous"
+	dataDir := "/home/user with space/.metronous/data"
+
+	content, err := generateUnitFile(binaryPath, dataDir)
+	if err != nil {
+		t.Fatalf("generateUnitFile with spaces: %v", err)
+	}
+	if !strings.Contains(content, "ExecStart='/usr/local/bin/metronous' server --data-dir '/home/user with space/.metronous/data'") {
+		t.Fatalf("ExecStart does not contain expected quoted dataDir with spaces:\n%s", content)
 	}
 }
 

@@ -3,11 +3,16 @@ package mcp_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -313,13 +318,22 @@ func TestServeWithHealthEndpoint(t *testing.T) {
 	}()
 
 	// Give the HTTP server a moment to start.
-	time.Sleep(200 * time.Millisecond)
-
-	// Read the port file (now a method on *Server, instance-scoped to data-dir).
-	port, err := srv.ReadPortFile()
-	if err != nil {
-		t.Fatalf("ReadPortFile: %v", err)
+	start := time.Now()
+	var port int
+	var err error
+	// On slower CI runners (and on Windows), the port file can be created
+	// slightly later than a fixed sleep.
+	for {
+		port, err = srv.ReadPortFile()
+		if err == nil {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+	// Basic sanity check.
 	if port <= 0 || port > 65535 {
 		t.Fatalf("invalid port from port file: %d", port)
 	}
@@ -453,6 +467,154 @@ func TestHTTPIngestEndpoint(t *testing.T) {
 	}
 }
 
+// TestHTTPIngestEndpointWithAuthToken tests that when METRONOUS_INGEST_TOKEN is
+// configured, requests must include the correct token in the X-Metronous-Auth header.
+// Tests both plain token and HMAC signature modes.
+func TestHTTPIngestEndpointWithAuthToken(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	out := &bytes.Buffer{}
+	srv := mcp.NewServer(pr, out, nil)
+
+	dataDir := t.TempDir()
+	srv.SetDataDir(dataDir)
+
+	// Register ingest handler that records the arguments received.
+	var gotArgs map[string]interface{}
+	mcp.RegisterIngestHandler(srv, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		gotArgs = req.Arguments
+		return &mcp.CallToolResult{Content: []mcp.ContentItem{mcp.TextContent("ok")}}, nil
+	})
+
+	const testToken = "test-token"
+	t.Setenv("METRONOUS_INGEST_TOKEN", testToken)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeWithHealth(ctx)
+	}()
+
+	// Wait until the server writes mcp.port.
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	payload := map[string]interface{}{
+		"agent_id":   "test-agent-auth",
+		"session_id": "sess-1",
+		"event_type": "start",
+		"model":      "claude-3",
+		"timestamp":  "2026-01-01T00:00:00Z",
+	}
+	bodyBytes, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)
+
+	// Test 1: Request without auth header should fail with 401
+	t.Run("no auth header", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes)) //nolint:noctx
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /ingest: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 2: Request with correct plain token should succeed
+	t.Run("plain token", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes)) //nolint:noctx
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Metronous-Auth", testToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /ingest: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if gotArgs == nil {
+			t.Fatal("handler was not called")
+		}
+		if gotArgs["agent_id"] != "test-agent-auth" {
+			t.Errorf("agent_id: got %v, want test-agent-auth", gotArgs["agent_id"])
+		}
+		// Reset for next test
+		gotArgs = nil
+	})
+
+	// Test 3: Request with HMAC signature should succeed
+	t.Run("hmac signature", func(t *testing.T) {
+		// Compute HMAC-SHA256 of the body using the test token
+		mac := hmac.New(sha256.New, []byte(testToken))
+		mac.Write(bodyBytes)
+		signature := "sha256:" + hex.EncodeToString(mac.Sum(nil))
+
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes)) //nolint:noctx
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Metronous-Auth", signature)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /ingest: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if gotArgs == nil {
+			t.Fatal("handler was not called")
+		}
+		if gotArgs["agent_id"] != "test-agent-auth" {
+			t.Errorf("agent_id: got %v, want test-agent-auth", gotArgs["agent_id"])
+		}
+	})
+
+	// Test 4: Request with invalid token should fail with 401
+	t.Run("invalid token", func(t *testing.T) {
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes)) //nolint:noctx
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Metronous-Auth", "wrong-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /ingest: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+	})
+
+	cancel()
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("ServeWithHealth returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("ServeWithHealth did not return after context cancel")
+	}
+}
+
 // TestHTTPIngestMethodNotAllowed verifies that GET /ingest returns 405.
 func TestHTTPIngestMethodNotAllowed(t *testing.T) {
 	pr, pw := io.Pipe()
@@ -471,11 +633,19 @@ func TestHTTPIngestMethodNotAllowed(t *testing.T) {
 		errCh <- srv.ServeWithHealth(ctx)
 	}()
 
-	time.Sleep(200 * time.Millisecond)
-
-	port, err := srv.ReadPortFile()
-	if err != nil {
-		t.Fatalf("ReadPortFile: %v", err)
+	// Poll for mcp.port instead of a fixed sleep to avoid flakes on slow CI.
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)
@@ -526,4 +696,163 @@ func TestIngestToolDefinitionHasRequiredFields(t *testing.T) {
 	}
 
 	fmt.Println("IngestTool required fields validated:", required)
+}
+
+// TestHTTPIngestPayloadTooLarge verifies that payloads >1MB are rejected.
+func TestHTTPIngestPayloadTooLarge(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	out := &bytes.Buffer{}
+	srv := mcp.NewServer(pr, out, nil)
+	dataDir := t.TempDir()
+	srv.SetDataDir(dataDir)
+
+	// Set token via file (64 hex chars)
+	tokenPath := filepath.Join(dataDir, "ingest.key")
+	token := "aaaa0000111122223333444455556666777788889999aaaabbbbccccddddeeee"
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatalf("failed to write ingest.key: %v", err)
+	}
+
+	mcp.RegisterIngestHandler(srv, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.ContentItem{mcp.TextContent("ok")}}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeWithHealth(ctx)
+	}()
+
+	// Wait for server to start
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Create payload larger than 1MB
+	largePayload := make([]byte, 1024*1024+1) // 1MB + 1 byte
+	for i := range largePayload {
+		largePayload[i] = 'x'
+	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(largePayload)) //nolint:noctx
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Metronous-Auth", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /ingest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 (RequestEntityTooLarge), got %d", resp.StatusCode)
+	}
+
+	cancel()
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("ServeWithHealth returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("ServeWithHealth did not return after context cancel")
+	}
+}
+
+// TestHTTPIngestFileBasedToken verifies that token is read from ingest.key file.
+func TestHTTPIngestFileBasedToken(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	out := &bytes.Buffer{}
+	srv := mcp.NewServer(pr, out, nil)
+	dataDir := t.TempDir()
+	srv.SetDataDir(dataDir)
+
+	// Write token to file instead of env var (64 hex chars)
+	tokenPath := filepath.Join(dataDir, "ingest.key")
+	token := "bbbb0000111122223333444455556666777788889999aaaabbbbccccddddeeee"
+	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatalf("failed to write ingest.key: %v", err)
+	}
+
+	mcp.RegisterIngestHandler(srv, func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{Content: []mcp.ContentItem{mcp.TextContent("ok")}}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeWithHealth(ctx)
+	}()
+
+	// Wait for server to start
+	deadline := time.Now().Add(2 * time.Second)
+	var port int
+	for {
+		p, err := srv.ReadPortFile()
+		if err == nil {
+			port = p
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ReadPortFile (timeout): %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	payload := map[string]interface{}{
+		"agent_id":   "test-agent-file",
+		"session_id": "sess-1",
+		"event_type": "start",
+		"model":      "claude-3",
+		"timestamp":  "2026-01-01T00:00:00Z",
+	}
+	bodyBytes, _ := json.Marshal(payload)
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/ingest", port)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes)) //nolint:noctx
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Metronous-Auth", token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /ingest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	pw.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("ServeWithHealth returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("ServeWithHealth did not return after context cancel")
+	}
 }

@@ -133,3 +133,125 @@ func TestServiceProgramContextCancellation(t *testing.T) {
 		t.Error("second Shutdown() call timed out")
 	}
 }
+
+// TestDaemonStartsEmbeddedScheduler verifies that the daemon wires the weekly
+// benchmark scheduler into its runtime.  We cannot observe the cron firing
+// (the Monday 02:00 trigger is 7 days away) but we can assert that:
+//  1. The daemon starts and shuts down cleanly with a scheduler in the mix.
+//  2. Shutdown completes in bounded time (i.e., the scheduler's Stop() does
+//     not block forever).
+func TestDaemonStartsEmbeddedScheduler(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	dataDir := filepath.Join(dir, "data")
+	cfg := daemon.Config{DataDir: dataDir}
+
+	prog := daemon.NewProgram(cfg, logger)
+
+	if err := prog.StartWithContext(); err != nil {
+		t.Fatalf("StartWithContext: %v", err)
+	}
+
+	// Give the goroutine time to initialise stores and register the scheduler.
+	time.Sleep(150 * time.Millisecond)
+
+	start := time.Now()
+	if err := prog.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	elapsed := time.Since(start)
+	if elapsed > 3*time.Second {
+		t.Errorf("Shutdown with scheduler took too long (%v); scheduler.Stop() may be blocking", elapsed)
+	}
+}
+
+// TestDaemonWithCustomThresholdsFile verifies that the daemon loads thresholds
+// from ConfigPath when provided, and still starts cleanly.
+func TestDaemonWithCustomThresholdsFile(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	dataDir := filepath.Join(dir, "data")
+
+	// Write a minimal valid thresholds.json.
+	thresholdsContent := `{
+		"version": "1.0",
+		"defaults": {
+			"min_accuracy": 0.80,
+			"min_roi_score": 0.04,
+			"max_cost_usd_per_session": 0.40
+		},
+		"urgent_triggers": {
+			"min_accuracy": 0.55,
+			"max_error_rate": 0.35,
+			"max_cost_spike_multiplier": 4.0
+		},
+		"model_recommendations": {
+			"accuracy_model": "claude-opus-4-5",
+			"performance_model": "claude-haiku-4-5",
+			"default_model": "claude-sonnet-4-5"
+		}
+	}`
+	thresholdsPath := filepath.Join(dir, "thresholds.json")
+	if err := os.WriteFile(thresholdsPath, []byte(thresholdsContent), 0600); err != nil {
+		t.Fatalf("write thresholds: %v", err)
+	}
+
+	cfg := daemon.Config{DataDir: dataDir, ConfigPath: thresholdsPath}
+	prog := daemon.NewProgram(cfg, logger)
+
+	if err := prog.StartWithContext(); err != nil {
+		t.Fatalf("StartWithContext: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := prog.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestDaemonWithInvalidThresholdsFile verifies that the daemon falls back to
+// compiled defaults when ConfigPath points to a malformed file, and still
+// starts and shuts down cleanly.
+func TestDaemonWithInvalidThresholdsFile(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	dataDir := filepath.Join(dir, "data")
+
+	// Write intentionally malformed JSON.
+	badPath := filepath.Join(dir, "bad-thresholds.json")
+	if err := os.WriteFile(badPath, []byte("{not valid json"), 0600); err != nil {
+		t.Fatalf("write bad thresholds: %v", err)
+	}
+
+	cfg := daemon.Config{DataDir: dataDir, ConfigPath: badPath}
+	prog := daemon.NewProgram(cfg, logger)
+
+	if err := prog.StartWithContext(); err != nil {
+		t.Fatalf("StartWithContext should succeed even with bad thresholds: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := prog.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}
+
+// TestDaemonThresholdsDefaultPath verifies that when ConfigPath is empty the
+// daemon derives the thresholds path from DataDir (one level up) and falls
+// back to defaults gracefully when the file does not exist.
+func TestDaemonThresholdsDefaultPath(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	// Use a data dir where the parent does NOT have a thresholds.json — daemon
+	// must start cleanly using compiled defaults.
+	dataDir := filepath.Join(dir, "data")
+	cfg := daemon.Config{DataDir: dataDir} // ConfigPath intentionally empty
+
+	prog := daemon.NewProgram(cfg, logger)
+	if err := prog.StartWithContext(); err != nil {
+		t.Fatalf("StartWithContext: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := prog.Shutdown(); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}

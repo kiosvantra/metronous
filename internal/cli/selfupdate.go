@@ -2,11 +2,15 @@ package cli
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -51,19 +55,102 @@ func runSelfUpdate(cmd *cobra.Command, args []string) error {
 	goarch := runtime.GOARCH
 	filename := fmt.Sprintf("metronous_%s_%s_%s.tar.gz", versionNoV, goos, goarch)
 	downloadURL := fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/%s", latestTag, filename)
+	checksumsURL := releaseChecksumsURL(latestTag)
 
 	installPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("could not determine current executable path: %w", err)
 	}
+	currentInstallPath := installPath
+	installPath = managedBinaryPath(installPath)
 
-	if err := downloadAndInstallBinary(downloadURL, installPath); err != nil {
-		return fmt.Errorf("failed to download update: %w", err)
+	if err := downloadAndInstallBinary(downloadURL, checksumsURL, filename, installPath); err != nil {
+		return fmt.Errorf("failed to download or verify update: %w", err)
+	}
+	if currentInstallPath != installPath {
+		fmt.Printf("  Migrated managed binary to %s\n", installPath)
 	}
 
+	// Also update the plugin file if it exists at the known OpenCode plugin path.
+	if err := updatePlugin(latestTag); err != nil {
+		// Non-fatal: binary update succeeded, plugin update is best-effort.
+		fmt.Printf("  Warning: could not update plugin: %v\n", err)
+		fmt.Println("  You can update it manually from: https://raw.githubusercontent.com/kiosvantra/metronous/main/metronous-plugin.ts")
+	}
+
+	if err := postUpdateInstallMigration(installPath); err != nil {
+		fmt.Printf("  Warning: could not migrate service/config references automatically: %v\n", err)
+	}
+
+	// Restart the systemd user service so the daemon picks up the new binary.
+	restartService()
+
 	fmt.Printf("\nMetronous has been updated to %s.\n", latestTag)
+	if currentInstallPath != installPath {
+		fmt.Printf("  Future launches should use: %s\n", installPath)
+	}
 	fmt.Println("  Close and reopen the dashboard to use the new version.")
-	fmt.Println("  Restart the metronous service only if you also want the MCP daemon to run the updated binary.")
+	return nil
+}
+
+// restartService attempts to restart the metronous systemd user service so the
+// daemon picks up the newly installed binary. Non-fatal — best effort only.
+func restartService() {
+	cmd := exec.Command("systemctl", "--user", "restart", "metronous.service")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Printf("  Note: could not restart metronous.service automatically: %v\n", strings.TrimSpace(string(out)))
+		fmt.Println("  You can restart it manually with: systemctl --user restart metronous.service")
+	} else {
+		fmt.Println("  Metronous daemon restarted successfully.")
+	}
+}
+
+// updatePlugin downloads the latest plugin file from GitHub and copies it to
+// the OpenCode plugin directory (~/.config/opencode/plugins/metronous.ts).
+// If the file does not exist at that path, this is a no-op — we only update
+// what the user has already installed.
+func updatePlugin(tag string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not determine home directory: %w", err)
+	}
+
+	pluginPath := filepath.Join(homeDir, ".config", "opencode", "plugins", "metronous.ts")
+
+	// Only update if the plugin is already installed at this path.
+	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	// Download from the tagged release on GitHub.
+	pluginURL := fmt.Sprintf("https://raw.githubusercontent.com/kiosvantra/metronous/%s/metronous-plugin.ts", tag)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(pluginURL)
+	if err != nil {
+		return fmt.Errorf("download plugin: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download plugin: HTTP %d from %s", resp.StatusCode, pluginURL)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read plugin response: %w", err)
+	}
+
+	// Write atomically via temp file.
+	tmpPath := pluginPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("write plugin temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, pluginPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install plugin: %w", err)
+	}
+
+	fmt.Printf("  Plugin updated at %s\n", pluginPath)
 	return nil
 }
 
@@ -117,22 +204,119 @@ func fetchLatestTag() (string, error) {
 	return tag, nil
 }
 
-// downloadAndInstallBinary downloads a .tar.gz asset, extracts the metronous
-// binary from it, and atomically replaces destPath.
-func downloadAndInstallBinary(url, destPath string) error {
+// downloadAndInstallBinary downloads a .tar.gz asset, verifies it against the
+// release checksums file, extracts the metronous binary from it, and atomically
+// replaces destPath.
+func downloadAndInstallBinary(url, checksumsURL, assetName, destPath string) error {
+	archivePath, archiveChecksum, err := downloadArchive(url)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(archivePath)
+
+	expectedChecksum, err := fetchExpectedChecksum(checksumsURL, assetName)
+	if err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
+	}
+	if !strings.EqualFold(expectedChecksum, archiveChecksum) {
+		return fmt.Errorf("checksum verification failed: checksum mismatch for %s", assetName)
+	}
+
+	if err := extractAndInstallBinary(archivePath, url, destPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+func releaseChecksumsURL(tag string) string {
+	return fmt.Sprintf("https://github.com/kiosvantra/metronous/releases/download/%s/checksums.txt", tag)
+}
+
+func downloadArchive(url string) (archivePath string, checksum string, err error) {
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
-		return fmt.Errorf("HTTP request failed: %w", err)
+		return "", "", fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
+		return "", "", fmt.Errorf("download failed with status %d from %s", resp.StatusCode, url)
 	}
 
-	// Decompress and extract binary from tar.gz
-	gzr, err := gzip.NewReader(resp.Body)
+	archiveFile, err := os.CreateTemp(os.TempDir(), "metronous-archive-*.tar.gz")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create archive temp file: %w", err)
+	}
+	archivePath = archiveFile.Name()
+	cleanup := true
+	defer func() {
+		_ = archiveFile.Close()
+		if cleanup {
+			_ = os.Remove(archivePath)
+		}
+	}()
+
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(archiveFile, h), resp.Body); err != nil {
+		return "", "", fmt.Errorf("failed to read download: %w", err)
+	}
+	checksum = hex.EncodeToString(h.Sum(nil))
+
+	if err := archiveFile.Close(); err != nil {
+		return "", "", fmt.Errorf("failed to flush archive temp file: %w", err)
+	}
+
+	cleanup = false
+	return archivePath, checksum, nil
+}
+
+func fetchExpectedChecksum(checksumsURL, assetName string) (string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(checksumsURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch checksums: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("failed to fetch checksums: HTTP %d from %s", resp.StatusCode, checksumsURL)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == assetName {
+			return fields[0], nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to read checksums: %w", err)
+	}
+	return "", fmt.Errorf("checksum for %s not found in checksums file", assetName)
+}
+
+func extractAndInstallBinary(archivePath, sourceURL, destPath string) error {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("failed to prepare install directory: %w", err)
+	}
+
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open downloaded archive: %w", err)
+	}
+	defer archiveFile.Close()
+
+	// Decompress and extract binary from tar.gz.
+	gzr, err := gzip.NewReader(archiveFile)
 	if err != nil {
 		return fmt.Errorf("failed to read gzip stream: %w", err)
 	}
@@ -187,7 +371,7 @@ func downloadAndInstallBinary(url, destPath string) error {
 		return fmt.Errorf("failed to flush temp file: %w", err)
 	}
 	if !found {
-		return fmt.Errorf("binary %q not found in archive %s", binaryName, url)
+		return fmt.Errorf("binary %q not found in archive %s", binaryName, sourceURL)
 	}
 
 	if err := os.Chmod(tmpPath, 0755); err != nil {
@@ -196,12 +380,30 @@ func downloadAndInstallBinary(url, destPath string) error {
 
 	// Atomic replace.
 	if err := os.Rename(tmpPath, destPath); err != nil {
+		if isPermissionError(err) {
+			return permissionDeniedUpdateError(destPath, err)
+		}
+
 		// Cross-volume fallback.
 		if copyErr := copyFile(tmpPath, destPath); copyErr != nil {
+			if isPermissionError(copyErr) {
+				return permissionDeniedUpdateError(destPath, copyErr)
+			}
 			return fmt.Errorf("rename failed (%v) and copy also failed: %w", err, copyErr)
 		}
 	}
 	return nil
+}
+
+func permissionDeniedUpdateError(destPath string, err error) error {
+	return fmt.Errorf("cannot update %s without write permission: %w. Re-run with sudo, or reinstall Metronous in a user-writable location such as ~/.local/bin", destPath, err)
+}
+
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return os.IsPermission(err) || strings.Contains(strings.ToLower(err.Error()), "permission denied")
 }
 
 func copyFile(src, dst string) error {

@@ -491,8 +491,9 @@ func TestIngestQueryViaReportTool(t *testing.T) {
 	if summary.TotalEvents != 5 {
 		t.Errorf("TotalEvents: got %d, want 5", summary.TotalEvents)
 	}
-	if summary.TotalCostUSD < 0.14 || summary.TotalCostUSD > 0.16 {
-		t.Errorf("TotalCostUSD: got %.4f, want ~0.15", summary.TotalCostUSD)
+	// Costs are cumulative per session; agent summary stores MAX(cost_usd) per session.
+	if summary.TotalCostUSD < 0.049 || summary.TotalCostUSD > 0.051 {
+		t.Errorf("TotalCostUSD: got %.4f, want ~0.05", summary.TotalCostUSD)
 	}
 
 	// Verify MCP report tool exists and returns stub response.

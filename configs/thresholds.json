@@ -2,10 +2,12 @@
   "version": "1.0",
   "defaults": {
     "min_accuracy": 0.85,
-    "max_latency_p95_ms": 60000,
-    "min_tool_success_rate": 0.85,
     "min_roi_score": 0.15,
     "max_cost_usd_per_session": 10.00
+  },
+  "tracking_duration_severity": {
+    "good_max_ms": 10000,
+    "warn_max_ms": 30000
   },
   "urgent_triggers": {
     "min_accuracy": 0.60,

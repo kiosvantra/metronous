@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // benchmarkSchema defines the DDL for benchmark.db.
 const benchmarkSchema = `
--- Core benchmark run table (one row per weekly run per agent)
+-- Core benchmark run table (one row per run per agent)
 CREATE TABLE IF NOT EXISTS benchmark_runs (
     id                TEXT PRIMARY KEY,
     run_at            INTEGER NOT NULL,
@@ -33,30 +34,109 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     verdict           TEXT NOT NULL,
     recommended_model TEXT NOT NULL DEFAULT '',
     decision_reason   TEXT NOT NULL DEFAULT '',
-	artifact_path     TEXT NOT NULL DEFAULT '',
-	avg_quality_score REAL NOT NULL DEFAULT 0.0,
-	composite_score   REAL NOT NULL DEFAULT 0.0
+    artifact_path     TEXT NOT NULL DEFAULT '',
+    avg_quality_score REAL NOT NULL DEFAULT 0.0
 );
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_benchmark_agent_ts ON benchmark_runs(agent_id, run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_run_at ON benchmark_runs(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_benchmark_verdict ON benchmark_runs(verdict, run_at DESC);
-CREATE INDEX IF NOT EXISTS idx_benchmark_agent_model ON benchmark_runs(agent_id, model, run_at DESC);
+
+-- Operational state for the latest benchmark attempt per run kind.
+CREATE TABLE IF NOT EXISTS benchmark_run_state (
+    run_kind           TEXT PRIMARY KEY,
+    last_attempt_at    INTEGER NOT NULL DEFAULT 0,
+    last_attempt_status TEXT NOT NULL DEFAULT 'completed',
+    last_attempt_error  TEXT NOT NULL DEFAULT ''
+);
+
+-- Local-only curated manual valuation records (explicit command path only).
+CREATE TABLE IF NOT EXISTS curated_manual_valuations (
+    id              TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    agent_id        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    criteria_met    INTEGER NOT NULL DEFAULT 0,
+    criteria_total  INTEGER NOT NULL DEFAULT 0,
+    kill_switch     INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 0.0,
+    note            TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_curated_manual_valuations_agent_created
+ON curated_manual_valuations(agent_id, created_at DESC);
 `
 
-// benchmarkMigrations contains ALTER TABLE statements to apply to existing databases.
-// Each migration is guarded by checking for the column's existence first (SQLite
-// returns an error on duplicate column add, which we ignore).
+// addAvgQualityScoreColumn migrates existing databases that predate avg_quality_score.
 const addAvgQualityScoreColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_quality_score REAL NOT NULL DEFAULT 0.0`
 
-const addCompositeScoreColumn = `ALTER TABLE benchmark_runs ADD COLUMN composite_score REAL NOT NULL DEFAULT 0.0`
-
+// addRunKindColumn migrates existing databases to add the run_kind discriminator.
+// Default 'weekly' preserves backward compatibility for all pre-existing rows.
 const addRunKindColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_kind TEXT NOT NULL DEFAULT 'weekly'`
 
+// addWindowStartColumn migrates existing databases to add the window start timestamp (ms UTC).
 const addWindowStartColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_start INTEGER NOT NULL DEFAULT 0`
 
+// addWindowEndColumn migrates existing databases to add the window end timestamp (ms UTC).
 const addWindowEndColumn = `ALTER TABLE benchmark_runs ADD COLUMN window_end INTEGER NOT NULL DEFAULT 0`
+
+// addAvgPromptTokensColumn adds the avg_prompt_tokens metric column.
+const addAvgPromptTokensColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_prompt_tokens REAL NOT NULL DEFAULT 0.0`
+
+// addAvgCompletionTokensColumn adds the avg_completion_tokens metric column.
+const addAvgCompletionTokensColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_completion_tokens REAL NOT NULL DEFAULT 0.0`
+
+// addAvgTurnMsColumn adds the avg_turn_ms metric column (complete events only).
+const addAvgTurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN avg_turn_ms REAL NOT NULL DEFAULT 0.0`
+
+// addP95TurnMsColumn adds the p95_turn_ms metric column (complete events only).
+const addP95TurnMsColumn = `ALTER TABLE benchmark_runs ADD COLUMN p95_turn_ms REAL NOT NULL DEFAULT 0.0`
+
+// addRunStatusColumn adds the run_status column to track active vs superseded runs.
+const addRunStatusColumn = `ALTER TABLE benchmark_runs ADD COLUMN run_status TEXT NOT NULL DEFAULT 'active'`
+
+// addRawModelColumn adds the raw_model column to store un-normalized model names with provider prefixes.
+const addRawModelColumn = `ALTER TABLE benchmark_runs ADD COLUMN raw_model TEXT NOT NULL DEFAULT ''`
+
+// markHistoricalSupersededRuns marks older runs (not the most recent per agent+model) as superseded.
+// This is a one-time data migration that fixes historical data where all runs were marked 'active'.
+// The migration is idempotent: runs already marked 'superseded' are not re-processed, and it uses
+// a deterministic approach (rank by run_at DESC per agent+model) to find the "most recent" run.
+const markHistoricalSupersededRuns = `
+UPDATE benchmark_runs
+SET run_status = 'superseded'
+WHERE run_status = 'active'
+  AND (agent_id, model, run_at) NOT IN (
+    -- Find the most recent run_at for each (agent_id, model) pair
+    SELECT agent_id, model, MAX(run_at)
+    FROM benchmark_runs
+    WHERE run_status = 'active'
+    GROUP BY agent_id, model
+  )`
+
+// markHistoricalSupersededRunsByCountHierarchy is an improved migration that uses sample_size
+// as the primary heuristic to identify which run per (agent_id, model) is truly "current".
+// For each (agent_id, model) pair with multiple runs, mark all except the one with the
+// highest sample_size as 'superseded'. In case of ties (same sample_size), the most recent
+// run (highest run_at) is kept active. This is more robust than MAX(run_at) when models
+// in an intraweek cycle have the same timestamp.
+const markHistoricalSupersededRunsByCountHierarchy = `
+UPDATE benchmark_runs
+SET run_status = 'superseded'
+WHERE run_status = 'active'
+  AND id NOT IN (
+    -- For each (agent_id, model) pair, find the run to keep as 'active':
+    -- the one with highest sample_size, breaking ties by highest run_at.
+    SELECT id FROM (
+      SELECT id,
+             ROW_NUMBER() OVER (PARTITION BY agent_id, model 
+                                ORDER BY sample_size DESC, run_at DESC) as rn
+      FROM benchmark_runs
+      WHERE run_status = 'active'
+    ) ranked
+    WHERE rn = 1
+  )`
 
 // BenchmarkStore is a SQLite-backed implementation of store.BenchmarkStore.
 type BenchmarkStore struct {
@@ -102,6 +182,28 @@ func NewBenchmarkStore(path string) (*BenchmarkStore, error) {
 	}, nil
 }
 
+// applyAddColumnMigration executes a single ALTER TABLE ADD COLUMN statement and
+// silently ignores "duplicate column name" errors (idempotent — safe on fresh DBs
+// where the CREATE TABLE already includes the column, and on re-runs).
+func applyAddColumnMigration(ctx context.Context, db *sql.DB, stmt, colName string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if strings.Contains(err.Error(), "duplicate column name") {
+			return nil // column already exists — idempotent
+		}
+		return fmt.Errorf("apply %s migration: %w", colName, err)
+	}
+	return nil
+}
+
+// applyDataMigration executes a data migration (UPDATE/INSERT/DELETE).
+// It is idempotent by design: the query should only affect rows that need migration.
+func applyDataMigration(ctx context.Context, db *sql.DB, stmt, name string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("apply %s data migration: %w", name, err)
+	}
+	return nil
+}
+
 // ApplyBenchmarkMigrations creates all tables and indexes for benchmark.db,
 // then applies any additive column migrations for existing databases.
 // It is idempotent and safe to call at startup.
@@ -109,42 +211,61 @@ func ApplyBenchmarkMigrations(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, benchmarkSchema); err != nil {
 		return fmt.Errorf("apply benchmark schema: %w", err)
 	}
-	// Apply additive column migration — ignore "duplicate column name" errors from
-	// databases that already have the column (e.g. newly created with the full schema).
-	if _, err := db.ExecContext(ctx, addAvgQualityScoreColumn); err != nil {
-		// SQLite returns "duplicate column name" as an error; this is expected for
-		// fresh databases where the CREATE TABLE already includes the column.
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("apply avg_quality_score migration: %w", err)
+
+	migrations := []struct {
+		stmt    string
+		colName string
+	}{
+		{addAvgQualityScoreColumn, "avg_quality_score"},
+		{addRunKindColumn, "run_kind"},
+		{addWindowStartColumn, "window_start"},
+		{addWindowEndColumn, "window_end"},
+		{addAvgPromptTokensColumn, "avg_prompt_tokens"},
+		{addAvgCompletionTokensColumn, "avg_completion_tokens"},
+		{addAvgTurnMsColumn, "avg_turn_ms"},
+		{addP95TurnMsColumn, "p95_turn_ms"},
+		{addRunStatusColumn, "run_status"},
+		{addRawModelColumn, "raw_model"},
+	}
+	for _, m := range migrations {
+		if err := applyAddColumnMigration(ctx, db, m.stmt, m.colName); err != nil {
+			return err
 		}
 	}
-	if _, err := db.ExecContext(ctx, addCompositeScoreColumn); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("apply composite_score migration: %w", err)
-		}
+
+	// Apply data migrations (after all columns exist).
+	// markHistoricalSupersededRuns is idempotent: it only affects runs with status='active'
+	// and marks older ones per (agent_id, model) as 'superseded' using MAX(run_at).
+	// Note: This is kept for backward compatibility but superseded by the next migration.
+	if err := applyDataMigration(ctx, db, markHistoricalSupersededRuns, "mark_historical_superseded_runs"); err != nil {
+		return err
 	}
-	if _, err := db.ExecContext(ctx, addRunKindColumn); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("apply run_kind migration: %w", err)
-		}
+
+	// markHistoricalSupersededRunsByCountHierarchy is a more robust migration that uses
+	// sample_size to identify the "current" model per (agent_id, model) pair.
+	// This handles the case where models in an intraweek cycle have the same timestamp.
+	// It is idempotent: only affects runs with status='active', and respects already-superseded runs.
+	if err := applyDataMigration(ctx, db, markHistoricalSupersededRunsByCountHierarchy, "mark_historical_superseded_runs_by_count"); err != nil {
+		return err
 	}
-	if _, err := db.ExecContext(ctx, addWindowStartColumn); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("apply window_start migration: %w", err)
-		}
-	}
-	if _, err := db.ExecContext(ctx, addWindowEndColumn); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("apply window_end migration: %w", err)
-		}
-	}
+
 	return nil
 }
 
 // SaveRun persists a benchmark run. If run.ID is empty, a UUID is generated.
+// If RunKind is empty it defaults to RunKindWeekly for backward compatibility.
+// SaveRun uses run.Status directly (set by the caller). If Status is empty or
+// RunStatusActive, it defaults to RunStatusActive for backward compatibility.
+// Status transitions (active → superseded) are handled by MarkSupersededRuns.
 func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) error {
 	if run.ID == "" {
 		run.ID = uuid.New().String()
+	}
+	if run.RunKind == "" {
+		run.RunKind = store.RunKindWeekly
+	}
+	if run.Status == "" {
+		run.Status = store.RunStatusActive
 	}
 
 	const q = `
@@ -153,13 +274,15 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 			accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 			tool_success_rate, roi_score, total_cost_usd, sample_size,
 			verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-			composite_score, run_kind, window_start, window_end
+			run_kind, window_start, window_end,
+			avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		) VALUES (
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?, ?
+			?, ?, ?,
+			?, ?, ?, ?, ?, ?
 		)`
 
 	_, err := bs.writeDB.ExecContext(ctx, q,
@@ -182,10 +305,15 @@ func (bs *BenchmarkStore) SaveRun(ctx context.Context, run store.BenchmarkRun) e
 		run.DecisionReason,
 		run.ArtifactPath,
 		run.AvgQualityScore,
-		run.CompositeScore,
 		string(run.RunKind),
 		run.WindowStart.UTC().UnixMilli(),
 		run.WindowEnd.UTC().UnixMilli(),
+		run.AvgPromptTokens,
+		run.AvgCompletionTokens,
+		run.AvgTurnMs,
+		run.P95TurnMs,
+		string(run.Status),
+		run.RawModel,
 	)
 	if err != nil {
 		return fmt.Errorf("save benchmark run: %w", err)
@@ -219,7 +347,8 @@ func (bs *BenchmarkStore) GetRuns(ctx context.Context, agentID string, limit int
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		composite_score, run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -260,7 +389,8 @@ func (bs *BenchmarkStore) QueryRuns(ctx context.Context, query store.BenchmarkQu
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		composite_score, run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs`
 
 	if len(conditions) > 0 {
@@ -313,7 +443,8 @@ func (bs *BenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (*st
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		composite_score, run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE agent_id = ?
 		ORDER BY run_at DESC
@@ -352,6 +483,248 @@ func (bs *BenchmarkStore) ListAgents(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("iterate agent rows: %w", err)
 	}
 	return agents, nil
+}
+
+// QueryModelSummaries returns one aggregated row per model across all benchmark runs.
+// It reuses the existing benchmark run query path and applies the same weighting
+// and verdict selection rules used by the benchmark summary view.
+func (bs *BenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.BenchmarkModelSummary, error) {
+	runs, err := bs.QueryRuns(ctx, store.BenchmarkQuery{Limit: MaxQueryLimit})
+	if err != nil {
+		return nil, fmt.Errorf("query benchmark model summaries: %w", err)
+	}
+
+	type agg struct {
+		runs         int
+		totalSamples int
+		sumAccuracy  float64
+		sumP95       float64
+		lastCostUSD  float64
+		lastVerdict  store.VerdictType
+		lastRunAt    time.Time
+	}
+	aggMap := make(map[string]*agg)
+
+	for _, r := range runs {
+		if r.RunAt.IsZero() {
+			continue
+		}
+		a := aggMap[r.Model]
+		if a == nil {
+			a = &agg{}
+			aggMap[r.Model] = a
+		}
+
+		isInsufficient := r.Verdict == store.VerdictInsufficientData || r.SampleSize < 50
+		if !isInsufficient {
+			samples := r.SampleSize
+			if samples <= 0 {
+				samples = 1
+			}
+			a.totalSamples += samples
+			a.sumAccuracy += r.Accuracy * float64(samples)
+			a.sumP95 += r.P95LatencyMs * float64(samples)
+		}
+		a.runs++
+
+		if r.RunAt.After(a.lastRunAt) {
+			if !isInsufficient {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+				a.lastCostUSD = r.TotalCostUSD
+			} else if a.lastVerdict == "" || a.lastVerdict == store.VerdictInsufficientData {
+				a.lastRunAt = r.RunAt
+				a.lastVerdict = r.Verdict
+				a.lastCostUSD = r.TotalCostUSD
+			}
+		}
+	}
+
+	rows := make([]store.BenchmarkModelSummary, 0, len(aggMap))
+	for model, a := range aggMap {
+		avgAcc := 0.0
+		avgP95 := 0.0
+		if a.totalSamples > 0 {
+			avgAcc = a.sumAccuracy / float64(a.totalSamples)
+			avgP95 = a.sumP95 / float64(a.totalSamples)
+		}
+		rows = append(rows, store.BenchmarkModelSummary{
+			Model:        model,
+			Runs:         a.runs,
+			AvgAccuracy:  avgAcc,
+			AvgP95Ms:     avgP95,
+			TotalCostUSD: a.lastCostUSD,
+			LastVerdict:  a.lastVerdict,
+			LastRunAt:    a.lastRunAt,
+		})
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Model != rows[j].Model {
+			return rows[i].Model < rows[j].Model
+		}
+		return rows[i].LastRunAt.After(rows[j].LastRunAt)
+	})
+
+	return rows, nil
+}
+
+// RecordBenchmarkAttempt persists the latest attempt state for a benchmark run kind.
+// It is used by the runner to capture operational visibility even when the run fails
+// before any BenchmarkRun rows are saved.
+func (bs *BenchmarkStore) RecordBenchmarkAttempt(ctx context.Context, runKind store.RunKindType, attemptedAt time.Time, status store.BenchmarkAttemptStatus, runErr string) error {
+	if runKind == "" {
+		runKind = store.RunKindWeekly
+	}
+	if status == "" {
+		status = store.BenchmarkAttemptCompleted
+	}
+
+	const q = `
+		INSERT INTO benchmark_run_state (run_kind, last_attempt_at, last_attempt_status, last_attempt_error)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(run_kind) DO UPDATE SET
+			last_attempt_at = excluded.last_attempt_at,
+			last_attempt_status = excluded.last_attempt_status,
+			last_attempt_error = excluded.last_attempt_error`
+
+	if _, err := bs.writeDB.ExecContext(ctx, q,
+		string(runKind),
+		attemptedAt.UTC().UnixMilli(),
+		string(status),
+		runErr,
+	); err != nil {
+		return fmt.Errorf("record benchmark attempt: %w", err)
+	}
+	return nil
+}
+
+// GetBenchmarkAttemptStates returns the latest attempt state for every known run kind.
+func (bs *BenchmarkStore) GetBenchmarkAttemptStates(ctx context.Context) ([]store.BenchmarkAttemptState, error) {
+	const q = `
+		SELECT run_kind, last_attempt_at, last_attempt_status, last_attempt_error
+		FROM benchmark_run_state
+		ORDER BY run_kind`
+
+	rows, err := bs.readDB.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("get benchmark attempt states: %w", err)
+	}
+	defer rows.Close()
+
+	states := make([]store.BenchmarkAttemptState, 0, 2)
+	for rows.Next() {
+		var (
+			runKind    string
+			attemptMs  int64
+			status     string
+			attemptErr string
+		)
+		if err := rows.Scan(&runKind, &attemptMs, &status, &attemptErr); err != nil {
+			return nil, fmt.Errorf("scan benchmark attempt state row: %w", err)
+		}
+		states = append(states, store.BenchmarkAttemptState{
+			RunKind:           store.RunKindType(runKind),
+			LastAttemptAt:     time.UnixMilli(attemptMs).UTC(),
+			LastAttemptStatus: store.BenchmarkAttemptStatus(status),
+			LastAttemptError:  attemptErr,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate benchmark attempt state rows: %w", err)
+	}
+	return states, nil
+}
+
+// SaveCuratedValuation stores a local-only curated manual valuation record.
+// Score is computed deterministically by ComputeCuratedValuationScore.
+func (bs *BenchmarkStore) SaveCuratedValuation(ctx context.Context, rec store.CuratedValuationRecord) (store.CuratedValuationRecord, error) {
+	if rec.ID == "" {
+		rec.ID = uuid.New().String()
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now().UTC()
+	}
+	rec.Score = store.ComputeCuratedValuationScore(rec.CriteriaMet, rec.CriteriaTotal, rec.KillSwitch)
+
+	killSwitchInt := 0
+	if rec.KillSwitch {
+		killSwitchInt = 1
+	}
+
+	const q = `
+		INSERT INTO curated_manual_valuations (
+			id, created_at, agent_id, session_id, criteria_met, criteria_total, kill_switch, score, note
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	if _, err := bs.writeDB.ExecContext(ctx, q,
+		rec.ID,
+		rec.CreatedAt.UTC().UnixMilli(),
+		rec.AgentID,
+		rec.SessionID,
+		rec.CriteriaMet,
+		rec.CriteriaTotal,
+		killSwitchInt,
+		rec.Score,
+		rec.Note,
+	); err != nil {
+		return store.CuratedValuationRecord{}, fmt.Errorf("save curated valuation: %w", err)
+	}
+
+	return rec, nil
+}
+
+// ListCuratedValuations returns local curated valuations newest-first.
+// If agentID is empty, returns records for all agents.
+func (bs *BenchmarkStore) ListCuratedValuations(ctx context.Context, agentID string, limit int) ([]store.CuratedValuationRecord, error) {
+	if limit <= 0 || limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
+
+	q := `SELECT id, created_at, agent_id, session_id, criteria_met, criteria_total, kill_switch, score, note
+		FROM curated_manual_valuations`
+	args := make([]interface{}, 0, 2)
+	if agentID != "" {
+		q += " WHERE agent_id = ?"
+		args = append(args, agentID)
+	}
+	q += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := bs.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list curated valuations: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]store.CuratedValuationRecord, 0, limit)
+	for rows.Next() {
+		var (
+			rec           store.CuratedValuationRecord
+			createdAtMs   int64
+			killSwitchInt int
+		)
+		if err := rows.Scan(
+			&rec.ID,
+			&createdAtMs,
+			&rec.AgentID,
+			&rec.SessionID,
+			&rec.CriteriaMet,
+			&rec.CriteriaTotal,
+			&killSwitchInt,
+			&rec.Score,
+			&rec.Note,
+		); err != nil {
+			return nil, fmt.Errorf("scan curated valuation row: %w", err)
+		}
+		rec.CreatedAt = time.UnixMilli(createdAtMs).UTC()
+		rec.KillSwitch = killSwitchInt != 0
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate curated valuation rows: %w", err)
+	}
+	return out, nil
 }
 
 // Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.
@@ -393,6 +766,7 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			runKind       string
 			windowStartMs int64
 			windowEndMs   int64
+			runStatus     string
 			run           store.BenchmarkRun
 		)
 		err := rows.Scan(
@@ -415,10 +789,15 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 			&run.DecisionReason,
 			&run.ArtifactPath,
 			&run.AvgQualityScore,
-			&run.CompositeScore,
 			&runKind,
 			&windowStartMs,
 			&windowEndMs,
+			&run.AvgPromptTokens,
+			&run.AvgCompletionTokens,
+			&run.AvgTurnMs,
+			&run.P95TurnMs,
+			&runStatus,
+			&run.RawModel,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan benchmark run row: %w", err)
@@ -431,6 +810,10 @@ func scanBenchmarkRuns(rows *sql.Rows) ([]store.BenchmarkRun, error) {
 		}
 		run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 		run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+		run.Status = store.RunStatus(runStatus)
+		if run.Status == "" {
+			run.Status = store.RunStatusActive
+		}
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {
@@ -452,6 +835,7 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		runKind       string
 		windowStartMs int64
 		windowEndMs   int64
+		runStatus     string
 		run           store.BenchmarkRun
 	)
 	err := row.Scan(
@@ -474,10 +858,15 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 		&run.DecisionReason,
 		&run.ArtifactPath,
 		&run.AvgQualityScore,
-		&run.CompositeScore,
 		&runKind,
 		&windowStartMs,
 		&windowEndMs,
+		&run.AvgPromptTokens,
+		&run.AvgCompletionTokens,
+		&run.AvgTurnMs,
+		&run.P95TurnMs,
+		&runStatus,
+		&run.RawModel,
 	)
 	if err != nil {
 		return nil, err
@@ -490,99 +879,24 @@ func scanBenchmarkRun(row rowScanner) (*store.BenchmarkRun, error) {
 	}
 	run.WindowStart = time.UnixMilli(windowStartMs).UTC()
 	run.WindowEnd = time.UnixMilli(windowEndMs).UTC()
+	run.Status = store.RunStatus(runStatus)
+	if run.Status == "" {
+		run.Status = store.RunStatusActive
+	}
 	return &run, nil
 }
 
-// ListAgentModels returns the distinct (agent_id, model) pairs that have at least one benchmark run.
-func (bs *BenchmarkStore) ListAgentModels(ctx context.Context) ([][2]string, error) {
-	const q = `SELECT DISTINCT agent_id, model FROM benchmark_runs ORDER BY agent_id, model`
-
-	rows, err := bs.readDB.QueryContext(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("list agent-model pairs: %w", err)
-	}
-	defer rows.Close()
-
-	var pairs [][2]string
-	for rows.Next() {
-		var agentID, model string
-		if err := rows.Scan(&agentID, &model); err != nil {
-			return nil, fmt.Errorf("scan agent-model pair: %w", err)
-		}
-		pairs = append(pairs, [2]string{agentID, model})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate agent-model rows: %w", err)
-	}
-	return pairs, nil
-}
-
-// GetLatestRunByAgentModel returns the most recent benchmark run for a specific
-// (agent_id, model) combination, or nil if none exists.
-func (bs *BenchmarkStore) GetLatestRunByAgentModel(ctx context.Context, agentID, model string) (*store.BenchmarkRun, error) {
-	const q = `SELECT id, run_at, window_days, agent_id, model,
-		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
-		tool_success_rate, roi_score, total_cost_usd, sample_size,
-		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		composite_score, run_kind, window_start, window_end
-		FROM benchmark_runs
-		WHERE agent_id = ? AND model = ?
-		ORDER BY run_at DESC
-		LIMIT 1`
-
-	row := bs.readDB.QueryRowContext(ctx, q, agentID, model)
-	run, err := scanBenchmarkRun(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get latest benchmark run for %q/%q: %w", agentID, model, err)
-	}
-	return run, nil
-}
-
-// GetVerdictTrendByModel returns the last N weekly verdicts for a specific
-// (agent_id, model) combination, ordered oldest first.
-func (bs *BenchmarkStore) GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error) {
-	if weeks <= 0 {
-		return nil, nil
-	}
-	const q = `SELECT verdict FROM benchmark_runs
-		WHERE agent_id = ? AND model = ?
-		ORDER BY run_at DESC
-		LIMIT ?`
-
-	rows, err := bs.readDB.QueryContext(ctx, q, agentID, model, weeks)
-	if err != nil {
-		return nil, fmt.Errorf("get verdict trend for %q/%q: %w", agentID, model, err)
-	}
-	defer rows.Close()
-
-	var verdicts []string
-	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, fmt.Errorf("scan verdict: %w", err)
-		}
-		verdicts = append(verdicts, v)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate verdict rows: %w", err)
-	}
-
-	// Reverse to get oldest-first order.
-	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
-		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
-	}
-	return verdicts, nil
-}
-
-// ListRunCycles returns the distinct week-start timestamps for all benchmark runs.
+// ListRunCycles returns the distinct week-start timestamps (Sunday 00:00 in loc, stored as UTC)
+// for all benchmark runs, ordered newest first.
+// limit=0 returns all; offset skips the first N cycle rows.
 func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
 	if loc == nil {
 		loc = time.Local
 	}
 
+	// Pull all distinct run_at values (milliseconds UTC).
+	// We compute week-start grouping in Go so we can use the caller's local timezone
+	// (SQLite has no timezone support, and strftime('%w') is UTC-only).
 	const q = `SELECT DISTINCT run_at FROM benchmark_runs ORDER BY run_at DESC`
 	rows, err := bs.readDB.QueryContext(ctx, q)
 	if err != nil {
@@ -590,8 +904,9 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 	}
 	defer rows.Close()
 
+	// Collect unique week-start times in loc.
 	seen := make(map[time.Time]struct{})
-	var ordered []time.Time
+	var ordered []time.Time // insertion order = newest first (since query is DESC)
 	for rows.Next() {
 		var ms int64
 		if err := rows.Scan(&ms); err != nil {
@@ -608,6 +923,7 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 		return nil, fmt.Errorf("iterate run_at rows: %w", err)
 	}
 
+	// Apply offset and limit.
 	if offset >= len(ordered) {
 		return nil, nil
 	}
@@ -619,19 +935,23 @@ func (bs *BenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location,
 }
 
 // weekStartInLoc returns midnight Sunday of the week containing t, in the same location as t.
+// Sunday is weekday 0 in Go's time.Weekday().
 func weekStartInLoc(t time.Time) time.Time {
-	daysBack := int(t.Weekday())
+	// Shift back to Sunday.
+	daysBack := int(t.Weekday()) // Sunday=0, Monday=1, … Saturday=6
 	d := t.AddDate(0, 0, -daysBack)
 	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, d.Location())
 }
 
-// QueryRunsInWindow returns all benchmark runs whose run_at falls within [since, until).
+// QueryRunsInWindow returns all benchmark runs whose run_at falls within [since, until),
+// ordered by run_at DESC.
 func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
 	const q = `SELECT id, run_at, window_days, agent_id, model,
 		accuracy, avg_latency_ms, p50_latency_ms, p95_latency_ms, p99_latency_ms,
 		tool_success_rate, roi_score, total_cost_usd, sample_size,
 		verdict, recommended_model, decision_reason, artifact_path, avg_quality_score,
-		composite_score, run_kind, window_start, window_end
+		run_kind, window_start, window_end,
+		avg_prompt_tokens, avg_completion_tokens, avg_turn_ms, p95_turn_ms, run_status, raw_model
 		FROM benchmark_runs
 		WHERE run_at >= ? AND run_at < ?
 		ORDER BY run_at DESC`
@@ -645,38 +965,115 @@ func (bs *BenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until ti
 }
 
 // GetVerdictTrend returns the last N weekly verdicts for the given agent, ordered oldest first.
-// Returns an empty slice if the agent has no runs or fewer than requested.
+// Each entry represents one benchmark cycle. CHANGED is inserted when consecutive
+// active runs use different models (indicating a real model switch between cycles).
+//
+// Only active weekly runs (run_kind='weekly') are included so the trend reflects
+// scheduled quality assessments only. Intraweek (on-demand) runs are excluded.
+// Superseded runs are also excluded so the trend reflects genuine quality assessments
+// (KEEP / SWITCH / URGENT_SWITCH / INSUFFICIENT_DATA) rather than historical noise.
 func (bs *BenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	if weeks <= 0 {
 		return nil, nil
 	}
-	// Fetch newest-first, then reverse for oldest-first order.
-	const q = `SELECT verdict FROM benchmark_runs
-		WHERE agent_id = ?
+
+	// Look back further than `weeks` to compensate for CHANGED entries that expand
+	// the slice: each model transition inserts an extra entry.
+	lookback := weeks * 6
+	if lookback < 20 {
+		lookback = 20
+	}
+
+	// Select active weekly runs only, newest-first, so we pick one representative
+	// row per benchmark cycle. Intraweek (on-demand) runs are excluded so the
+	// trend reflects only scheduled weekly quality assessments.
+	const q = `
+		SELECT verdict, model
+		FROM benchmark_runs
+		WHERE agent_id = ? AND run_status = 'active' AND run_kind = ?
 		ORDER BY run_at DESC
 		LIMIT ?`
 
-	rows, err := bs.readDB.QueryContext(ctx, q, agentID, weeks)
+	rows, err := bs.readDB.QueryContext(ctx, q, agentID, string(store.RunKindWeekly), lookback)
 	if err != nil {
 		return nil, fmt.Errorf("get verdict trend for %q: %w", agentID, err)
 	}
 	defer rows.Close()
 
-	var verdicts []string
+	type batchEntry struct {
+		verdict string
+		model   string
+	}
+	var batches []batchEntry
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
-			return nil, fmt.Errorf("scan verdict: %w", err)
+		var e batchEntry
+		if err := rows.Scan(&e.verdict, &e.model); err != nil {
+			return nil, fmt.Errorf("scan verdict trend row: %w", err)
 		}
-		verdicts = append(verdicts, v)
+		batches = append(batches, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate verdict rows: %w", err)
+		return nil, fmt.Errorf("iterate verdict trend rows: %w", err)
 	}
 
-	// Reverse to get oldest-first order.
-	for i, j := 0, len(verdicts)-1; i < j; i, j = i+1, j-1 {
-		verdicts[i], verdicts[j] = verdicts[j], verdicts[i]
+	// batches is newest-first. Reverse to oldest-first for display.
+	for i, j := 0, len(batches)-1; i < j; i, j = i+1, j-1 {
+		batches[i], batches[j] = batches[j], batches[i]
 	}
+
+	// Trim to the last N entries (oldest-first window).
+	if len(batches) > weeks {
+		batches = batches[len(batches)-weeks:]
+	}
+
+	// Build the final trend, inserting CHANGED between consecutive entries that
+	// used different models (genuine model switch between benchmark cycles).
+	var verdicts []string
+	var prevModel string
+	for _, b := range batches {
+		if prevModel != "" && b.model != prevModel {
+			verdicts = append(verdicts, "CHANGED")
+		}
+		verdicts = append(verdicts, b.verdict)
+		prevModel = b.model
+	}
+
 	return verdicts, nil
+}
+
+// MarkSupersededRuns marks older intraweek runs of the same model as superseded when a newer run
+// of that model is created in the same cycle. It updates runs where:
+// - agent_id = agentID
+// - run_kind = 'intraweek'
+// - model = newModel (same model)
+// - run_at < newRunAt (older run)
+// - run_at >= cycleStart and run_at < cycleEnd (same cycle)
+// Setting run_status = 'superseded'. This is called only for intraweek runs after
+// inserting new runs. Weekly runs are never marked superseded.
+func (bs *BenchmarkStore) MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error {
+	const q = `
+		UPDATE benchmark_runs
+		SET run_status = ?
+		WHERE agent_id = ? AND run_kind = ? AND run_at < ? AND model = ?
+		AND run_at >= ? AND run_at < ? AND run_status != ?
+	`
+
+	newRunMs := newRunAt.UTC().UnixMilli()
+	cycleStartMs := cycleStart.UTC().UnixMilli()
+	cycleEndMs := cycleEnd.UTC().UnixMilli()
+
+	_, err := bs.writeDB.ExecContext(ctx, q,
+		string(store.RunStatusSuperseded),
+		agentID,
+		string(store.RunKindIntraweek),
+		newRunMs,
+		newModel,
+		cycleStartMs,
+		cycleEndMs,
+		string(store.RunStatusSuperseded),
+	)
+	if err != nil {
+		return fmt.Errorf("mark superseded runs for %s: %w", agentID, err)
+	}
+	return nil
 }

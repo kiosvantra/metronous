@@ -58,11 +58,18 @@ coverage.out
 
 # Debug / test artifacts
 archive/
+!internal/archive/
+!internal/archive/*.go
 tui-debug.log
 *.tmp
 
 # Agent tooling
-.atl/
+.atl/*
+!.atl/skill-registry.md
+
+# OpenCode rules (user-specific, not committed)
+AGENTS.md
+CLAUDE.md
 
 # Environment
 .env

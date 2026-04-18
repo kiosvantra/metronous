@@ -50,5 +50,5 @@ func init() {
 	rootCmd.AddCommand(cli.NewMCPShimCommand())
 	rootCmd.AddCommand(cli.NewSelfUpdateCommand())
 	rootCmd.AddCommand(cli.NewBenchmarkCommand())
-	rootCmd.AddCommand(cli.NewWebCommand())
+	rootCmd.AddCommand(cli.NewValuationCommand())
 }

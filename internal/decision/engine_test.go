@@ -63,27 +63,29 @@ func TestVerdictSwitchBelowAccuracy(t *testing.T) {
 	}
 }
 
-// TestVerdictSwitchHighLatency verifies SWITCH when P95 > 30000ms.
-func TestVerdictSwitchHighLatency(t *testing.T) {
+// TestVerdictNoSwitchHighLatency verifies latency alone no longer triggers SWITCH.
+// Latency data (duration_ms) is noisy — excluded from decision triggers.
+func TestVerdictNoSwitchHighLatency(t *testing.T) {
 	defaults := config.DefaultThresholdValues()
 	m := goodMetrics("agent-a")
-	m.P95LatencyMs = 35000 // Exceeds MaxLatencyP95Ms=30000
+	m.P95LatencyMs = 35000 // Would have triggered SWITCH before — now it does not.
 
 	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
-	if vt != store.VerdictSwitch {
-		t.Errorf("expected VerdictSwitch, got %s", vt)
+	if vt != store.VerdictKeep {
+		t.Errorf("expected VerdictKeep (latency excluded from triggers), got %s", vt)
 	}
 }
 
-// TestVerdictSwitchLowToolRate verifies SWITCH when tool_success_rate < 0.90.
-func TestVerdictSwitchLowToolRate(t *testing.T) {
+// TestVerdictNoSwitchLowToolRate verifies tool_success_rate alone no longer triggers SWITCH.
+// In practice tool_success_rate is always 1.0 — excluded from decision triggers.
+func TestVerdictNoSwitchLowToolRate(t *testing.T) {
 	defaults := config.DefaultThresholdValues()
 	m := goodMetrics("agent-a")
-	m.ToolSuccessRate = 0.88 // Below MinToolSuccessRate=0.90
+	m.ToolSuccessRate = 0.88 // Would have triggered SWITCH before — now it does not.
 
 	vt := decision.EvaluateRules(m, defaults.Defaults, defaults.UrgentTriggers)
-	if vt != store.VerdictSwitch {
-		t.Errorf("expected VerdictSwitch, got %s", vt)
+	if vt != store.VerdictKeep {
+		t.Errorf("expected VerdictKeep (tool_success_rate excluded from triggers), got %s", vt)
 	}
 }
 
@@ -169,8 +171,10 @@ func TestVerdictTableDriven(t *testing.T) {
 		{"urgent low accuracy", func(m *benchmark.WindowMetrics) { m.Accuracy = 0.55; m.ErrorRate = 0.45 }, store.VerdictUrgentSwitch},
 		{"urgent high error rate", func(m *benchmark.WindowMetrics) { m.ErrorRate = 0.40; m.Accuracy = 0.65 }, store.VerdictUrgentSwitch},
 		{"switch low accuracy", func(m *benchmark.WindowMetrics) { m.Accuracy = 0.80 }, store.VerdictSwitch},
-		{"switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictSwitch},
-		{"switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictSwitch},
+		// Latency no longer triggers SWITCH — data is noisy.
+		{"no switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictKeep},
+		// tool_success_rate no longer triggers SWITCH — always 1.0 in practice.
+		{"no switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictKeep},
 		{"switch low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01 }, store.VerdictSwitch},
 		{"keep low roi when cost missing", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.01; m.TotalCostUSD = 0 }, store.VerdictKeep},
 	}
@@ -557,8 +561,33 @@ func TestBuildReasonWithPricingZeroCostNote(t *testing.T) {
 		thresholds,
 	)
 
-	if !contains(reason, "unreliable cost") {
-		t.Errorf("KEEP reason for zero-cost paid model should mention 'unreliable cost', got: %q", reason)
+	if !contains(reason, "no billing data") {
+		t.Errorf("KEEP reason for zero-cost paid model should mention 'no billing data', got: %q", reason)
+	}
+}
+
+// TestBuildReasonWithPricingIgnoresTrackingDurationSeverity verifies that KEEP
+// explanations do not depend on the tracking UI severity config.
+func TestBuildReasonWithPricingIgnoresTrackingDurationSeverity(t *testing.T) {
+	thresholds := config.DefaultThresholdValues()
+	thresholds.TrackingDurationSeverity = config.TrackingDurationSeverityConfig{GoodMaxMs: 1, WarnMaxMs: 2}
+
+	m := goodMetrics("agent-duration-reason")
+	m.AvgTurnMs = 4000
+
+	reason := decision.BuildReasonWithPricing(
+		store.VerdictKeep,
+		m,
+		thresholds.Defaults,
+		thresholds.UrgentTriggers,
+		&thresholds,
+	)
+
+	if !contains(reason, "avg_response=4.0s") {
+		t.Fatalf("KEEP reason should include the observed response time, got: %q", reason)
+	}
+	if contains(reason, "limit") {
+		t.Fatalf("KEEP reason should not reference a latency limit, got: %q", reason)
 	}
 }
 
@@ -589,8 +618,9 @@ func TestFreeModelTableDriven(t *testing.T) {
 		{"free keep low roi", func(m *benchmark.WindowMetrics) { m.ROIScore = 0.001 }, store.VerdictKeep},
 		// Quality failures MUST still trigger.
 		{"free switch low accuracy", func(m *benchmark.WindowMetrics) { m.Accuracy = 0.80 }, store.VerdictSwitch},
-		{"free switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictSwitch},
-		{"free switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictSwitch},
+		// Latency and tool success rate no longer trigger SWITCH — data is noisy.
+		{"free no switch high latency", func(m *benchmark.WindowMetrics) { m.P95LatencyMs = 40000 }, store.VerdictKeep},
+		{"free no switch low tool rate", func(m *benchmark.WindowMetrics) { m.ToolSuccessRate = 0.85 }, store.VerdictKeep},
 		{"free urgent low accuracy", func(m *benchmark.WindowMetrics) { m.Accuracy = 0.50; m.ErrorRate = 0.40 }, store.VerdictUrgentSwitch},
 		{"free urgent high error rate", func(m *benchmark.WindowMetrics) { m.ErrorRate = 0.40; m.Accuracy = 0.70 }, store.VerdictUrgentSwitch},
 	}

@@ -55,6 +55,63 @@ func TestEventMetadataFromJSONInvalid(t *testing.T) {
 	}
 }
 
+// TestNormalizeSemanticPhase verifies canonical normalization for known phases.
+func TestNormalizeSemanticPhase(t *testing.T) {
+	tests := []struct {
+		name  string
+		raw   string
+		want  string
+		valid bool
+	}{
+		{name: "design mixed case", raw: " DeSign ", want: "design", valid: true},
+		{name: "propose", raw: "propose", want: "propose", valid: true},
+		{name: "verify", raw: "VERIFY", want: "verify", valid: true},
+		{name: "unknown", raw: "review", want: "", valid: false},
+		{name: "empty", raw: "  ", want: "", valid: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := store.NormalizeSemanticPhase(tc.raw)
+			if ok != tc.valid {
+				t.Fatalf("valid mismatch: got %v, want %v", ok, tc.valid)
+			}
+			if got != tc.want {
+				t.Fatalf("phase mismatch: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeMetadataSemanticPhase verifies metadata tag normalization is additive and safe.
+func TestNormalizeMetadataSemanticPhase(t *testing.T) {
+	meta := map[string]interface{}{
+		"other":                    "keep",
+		store.SemanticPhaseMetaKey: " Implement ",
+	}
+	got := store.NormalizeMetadataSemanticPhase(meta)
+	if got == nil {
+		t.Fatal("NormalizeMetadataSemanticPhase returned nil")
+	}
+	if got["other"] != "keep" {
+		t.Fatalf("unexpected mutation on unrelated key: %v", got["other"])
+	}
+	if got[store.SemanticPhaseMetaKey] != "implement" {
+		t.Fatalf("phase was not normalized: got %v", got[store.SemanticPhaseMetaKey])
+	}
+}
+
+// TestNormalizeMetadataSemanticPhaseUnknownPreservesValue verifies unknown phase values are preserved.
+func TestNormalizeMetadataSemanticPhaseUnknownPreservesValue(t *testing.T) {
+	meta := map[string]interface{}{
+		store.SemanticPhaseMetaKey: "custom-phase",
+	}
+	got := store.NormalizeMetadataSemanticPhase(meta)
+	if got[store.SemanticPhaseMetaKey] != "custom-phase" {
+		t.Fatalf("unknown phase should be preserved, got %v", got[store.SemanticPhaseMetaKey])
+	}
+}
+
 // TestEventMetadataToJSONNil verifies that nil map returns empty string.
 func TestEventMetadataToJSONNil(t *testing.T) {
 	result := store.MetadataToJSON(nil)
@@ -186,6 +243,10 @@ func (m *mockEventStore) GetAgentEvents(ctx context.Context, _ string, _ time.Ti
 func (m *mockEventStore) GetAgentSummary(ctx context.Context, _ string) (store.AgentSummary, error) {
 	return store.AgentSummary{}, nil
 }
+
+func (m *mockEventStore) QueryDailyCostByModel(ctx context.Context, _, _ time.Time) ([]store.DailyCostByModelRow, error) {
+	return nil, nil
+}
 func (m *mockEventStore) Close() error { return nil }
 
 // TestBenchmarkRunFieldMapping verifies BenchmarkRun struct has all required fields.
@@ -245,19 +306,6 @@ func TestBenchmarkRunFieldMapping(t *testing.T) {
 	}
 }
 
-// TestBenchmarkRun_HasCompositeScoreField verifies that BenchmarkRun has a CompositeScore field
-// that can be assigned and read back correctly (compile-time + runtime check).
-func TestBenchmarkRun_HasCompositeScoreField(t *testing.T) {
-	run := store.BenchmarkRun{CompositeScore: 0.87}
-	if run.CompositeScore != 0.87 {
-		t.Errorf("CompositeScore: got %v, want 0.87", run.CompositeScore)
-	}
-	run.CompositeScore = 0.0
-	if run.CompositeScore != 0.0 {
-		t.Errorf("CompositeScore after reset: got %v, want 0.0", run.CompositeScore)
-	}
-}
-
 // TestBenchmarkStoreInterface verifies BenchmarkStore interface is definable (compile check).
 func TestBenchmarkStoreInterface(t *testing.T) {
 	var _ store.BenchmarkStore = (*mockBenchmarkStore)(nil)
@@ -284,23 +332,20 @@ func (m *mockBenchmarkStore) GetLatestRun(ctx context.Context, agentID string) (
 func (m *mockBenchmarkStore) ListAgents(ctx context.Context) ([]string, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) ListAgentModels(ctx context.Context) ([][2]string, error) {
-	return nil, nil
-}
-func (m *mockBenchmarkStore) GetLatestRunByAgentModel(ctx context.Context, agentID, model string) (*store.BenchmarkRun, error) {
-	return nil, nil
-}
 func (m *mockBenchmarkStore) GetVerdictTrend(ctx context.Context, agentID string, weeks int) ([]string, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, _ *time.Location, _ int, _ int) ([]time.Time, error) {
+func (m *mockBenchmarkStore) ListRunCycles(ctx context.Context, loc *time.Location, limit, offset int) ([]time.Time, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, _, _ time.Time) ([]store.BenchmarkRun, error) {
+func (m *mockBenchmarkStore) QueryModelSummaries(ctx context.Context) ([]store.BenchmarkModelSummary, error) {
 	return nil, nil
 }
-func (m *mockBenchmarkStore) GetVerdictTrendByModel(ctx context.Context, agentID, model string, weeks int) ([]string, error) {
+func (m *mockBenchmarkStore) QueryRunsInWindow(ctx context.Context, since, until time.Time) ([]store.BenchmarkRun, error) {
 	return nil, nil
+}
+func (m *mockBenchmarkStore) MarkSupersededRuns(ctx context.Context, agentID string, newRunAt time.Time, newModel string, cycleStart, cycleEnd time.Time) error {
+	return nil
 }
 func (m *mockBenchmarkStore) Close() error { return nil }
 

@@ -38,10 +38,16 @@ const METRONOUS_DATA_DIR = _rawDataDir.endsWith("/data") ? _rawDataDir : _rawDat
 
 const METRONOUS_DEBUG = process.env.METRONOUS_DEBUG === "true" || process.env.METRONOUS_DEBUG === "1"
 
+function ensureDataDir() {
+  const fs = require("fs") as typeof import("fs")
+  fs.mkdirSync(METRONOUS_DATA_DIR, { recursive: true })
+}
+
 // Log to file instead of console to avoid TUI interference
 const LOG_FILE = `${METRONOUS_DATA_DIR}/plugin.log`
 function writeLog(level: string, ...args: unknown[]) {
   try {
+    ensureDataDir()
     const fs = require("fs")
     const line = `[${new Date().toISOString()}] [${level}] ${args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`
     fs.appendFileSync(LOG_FILE, line)
@@ -56,6 +62,78 @@ function log(...args: unknown[]) {
 
 function logError(...args: unknown[]) {
   writeLog("ERROR", ...args)
+}
+
+// ─── Shared Secret for Authenticated Ingest ───────────────────────────────────
+//
+// The plugin authenticates to the daemon using a shared secret stored in
+// {dataDir}/ingest.key. This prevents unauthorized local processes from
+// forging telemetry events or poisoning benchmark data.
+
+const INGEST_KEY_FILE = `${METRONOUS_DATA_DIR}/ingest.key`
+
+/**
+ * generateSecret generates a cryptographically secure random string (32 bytes hex = 64 chars).
+ */
+function generateSecret(): string {
+  const crypto = require("crypto")
+  return crypto.randomBytes(32).toString("hex")
+}
+
+/**
+ * getOrCreateSharedSecret reads the shared secret from disk, or generates
+ * a new one if it does not exist. The secret is created with restrictive
+ * permissions (owner read/write only).
+ */
+function getOrCreateSharedSecret(): string | null {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    // Read existing secret
+    if (fs.existsSync(INGEST_KEY_FILE)) {
+      const secret = fs.readFileSync(INGEST_KEY_FILE, "utf8").trim()
+      if (secret.length === 64) {
+        log(`Loaded existing ingest secret (${secret.length} chars)`)
+        return secret
+      }
+      // Invalid secret - regenerate
+      logError("Invalid ingest key file, regenerating")
+    }
+    // Generate new secret
+    ensureDataDir()
+    const newSecret = generateSecret()
+    fs.writeFileSync(INGEST_KEY_FILE, newSecret, { mode: 0o600 })
+    log(`Generated new ingest secret`)
+    return newSecret
+  } catch (err) {
+    logError("Failed to load/create ingest secret:", err)
+    return null
+  }
+}
+
+/**
+ * Sign the request body using HMAC-SHA256. The signature is sent in the
+ * X-Metronous-Auth header as "sha256:<hex-signature>".
+ */
+function signBody(secret: string, body: string): string {
+  const crypto = require("crypto")
+  const hmac = crypto.createHmac("sha256", secret)
+  hmac.update(body)
+  return `sha256:${hmac.digest("hex")}`
+}
+
+// Lazy-loaded shared secret (initialized on first HTTP request)
+let cachedSharedSecret: string | null = null
+let cachedSecretTime: number = 0
+const CACHE_REFRESH_INTERVAL = 5 * 60 * 1000 // 5 minutes
+
+function getSharedSecret(): string | null {
+  const now = Date.now()
+  // Refresh if never cached or after cache interval
+  if (cachedSharedSecret === null || now - cachedSecretTime > CACHE_REFRESH_INTERVAL) {
+    cachedSharedSecret = getOrCreateSharedSecret()
+    cachedSecretTime = now
+  }
+  return cachedSharedSecret
 }
 
 // ─── Session State ────────────────────────────────────────────────────────────
@@ -73,24 +151,90 @@ interface SessionState {
   totalCostUsd: number
   promptTokens: number
   completionTokens: number
+  /** MAX cost seen in the current model segment — segment total when idle */
+  lastStepCost: number
+  /** Last tokens.total seen — used to detect model switches (resets to small value) */
+  lastStepTokensTotal: number
+  /** Accumulated cost from completed segments (before current segment) */
+  completedSegmentsCost: number
+  /** The last model actively used in this session (updated on every chat.params) */
+  lastActiveModel: string
+  /** Timestamp of the last idle event — used to decide when to evict from memory */
+  lastIdleAt: number
+}
+
+/**
+ * normalizeModel preserves the full provider/model string (e.g. "opencode/claude-sonnet-4-6")
+ * so that different providers of the same base model can be compared independently.
+ * Only cleans up edge cases like empty strings or undefined.
+ */
+function normalizeModel(model: string): string {
+  if (!model || model === "undefined/undefined") return "unknown"
+  return model
 }
 
 const sessions = new Map<string, SessionState>()
 
+// Persist accumulated cost to disk so restarts don't lose progress.
+const COST_CACHE_FILE = `${METRONOUS_DATA_DIR}/session_costs.json`
+
+function loadCostCache(): Record<string, number> {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (!fs.existsSync(COST_CACHE_FILE)) return {}
+    const parsed = JSON.parse(fs.readFileSync(COST_CACHE_FILE, "utf8"))
+    if (!(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed))) return {}
+    const validated: Record<string, number> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value)) validated[key] = value
+    }
+    return validated
+  } catch (err) {
+    logError("loadCostCache failed:", err)
+    return {}
+  }
+}
+
+function saveCostCache(sessionId: string, cost: number) {
+  try {
+    if (!Number.isFinite(cost)) {
+      logError("saveCostCache: refusing to write non-finite cost:", cost)
+      return
+    }
+    ensureDataDir()
+    const fs = require("fs") as typeof import("fs")
+    costCache[sessionId] = cost
+    fs.writeFileSync(COST_CACHE_FILE, JSON.stringify(costCache))
+  } catch (err) {
+    logError("saveCostCache failed:", err)
+  }
+}
+
+const costCache = loadCostCache()
+
 function getOrCreateSession(sessionId: string, agentId = "opencode", model = "unknown"): SessionState {
   if (!sessions.has(sessionId)) {
+    const normalizedModel = normalizeModel(model)
+    const hasProviderPrefix = normalizedModel.includes("/")
+    // Restore cost from disk cache if OpenCode was restarted mid-session
+    const restoredCost = costCache[sessionId] ?? 0
     sessions.set(sessionId, {
       startTime: Date.now(),
-      model,
+      model: hasProviderPrefix ? normalizedModel : "unknown",
       agentId,
       toolCalls: 0,
       successfulToolCalls: 0,
       errors: 0,
       reworkCount: 0,
       recentTools: new Map(),
-      totalCostUsd: 0,
+      totalCostUsd: restoredCost,
       promptTokens: 0,
       completionTokens: 0,
+      lastStepCost: 0,
+      lastStepTokensTotal: 0,
+      completedSegmentsCost: 0,
+      lastActiveModel: hasProviderPrefix ? normalizedModel : "unknown",
+      lastIdleAt: 0,
     })
   }
   return sessions.get(sessionId)!
@@ -131,13 +275,91 @@ function calculateQualityProxy(state: SessionState): number {
 const PORT_FILE = `${METRONOUS_DATA_DIR}/mcp.port`
 const MAX_PORT_WAIT_MS = 30_000
 const PORT_POLL_INTERVAL_MS = 200
-const MAX_PRE_READY_QUEUE = 500
+const POST_TIMEOUT_RECOVERY_POLL_MS = 2_000
+const PRE_READY_SPOOL_FILE = `${METRONOUS_DATA_DIR}/pre-ready-events.jsonl`
 
 let serverPort: number | null = null
 let serverReady = false
 
-// Pre-ready queue: events buffered while waiting for the server to start.
-let preReadyQueue: object[] = []
+type IngestPayload = Record<string, unknown>
+
+let preReadyLock = Promise.resolve()
+
+async function withPreReadyLock<T>(task: () => Promise<T> | T): Promise<T> {
+  const run = preReadyLock.then(task, task)
+  preReadyLock = run.then(() => undefined, () => undefined)
+  return run
+}
+
+function readQueuedPayloads(): IngestPayload[] {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (!fs.existsSync(PRE_READY_SPOOL_FILE)) return []
+    const raw = fs.readFileSync(PRE_READY_SPOOL_FILE, "utf8")
+    const payloads: IngestPayload[] = []
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          payloads.push(parsed as IngestPayload)
+        } else {
+          logError("readQueuedPayloads: skipping non-object payload")
+        }
+      } catch (err) {
+        logError("readQueuedPayloads: skipping malformed payload:", err)
+      }
+    }
+    return payloads
+  } catch (err) {
+    logError("readQueuedPayloads failed:", err)
+    return []
+  }
+}
+
+function clearQueuedPayloads() {
+  try {
+    const fs = require("fs") as typeof import("fs")
+    if (fs.existsSync(PRE_READY_SPOOL_FILE)) {
+      fs.writeFileSync(PRE_READY_SPOOL_FILE, "")
+    }
+  } catch (err) {
+    logError("clearQueuedPayloads failed:", err)
+  }
+}
+
+function appendQueuedPayload(payload: IngestPayload) {
+  ensureDataDir()
+  const fs = require("fs") as typeof import("fs")
+  fs.appendFileSync(PRE_READY_SPOOL_FILE, `${JSON.stringify(payload)}\n`)
+}
+
+async function enqueuePreReadyPayload(payload: IngestPayload): Promise<void> {
+  await withPreReadyLock(async () => {
+    appendQueuedPayload(payload)
+  })
+}
+
+async function flushQueuedPayloads(): Promise<void> {
+  const queued = readQueuedPayloads()
+  if (queued.length === 0) return
+
+  log(`Flushing ${queued.length} persisted pre-ready event(s)`)
+  clearQueuedPayloads()
+
+  for (let i = 0; i < queued.length; i++) {
+    const payload = queued[i]
+    const sent = await httpPost(payload)
+    if (!sent) {
+      appendQueuedPayload(payload)
+      for (let j = i + 1; j < queued.length; j++) {
+        appendQueuedPayload(queued[j])
+      }
+      return
+    }
+  }
+}
 
 // sleep returns a promise that resolves after ms milliseconds.
 function sleep(ms: number): Promise<void> {
@@ -164,96 +386,182 @@ function readPortFile(): number | null {
   }
 }
 
-// waitForServer polls the port file until the server is ready or timeout is reached.
+// waitForServer polls the port file until the server is ready.
 // Once ready, flushes any buffered pre-ready events.
 async function waitForServer(agentId: string): Promise<void> {
   log(`Waiting for Metronous server (port file: ${PORT_FILE})`)
-  const deadline = Date.now() + MAX_PORT_WAIT_MS
+  const startedAt = Date.now()
+  let warned = false
   let attempt = 0
 
-  while (Date.now() < deadline) {
+  while (true) {
     attempt++
     const port = readPortFile()
     if (port !== null) {
-      serverPort = port
-      serverReady = true
-      log(`Server ready on port ${port} — agent: ${agentId} (found after ${attempt} attempts)`)
-
-      // Flush buffered pre-ready events.
-      if (preReadyQueue.length > 0) {
-        log(`Flushing ${preReadyQueue.length} buffered pre-ready event(s)`)
-        const queued = preReadyQueue.splice(0)
-        for (const payload of queued) {
-          await httpPost(payload)
-        }
-      }
+      await withPreReadyLock(async () => {
+        serverPort = port
+        serverReady = true
+        log(`Server ready on port ${port} — agent: ${agentId} (found after ${attempt} attempts)`)
+        await flushQueuedPayloads()
+      })
       return
     }
-    log(`waitForServer: attempt ${attempt}, port file not found yet, retrying in ${PORT_POLL_INTERVAL_MS}ms`)
-    await sleep(PORT_POLL_INTERVAL_MS)
-  }
 
-  logError(`Metronous server did not start within ${MAX_PORT_WAIT_MS / 1000}s — events will be dropped for this session (tried ${attempt} times)`)
+    const elapsedMs = Date.now() - startedAt
+    if (!warned && elapsedMs >= MAX_PORT_WAIT_MS) {
+      warned = true
+      logError(`Metronous server still not ready after ${MAX_PORT_WAIT_MS / 1000}s — buffering continues on disk until readiness appears`)
+    }
+
+    log(`waitForServer: attempt ${attempt}, port file not found yet, retrying in ${warned ? POST_TIMEOUT_RECOVERY_POLL_MS : PORT_POLL_INTERVAL_MS}ms`)
+    await sleep(warned ? POST_TIMEOUT_RECOVERY_POLL_MS : PORT_POLL_INTERVAL_MS)
+  }
 }
 
+// MAX_RECONNECT_ATTEMPTS is how many times httpPost will try to re-read the
+// port file and retry after an ECONNREFUSED before giving up on this payload.
+const MAX_RECONNECT_ATTEMPTS = 3
+const RECONNECT_DELAY_MS = 500
+
 // httpPost sends a JSON payload to POST /ingest on the server.
-async function httpPost(payload: object): Promise<void> {
+// On ECONNREFUSED it re-reads mcp.port (the daemon may have restarted and
+// changed ports) and retries up to MAX_RECONNECT_ATTEMPTS times.
+// Includes HMAC-SHA256 signature in X-Metronous-Auth header for authentication.
+async function httpPost(payload: object): Promise<boolean> {
   if (!serverPort) {
     log("httpPost: serverPort is null, dropping event")
-    return
+    return false
   }
-  try {
-    const http = require("http") as typeof import("http")
-    const body = JSON.stringify(payload)
-    await new Promise<void>((resolve) => {
+  const http = require("http") as typeof import("http")
+  const body = JSON.stringify(payload)
+
+  // Sign the request body for authentication
+  const secret = getSharedSecret()
+  const authHeader = secret ? signBody(secret, body) : ""
+
+  for (let attempt = 0; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+    const port = serverPort!
+    const success = await new Promise<boolean>((resolve) => {
       const req = http.request(
         {
           hostname: "127.0.0.1",
-          port: serverPort,
+          port,
           path: "/ingest",
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
+            "X-Metronous-Auth": authHeader,
           },
         },
         (res) => {
-          // Drain the response body so Node.js doesn't leak the socket.
-          res.resume()
-          res.on("end", resolve)
+          let responseBody = ""
+          res.setEncoding("utf8")
+          res.on("data", (chunk: string) => {
+            responseBody += chunk
+          })
+          res.on("end", () => {
+            if ((res.statusCode ?? 0) >= 400) {
+              logError(`HTTP ingest rejected with status ${res.statusCode}: ${responseBody}`)
+              resolve(false)
+              return
+            }
+
+            if (responseBody.trim()) {
+              try {
+                const parsed = JSON.parse(responseBody) as { isError?: boolean }
+                if (parsed?.isError === true) {
+                  logError(`HTTP ingest returned isError=true: ${responseBody}`)
+                  resolve(false)
+                  return
+                }
+              } catch (err) {
+                logError("HTTP ingest returned invalid JSON:", (err as Error).message)
+                resolve(false)
+                return
+              }
+            }
+
+            resolve(true)
+          })
         }
       )
       req.setTimeout(5000, () => {
         req.destroy()
-        resolve()
+        resolve(false)
       })
-      req.on("error", (err) => {
-        logError("HTTP ingest error:", err.message)
-        resolve()
+      req.on("error", (err: Error & { code?: string }) => {
+        if (err.code === "ECONNREFUSED") {
+          // Daemon restarted — invalidate cached port so we re-read the file.
+          log(`httpPost: ECONNREFUSED on port ${port} — will re-read mcp.port (attempt ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS})`)
+          serverPort = null
+          serverReady = false
+        } else {
+          logError("HTTP ingest error:", err.message)
+        }
+        resolve(false)
       })
       req.end(body)
     })
-  } catch (err) {
-    logError("httpPost error:", (err as Error).message)
+
+    if (success) return true
+
+    if (attempt < MAX_RECONNECT_ATTEMPTS) {
+      // Wait briefly then re-read the port file.
+      await sleep(RECONNECT_DELAY_MS)
+      const newPort = readPortFile()
+      if (newPort !== null) {
+        serverPort = newPort
+        serverReady = true
+        log(`httpPost: reconnected to daemon on new port ${newPort}`)
+      } else {
+        log("httpPost: mcp.port not available yet, will retry")
+      }
+    } else {
+      logError(`httpPost: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`)
+    }
   }
+
+  return false
 }
 
 async function callIngest(payload: object): Promise<void> {
   const eventType = (payload as { event_type?: string }).event_type
 
   if (!serverReady) {
-    // Buffer the event; it will be flushed once the server is ready.
-    if (preReadyQueue.length >= MAX_PRE_READY_QUEUE) {
-      preReadyQueue.shift() // drop oldest to bound memory
-      writeLog("WARN", "[Metronous] preReadyQueue full, dropped oldest event")
+    await withPreReadyLock(async () => {
+      if (serverReady) return
+
+      // Daemon may have restarted — try to re-read the port file before buffering.
+      const port = readPortFile()
+      if (port !== null) {
+        serverPort = port
+        serverReady = true
+        log(`callIngest: daemon recovered on port ${port}, flushing pre-ready queue`)
+        await flushQueuedPayloads()
+        return
+      }
+
+      // Still not ready — persist the event durably.
+      log(`Not ready yet, buffering ${eventType} on disk`)
+      appendQueuedPayload(payload as IngestPayload)
+    })
+
+    if (!serverReady) return
+
+    log(`Sending ingest via HTTP after recovery: ${eventType}`)
+    const sent = await httpPost(payload)
+    if (!sent) {
+      await enqueuePreReadyPayload(payload as IngestPayload)
     }
-    log(`Not ready yet, buffering ${eventType}`)
-    preReadyQueue.push(payload)
     return
   }
 
   log(`Sending ingest via HTTP: ${eventType}`)
-  await httpPost(payload)
+  const sent = await httpPost(payload)
+  if (!sent) {
+    await enqueuePreReadyPayload(payload as IngestPayload)
+  }
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -271,8 +579,8 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
   log(`Initializing — default agent: ${currentAgentId}, data: ${METRONOUS_DATA_DIR}`)
 
-  // Wait for the server OpenCode spawned (non-blocking — if it doesn't start,
-  // events are silently dropped after timeout).
+  // Wait for the server OpenCode spawned (non-blocking — if it does not start,
+  // events are persisted on disk until readiness appears).
   waitForServer(currentAgentId).catch((err: Error) => {
     logError("waitForServer error:", err.message)
   })
@@ -294,10 +602,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
           : rawAgent?.name ?? rawAgent?.id ?? (rawAgent ? JSON.stringify(rawAgent) : null)
         const agentName = envAgentId ?? resolvedAgent ?? "opencode"
 
-        // Build model string: "providerID/modelID" (e.g. "opencode/claude-sonnet-4-6")
-        const modelStr = input.model
+        // Build model string and normalize to strip provider prefixes.
+        const rawModelStr = input.model
           ? `${input.model.providerID}/${input.model.modelID}`
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         // Update current agent for sessions not yet seen
         if (!envAgentId && resolvedAgent) {
@@ -306,9 +615,13 @@ export const plugin: Plugin = async ({ directory, client }) => {
 
         const isNewSession = !sessions.has(sessionId)
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        // Update model/agent if the session already existed with defaults
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        // Update model/agent if the session already existed with defaults.
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always track the last active model (may change mid-session).
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         log(`chat.message — session: ${sessionId}, agent: ${agentName}, model: ${modelStr}`)
 
@@ -342,19 +655,24 @@ export const plugin: Plugin = async ({ directory, client }) => {
         // Model may have .id (short: "claude-sonnet-4-6") and also .providerID/.modelID
         // Prefer building the full "providerID/modelID" string; fall back to .id
         const rawModel = input.model as any
-        const modelStr = rawModel
+        const rawModelStr = rawModel
           ? (rawModel.providerID && rawModel.modelID
               ? `${rawModel.providerID}/${rawModel.modelID}`
               : rawModel.id ?? "unknown")
           : "unknown"
+        const modelStr = normalizeModel(rawModelStr)
 
         if (!envAgentId && resolvedAgent) {
           currentAgentId = resolvedAgent
         }
 
         const state = getOrCreateSession(sessionId, agentName, modelStr)
-        if (state.model === "unknown" && modelStr !== "unknown") state.model = modelStr
+        if (state.model === "unknown" && modelStr !== "unknown" && modelStr.includes("/")) state.model = modelStr
         if (state.agentId === "opencode" && agentName !== "opencode") state.agentId = agentName
+        // Always update lastActiveModel — chat.params fires before every LLM call.
+        // Only update if the new model has a provider prefix — never downgrade to a bare model name.
+        if (modelStr !== "unknown" && modelStr.includes("/")) state.lastActiveModel = modelStr
+        else if (modelStr !== "unknown" && state.lastActiveModel === "unknown") state.lastActiveModel = modelStr
 
         // Debug: log raw agent/model shapes to help diagnose future issues
         log("CHAT_PARAMS", JSON.stringify({ rawAgent, rawModel, agentName, modelStr }))
@@ -401,6 +719,7 @@ export const plugin: Plugin = async ({ directory, client }) => {
           tool_name: toolName,
           tool_success: success,
           duration_ms: (output?.metadata as any)?.durationMs ?? 0,
+          // This is a lagging snapshot from the previous step-finish, not the current step's cost.
           cost_usd: state.totalCostUsd,
           prompt_tokens: state.promptTokens,
           completion_tokens: state.completionTokens,
@@ -425,18 +744,18 @@ export const plugin: Plugin = async ({ directory, client }) => {
           if (!sessionId) return
           const state = sessions.get(sessionId)
           if (!state) return
-          // step-finish.cost and tokens are CUMULATIVE totals for the session
-          // Always take the latest (highest) value — it already includes all previous steps
-          if ((part.cost ?? 0) > state.totalCostUsd) {
-            state.totalCostUsd = part.cost ?? 0
-          }
-          if ((part.tokens?.input ?? 0) > state.promptTokens) {
-            state.promptTokens = part.tokens?.input ?? 0
-          }
-          if ((part.tokens?.output ?? 0) > state.completionTokens) {
-            state.completionTokens = part.tokens?.output ?? 0
-          }
-          log(`step-finish — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
+          // step-finish.cost is the per-step cost reported by the OpenCode runtime.
+          // Accumulate it so "spent" matches the real request-level usage.
+          const rawCost = part.cost
+          const newCost = Number.isFinite(rawCost) ? Math.max(0, rawCost) : 0
+          if (typeof rawCost === "number" && (!Number.isFinite(rawCost) || rawCost < 0)) logError("step-finish cost was negative:", rawCost)
+          const newTokensTotal = part.tokens?.total ?? 0
+          state.totalCostUsd += newCost
+          state.lastStepTokensTotal = newTokensTotal
+          state.promptTokens += Number.isFinite(part.tokens?.input) ? part.tokens!.input : 0
+          state.completionTokens += Number.isFinite(part.tokens?.output) ? part.tokens!.output : 0
+          saveCostCache(sessionId, state.totalCostUsd)
+          log(`step-finish — stepCost=$${newCost.toFixed(4)} total=$${state.totalCostUsd.toFixed(4)}`)
         }
 
         if (event.type === "session.idle") {
@@ -448,39 +767,19 @@ export const plugin: Plugin = async ({ directory, client }) => {
           // Snapshot duration BEFORE any await to avoid wall-clock inflation.
           const durationMs = Date.now() - state.startTime
 
-          // Reconcile via client.session.messages() — correct path param is { id: sessionId }
-          try {
-            const result = await client.session.messages({ path: { id: sessionId } })
-            writeLog("RAW_MESSAGES", JSON.stringify(result).slice(0, 500))
-            const messages = (result as any)?.data ?? []
-            let costMax = 0, promptMax = 0, completionMax = 0
-            for (const msg of messages) {
-              for (const part of (msg.parts ?? [])) {
-                if (part?.type === "step-finish") {
-                  // step-finish.cost and tokens are CUMULATIVE — take MAX across all messages
-                  // (the last step-finish holds the true session total)
-                  costMax = Math.max(costMax, part.cost ?? 0)
-                  promptMax = Math.max(promptMax, part.tokens?.input ?? 0)
-                  completionMax = Math.max(completionMax, part.tokens?.output ?? 0)
-                }
-              }
-            }
-            if (costMax > 0 || promptMax > 0) {
-              state.totalCostUsd = costMax
-              state.promptTokens = promptMax
-              state.completionTokens = completionMax
-            }
-            log(`Session idle reconciled — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}`)
-          } catch (e) {
-            log(`Could not reconcile messages: ${e}`)
-          }
+          // Cost is accumulated in real-time from step-finish events (message.part.updated).
+          // Also save on idle so the cache always reflects the latest complete cost.
+          saveCostCache(sessionId, state.totalCostUsd)
+          log(`Session idle — cost: $${state.totalCostUsd.toFixed(4)}, tokens: ${state.promptTokens}/${state.completionTokens}, model: ${state.lastActiveModel}`)
 
           const quality = calculateQualityProxy(state)
+          // Use lastActiveModel (the model active at session end) for the complete event.
+          const completeModel = state.lastActiveModel
           await callIngest({
             agent_id: state.agentId,
             event_type: "complete",
             session_id: sessionId,
-            model: state.model,
+            model: completeModel,
             cost_usd: state.totalCostUsd,
             prompt_tokens: state.promptTokens,
             completion_tokens: state.completionTokens,
@@ -489,7 +788,11 @@ export const plugin: Plugin = async ({ directory, client }) => {
             duration_ms: durationMs,
             timestamp: now(),
           })
-          sessions.delete(sessionId)
+
+          // Keep the session in memory indefinitely.
+          // The user may return to the same session after minutes, hours, or days.
+          // The map is reset naturally when OpenCode restarts — no manual eviction needed.
+          state.lastIdleAt = Date.now()
         }
 
         if (event.type === "session.error") {

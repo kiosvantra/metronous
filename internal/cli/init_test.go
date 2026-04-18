@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/kiosvantra/metronous/internal/cli"
@@ -75,6 +76,20 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 				t.Errorf("file %q: permissions got %o, want %o", f.path, gotPerm, f.perm)
 			}
 		}
+	}
+
+	// Verify config.yaml includes archive section with safe defaults.
+	configPath := filepath.Join(tempHome, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	configStr := string(configData)
+	if !strings.Contains(configStr, "archive:") {
+		t.Fatalf("config.yaml missing archive section")
+	}
+	if !strings.Contains(configStr, "enabled: false") {
+		t.Fatalf("config.yaml must default archive.enabled to false")
 	}
 
 	// Verify tracking.db was created.

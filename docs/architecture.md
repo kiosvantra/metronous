@@ -23,7 +23,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
 | **Metronous Daemon** (`metronous server --daemon-mode`) | Long-lived systemd user service that ingests telemetry, stores it in SQLite, runs weekly benchmarks, exposes HTTP API | Go | Managed by systemd; one instance per user; survives OpenCode restarts |
 | **SQLite Stores** | Persistent storage for raw events (`tracking.db`) and pre-aggregated benchmark data (`benchmark.db`) | SQLite via `internal/store/sqlite/` | File-based; located in `~/.metronous/data/` |
 | **CLI (`metronous` command)** | User-facing commands: `install`, `init`, `benchmark`, `report`, `dashboard`, etc. | Go/Cobra | Interacts with daemon via direct function calls (when run locally) or HTTP (if daemon remote—not currently supported) |
-| **TUI Dashboard** (`metronous dashboard`) | Terminal UI showing Tracking, Benchmark, and Config tabs | Go/Bubbletea | Reads directly from SQLite files; presents telemetry and benchmark results |
+| **TUI Dashboard** (`metronous dashboard`) | Terminal UI showing five tabs: Benchmark History Summary, Benchmark Detailed, Tracking, Charts, and Config | Go/Bubbletea | Reads directly from SQLite files; presents telemetry, cost charts, and benchmark results |
 | **OpenCode MCP Configuration** | Tells OpenCode how to reach the shim | JSON in `~/.config/opencode/opencode.json` | After `metronous install`: `{ "mcp": { "metronous": { "command": ["/absolute/path/to/metronous", "mcp"], "type": "local" } } }` |
 
 ---
@@ -48,6 +48,7 @@ This document describes the runtime architecture of Metronous, focusing on compo
   - `GET /tools` – returns list of supported tools (currently only `ingest`)
 - **Details**:
   - shim reads the port from `~/.metronous/data/mcp.port`
+  - if `METRONOUS_INGEST_TOKEN` is set, the shim includes `X-Metronous-Auth` on ingest requests and the daemon validates it during the transition
   - shim performs a health check (`GET /health`) before using a cached port to avoid dead daemon connections
   - shim uses a short HTTP timeout; on failure it treats the daemon as unhealthy and retries via the normal daemon startup path
 
@@ -72,9 +73,10 @@ This document describes the runtime architecture of Metronous, focusing on compo
    Plugin sends the event as an MCP `tools/call ingest` message to the `metronous mcp` shim over stdio.
 
 3. **Shim Processing**  
-   - Shim parses the MCP message, extracts the JSON payload.
-   - Shim reads the current daemon port from `~/.metronous/data/mcp.port`.
-   - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
+    - Shim parses the MCP message, extracts the JSON payload.
+    - Shim reads the current daemon port from `~/.metronous/data/mcp.port`.
+    - If `METRONOUS_INGEST_TOKEN` is set, Shim adds `X-Metronous-Auth` to the HTTP request.
+    - Shim forwards the payload as an HTTP POST to `http://127.0.0.1:<port>/ingest`.
 
 4. **Daemon Ingestion**  
     - Daemon’s HTTP handler (`ingestHandler`) receives the POST, deserializes the JSON, and passes it to `tracking.HandleIngest`.
@@ -85,13 +87,15 @@ This document describes the runtime architecture of Metronous, focusing on compo
    - `benchmark.db` holds pre‑aggregated summaries used by the weekly benchmark engine (updated incrementally as events arrive).
 
 6. **Weekly Benchmark**  
-    - At the configured time (default: Sundays 02:00 local), the daemon triggers the benchmark engine.
+    - At the configured time (default: Sundays 02:00 local), the daemon triggers the benchmark engine. An intraweek run can be triggered manually via `F5` in the **Benchmark Detailed** tab.
     - Engine reads aggregates from `benchmark.db`, computes per‑model scores (accuracy, latency_p95, tool_rate, cost, quality), normalizes them against the min/max observed across all models in the window, applies weights, and calculates delta vs. baseline.
+    - **Active model lookup**: at run time, the runner reads `~/.config/opencode/opencode.json` to determine which model is currently configured for each agent. That model's row receives `run_status = 'active'`; all others in the same cycle receive `run_status = 'superseded'`. The full provider-prefixed name is stored in `raw_model`; table displays use the normalized (prefix-stripped) name.
+    - **Cross-cycle superseding**: `MarkSupersededRuns()` updates previous `active` rows to `superseded` when the agent's active model has changed since the last cycle.
     - Benchmark discovery excludes effectively error-only agents to avoid placeholder rows like `opencode/unknown` and `INSUFFICIENT_DATA`.
     - Result: a verdict (`KEEP`, `SWITCH`, or `INSUFFICIENT_DATA`) per model, plus an `active_model` recommendation written to `~/.metronous/thresholds.json`.
 
 7. **Presentation**  
-   - TUI Dashboard reads `tracking.db` (for real‑time event stream) and `benchmark.db`/`thresholds.json` (for benchmark tab and active model display).
+    - TUI Dashboard reads `tracking.db` (for real-time event stream and daily cost charts) and `benchmark.db`/`thresholds.json` (for the Benchmark History Summary, Benchmark Detailed, and Charts tabs).
    - `metronous report` CLI prints formatted tables from the same sources.
    - User reviews the recommendation in the dashboard or CLI report and manually decides whether to change the active model in OpenCode.
 

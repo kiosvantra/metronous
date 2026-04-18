@@ -40,13 +40,18 @@ var ErrQueueFull = errors.New("event queue is full: timeout exceeded")
 //	defer q.Stop()
 //	q.Enqueue(event)
 type EventQueue struct {
-	events        chan store.Event
+	events        chan queuedEvent
 	store         store.EventStore
 	logger        *zap.Logger
 	wg            sync.WaitGroup
 	closed        atomic.Bool
 	timeout       time.Duration
 	droppedEvents atomic.Int64
+}
+
+type queuedEvent struct {
+	event store.Event
+	ack   chan error
 }
 
 // NewEventQueue creates a new EventQueue with the given buffer size.
@@ -65,7 +70,7 @@ func NewEventQueueWithTimeout(es store.EventStore, bufferSize int, logger *zap.L
 		logger = zap.NewNop()
 	}
 	return &EventQueue{
-		events:  make(chan store.Event, bufferSize),
+		events:  make(chan queuedEvent, bufferSize),
 		store:   es,
 		logger:  logger,
 		timeout: timeout,
@@ -96,6 +101,26 @@ func (q *EventQueue) Stop() {
 // Returns ErrQueueClosed if the queue has been stopped.
 // Returns ErrQueueFull if the buffer is at capacity and the timeout elapses.
 func (q *EventQueue) Enqueue(event store.Event) error {
+	return q.enqueue(event, nil)
+}
+
+// EnqueueAndWait adds an event to the queue and waits until it has been
+// persisted or the context is canceled.
+func (q *EventQueue) EnqueueAndWait(ctx context.Context, event store.Event) error {
+	ack := make(chan error, 1)
+	if err := q.enqueue(event, ack); err != nil {
+		return err
+	}
+
+	select {
+	case err := <-ack:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (q *EventQueue) enqueue(event store.Event, ack chan error) error {
 	if q.closed.Load() {
 		return ErrQueueClosed
 	}
@@ -104,7 +129,7 @@ func (q *EventQueue) Enqueue(event store.Event) error {
 	defer timer.Stop()
 
 	select {
-	case q.events <- event:
+	case q.events <- queuedEvent{event: event, ack: ack}:
 		return nil
 	case <-timer.C:
 		return ErrQueueFull
@@ -134,7 +159,8 @@ const MaxRetries = 3
 func (q *EventQueue) writer() {
 	defer q.wg.Done()
 
-	for event := range q.events {
+	for item := range q.events {
+		event := item.event
 		var err error
 		var lastErr error
 
@@ -163,6 +189,10 @@ func (q *EventQueue) writer() {
 				zap.Error(lastErr),
 			)
 			q.droppedEvents.Add(1)
+		}
+
+		if item.ack != nil {
+			item.ack <- err
 		}
 	}
 }

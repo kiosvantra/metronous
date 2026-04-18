@@ -226,6 +226,7 @@ func runMCPShim(in io.Reader, out io.Writer) error {
 		return fmt.Errorf("ensure daemon running: %w", err)
 	}
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	authToken := os.Getenv("METRONOUS_INGEST_TOKEN")
 
 	// Registered tools — we report what the daemon supports.
 	registeredTools := []map[string]interface{}{
@@ -294,7 +295,7 @@ func runMCPShim(in io.Reader, out io.Writer) error {
 			})
 
 		case "tools/call":
-			result, callErr := shimForwardToolCall(baseURL, req.Params)
+			result, callErr := shimForwardToolCall(baseURL, authToken, req.Params)
 			if callErr != nil {
 				_ = writeResp(shimJSONRPCResponse{
 					JSONRPC: "2.0",
@@ -329,7 +330,9 @@ func runMCPShim(in io.Reader, out io.Writer) error {
 }
 
 // shimForwardToolCall parses the tools/call params and POSTs to the daemon /ingest endpoint.
-func shimForwardToolCall(baseURL string, rawParams json.RawMessage) (interface{}, error) {
+// When METRONOUS_INGEST_TOKEN is set, it is sent as a transport-level header so the
+// daemon can authenticate the shim without changing the ingest payload schema.
+func shimForwardToolCall(baseURL, authToken string, rawParams json.RawMessage) (interface{}, error) {
 	var params struct {
 		Name      string                 `json:"name"`
 		Arguments map[string]interface{} `json:"arguments"`
@@ -349,7 +352,16 @@ func shimForwardToolCall(baseURL string, rawParams json.RawMessage) (interface{}
 		return nil, fmt.Errorf("marshal arguments: %w", err)
 	}
 
-	resp, err := http.Post(baseURL+"/ingest", "application/json", bytes.NewReader(body)) //nolint:gosec
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/ingest", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("X-Metronous-Auth", authToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("post to daemon: %w", err)
 	}

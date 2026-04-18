@@ -36,6 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_events_agent_ts ON events(agent_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(event_type, timestamp);
 CREATE INDEX IF NOT EXISTS idx_events_model ON events(model, timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_type_session_ts_cost ON events(event_type, session_id, timestamp, cost_usd);
 
 -- Materialized summary cache
 CREATE TABLE IF NOT EXISTS agent_summaries (
@@ -48,13 +49,17 @@ CREATE TABLE IF NOT EXISTS agent_summaries (
 );
 `
 
-// walPragmas configures SQLite for high-concurrency WAL mode.
-// These are applied every time a connection is opened.
-const walPragmas = `
+// writePragmas configures SQLite write connections for WAL mode.
+const writePragmas = `
 PRAGMA journal_mode=WAL;
 PRAGMA busy_timeout=5000;
 PRAGMA synchronous=NORMAL;
 PRAGMA wal_autocheckpoint=1000;
+`
+
+// readPragmas configures SQLite read-only connections.
+const readPragmas = `
+PRAGMA busy_timeout=5000;
 `
 
 // openDB opens (or creates) a SQLite database at path and applies WAL pragmas.
@@ -69,7 +74,7 @@ func openDB(path string) (*sql.DB, error) {
 	// so a single open connection is sufficient and avoids locking issues.
 	db.SetMaxOpenConns(1)
 
-	if err := applyPragmas(db); err != nil {
+	if err := applyWritePragmas(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -87,7 +92,7 @@ func openReadDB(path string) (*sql.DB, error) {
 	// Allow up to 10 concurrent read connections (WAL supports this).
 	db.SetMaxOpenConns(10)
 
-	if err := applyPragmas(db); err != nil {
+	if err := applyReadPragmas(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -95,10 +100,18 @@ func openReadDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// applyPragmas executes the WAL configuration pragmas.
-func applyPragmas(db *sql.DB) error {
-	if _, err := db.Exec(walPragmas); err != nil {
-		return fmt.Errorf("apply WAL pragmas: %w", err)
+// applyWritePragmas executes the writer-side WAL configuration.
+func applyWritePragmas(db *sql.DB) error {
+	if _, err := db.Exec(writePragmas); err != nil {
+		return fmt.Errorf("apply write pragmas: %w", err)
+	}
+	return nil
+}
+
+// applyReadPragmas executes the read-only connection configuration.
+func applyReadPragmas(db *sql.DB) error {
+	if _, err := db.Exec(readPragmas); err != nil {
+		return fmt.Errorf("apply read pragmas: %w", err)
 	}
 	return nil
 }

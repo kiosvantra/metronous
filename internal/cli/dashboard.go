@@ -30,12 +30,12 @@ The dashboard provides three tabs:
   [2] Benchmark  — historical benchmark run history
   [3] Config     — view and edit performance thresholds
 
-Key bindings:
-  1/2/3 or ←/→ : Switch tabs
-  q or ctrl+c   : Quit
-  ctrl+s        : Save thresholds (Config tab)
-  ctrl+r        : Reload thresholds (Config tab)
-  ↑/↓           : Navigate tables`,
+		Key bindings:
+		  1/2/3 or ←/→ : Switch tabs
+		  q or ctrl+c   : Quit
+		  s             : Save thresholds (Config tab)
+		  r             : Reload thresholds (Config tab)
+		  ↑/↓           : Navigate tables`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDashboard(dataDir, configPath)
 		},
@@ -101,7 +101,7 @@ func runDashboard(dataDir, configPath string) error {
 	workDir, _ := os.Getwd()
 	version := version.Version
 	model := tui.NewAppModel(es, bs, configPath, dataDir, workDir, version)
-	p := tea.NewProgram(&model, tea.WithAltScreen())
+	p := tea.NewProgram(&model, tea.WithAltScreen(), tea.WithMouseAllMotion())
 
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("dashboard error: %w", err)

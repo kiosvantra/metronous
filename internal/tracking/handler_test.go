@@ -70,6 +70,63 @@ func TestIngestHandlerValidEvent(t *testing.T) {
 	t.Logf("result: %s", result.Content[0].Text)
 }
 
+// TestIngestHandlerWaitsForDurability verifies the MCP ACK is not returned
+// before the store commit finishes.
+func TestIngestHandlerWaitsForDurability(t *testing.T) {
+	bs := &blockingStore{
+		mockStore: mockStore{},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	q := newQueueWithStore(t, bs)
+
+	req := mcp.CallToolRequest{
+		Name:      "ingest",
+		Arguments: makeIngestArgs(nil),
+	}
+
+	done := make(chan struct {
+		result *mcp.CallToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := tracking.HandleIngest(context.Background(), req, q)
+		done <- struct {
+			result *mcp.CallToolResult
+			err    error
+		}{result: result, err: err}
+	}()
+
+	select {
+	case <-bs.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("store insert did not start")
+	}
+
+	select {
+	case got := <-done:
+		t.Fatalf("HandleIngest returned before persistence completed: %+v", got)
+	default:
+	}
+
+	close(bs.release)
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("HandleIngest: %v", got.err)
+		}
+		if got.result.IsError {
+			t.Fatalf("HandleIngest returned error: %v", got.result.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HandleIngest did not return after persistence")
+	}
+	if bs.Count() != 1 {
+		t.Fatalf("expected 1 persisted event, got %d", bs.Count())
+	}
+}
+
 // TestIngestHandlerRejectsMissingAgentID verifies validation of required agent_id.
 func TestIngestHandlerRejectsMissingAgentID(t *testing.T) {
 	ms := &mockStore{}
@@ -221,7 +278,10 @@ func TestIngestHandlerOptionalFieldsAreParsed(t *testing.T) {
 		"rework_count":      float64(1),
 		"tool_name":         "bash",
 		"tool_success":      true,
-		"metadata":          map[string]interface{}{"key": "value"},
+		"metadata": map[string]interface{}{
+			"key":                      "value",
+			store.SemanticPhaseMetaKey: " DeSign ",
+		},
 	})
 
 	req := mcp.CallToolRequest{
@@ -235,6 +295,17 @@ func TestIngestHandlerOptionalFieldsAreParsed(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("HandleIngest isError=true: %v", result.Content)
+	}
+
+	events, err := ms.QueryEvents(context.Background(), store.EventQuery{})
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 stored event, got %d", len(events))
+	}
+	if events[0].Metadata[store.SemanticPhaseMetaKey] != "design" {
+		t.Fatalf("semantic phase not normalized: got %v", events[0].Metadata[store.SemanticPhaseMetaKey])
 	}
 }
 
@@ -430,6 +501,33 @@ func TestIngestValidationErrorDoesNotProduceGoError(t *testing.T) {
 	}
 }
 
+type captureArchiver struct {
+	calls int
+}
+
+func (a *captureArchiver) CaptureBronze(_ context.Context, _ map[string]interface{}, _ store.Event) (string, error) {
+	a.calls++
+	return "", nil
+}
+
+func TestHandleIngestWithArchiveCapturesBronzeWhenConfigured(t *testing.T) {
+	ms := &mockStore{}
+	q := newQueueWithStore(t, ms)
+	a := &captureArchiver{}
+
+	req := mcp.CallToolRequest{Name: "ingest", Arguments: makeIngestArgs(nil)}
+	result, err := tracking.HandleIngestWithArchive(context.Background(), req, q, a)
+	if err != nil {
+		t.Fatalf("HandleIngestWithArchive: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected non-error result: %+v", result)
+	}
+	if a.calls != 1 {
+		t.Fatalf("expected archiver to be called once, got %d", a.calls)
+	}
+}
+
 // mockStore is shared from queue_test.go via package-level declaration.
 // However, since we are in package tracking_test, we need the compatible version.
 // (The mockStore in queue_test.go is in the same package.)
@@ -448,6 +546,10 @@ func (f *failingStore) GetAgentEvents(_ context.Context, _ string, _ time.Time) 
 }
 func (f *failingStore) GetAgentSummary(_ context.Context, _ string) (store.AgentSummary, error) {
 	return store.AgentSummary{}, nil
+}
+
+func (f *failingStore) QueryDailyCostByModel(_ context.Context, _, _ time.Time) ([]store.DailyCostByModelRow, error) {
+	return nil, nil
 }
 
 func (f *failingStore) CountEvents(_ context.Context, _ store.EventQuery) (int, error) {

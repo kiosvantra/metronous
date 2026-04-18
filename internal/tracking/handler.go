@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiosvantra/metronous/internal/archive"
 	"github.com/kiosvantra/metronous/internal/mcp"
 	"github.com/kiosvantra/metronous/internal/store"
 )
@@ -125,7 +126,7 @@ func validateIngestRequest(args map[string]interface{}) (*IngestRequest, error) 
 	}
 
 	if meta, ok := args["metadata"].(map[string]interface{}); ok {
-		req.Metadata = meta
+		req.Metadata = store.NormalizeMetadataSemanticPhase(meta)
 	}
 
 	return req, nil
@@ -170,6 +171,15 @@ func (h *IngestHandler) Handle(ctx context.Context, req mcp.CallToolRequest) (*m
 // HandleIngest is a standalone ingest handler function.
 // Validates, normalizes, and enqueues the event for async persistence.
 func HandleIngest(ctx context.Context, req mcp.CallToolRequest, queue *EventQueue) (*mcp.CallToolResult, error) {
+	return HandleIngestWithArchive(ctx, req, queue, nil)
+}
+
+// HandleIngestWithArchive is equivalent to HandleIngest but optionally archives
+// ingested payloads into the local bronze stage when an archiver is provided.
+//
+// Archiving failures are intentionally non-fatal to preserve backward
+// compatibility for the primary telemetry ingestion path.
+func HandleIngestWithArchive(ctx context.Context, req mcp.CallToolRequest, queue *EventQueue, archiver archive.EventArchiver) (*mcp.CallToolResult, error) {
 	// Validate the request arguments.
 	ingestReq, err := validateIngestRequest(req.Arguments)
 	if err != nil {
@@ -182,12 +192,16 @@ func HandleIngest(ctx context.Context, req mcp.CallToolRequest, queue *EventQueu
 	// Convert to store event.
 	event := toStoreEvent(ingestReq)
 
-	// Enqueue for async storage.
-	if qErr := queue.Enqueue(event); qErr != nil {
+	// Enqueue and wait until the event is durably persisted before ACKing.
+	if qErr := queue.EnqueueAndWait(ctx, event); qErr != nil {
 		return &mcp.CallToolResult{
-			Content: []mcp.ContentItem{mcp.TextContent("failed to enqueue event: " + qErr.Error())},
+			Content: []mcp.ContentItem{mcp.TextContent("failed to persist event: " + qErr.Error())},
 			IsError: true,
 		}, nil
+	}
+
+	if archiver != nil {
+		_, _ = archiver.CaptureBronze(ctx, req.Arguments, event)
 	}
 
 	return &mcp.CallToolResult{
