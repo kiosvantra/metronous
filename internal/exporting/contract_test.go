@@ -61,6 +61,15 @@ func TestBuildContractAppliesSanitizationAndContractShape(t *testing.T) {
 	if contract.SchemaVersion != exporting.SchemaVersion {
 		t.Fatalf("schema_version mismatch: got %q want %q", contract.SchemaVersion, exporting.SchemaVersion)
 	}
+	if contract.Provenance.Contract != "sharing-leaderboard" {
+		t.Fatalf("expected sharing-leaderboard provenance contract, got %q", contract.Provenance.Contract)
+	}
+	if contract.Provenance.ConsentMode != "explicit-opt-in" {
+		t.Fatalf("expected explicit opt-in provenance consent mode, got %q", contract.Provenance.ConsentMode)
+	}
+	if err := exporting.ValidateContract(contract); err != nil {
+		t.Fatalf("expected generated contract to validate: %v", err)
+	}
 	if len(contract.BenchmarkRuns) != 1 {
 		t.Fatalf("expected 1 benchmark run, got %d", len(contract.BenchmarkRuns))
 	}
@@ -87,5 +96,21 @@ func TestBuildContractAppliesSanitizationAndContractShape(t *testing.T) {
 func TestBuildContractDefaultsToNoEgress(t *testing.T) {
 	if exporting.ExportDisabledByDefault() != true {
 		t.Fatalf("expected export to be disabled by default")
+	}
+}
+
+func TestValidateContractRejectsUnsanitizedPayload(t *testing.T) {
+	contract := exporting.Contract{
+		SchemaVersion: exporting.SchemaVersion,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		BenchmarkRuns: []exporting.BenchmarkRunContract{
+			{
+				AgentID:        "raw-agent-id",
+				DecisionReason: "must not leak",
+			},
+		},
+	}
+	if err := exporting.ValidateContract(contract); err == nil {
+		t.Fatalf("expected validation error for unsanitized payload")
 	}
 }
