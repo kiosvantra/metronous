@@ -50,6 +50,22 @@ CREATE TABLE IF NOT EXISTS benchmark_run_state (
     last_attempt_status TEXT NOT NULL DEFAULT 'completed',
     last_attempt_error  TEXT NOT NULL DEFAULT ''
 );
+
+-- Local-only curated manual valuation records (explicit command path only).
+CREATE TABLE IF NOT EXISTS curated_manual_valuations (
+    id              TEXT PRIMARY KEY,
+    created_at      INTEGER NOT NULL,
+    agent_id        TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    criteria_met    INTEGER NOT NULL DEFAULT 0,
+    criteria_total  INTEGER NOT NULL DEFAULT 0,
+    kill_switch     INTEGER NOT NULL DEFAULT 0,
+    score           REAL NOT NULL DEFAULT 0.0,
+    note            TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_curated_manual_valuations_agent_created
+ON curated_manual_valuations(agent_id, created_at DESC);
 `
 
 // addAvgQualityScoreColumn migrates existing databases that predate avg_quality_score.
@@ -618,6 +634,97 @@ func (bs *BenchmarkStore) GetBenchmarkAttemptStates(ctx context.Context) ([]stor
 		return nil, fmt.Errorf("iterate benchmark attempt state rows: %w", err)
 	}
 	return states, nil
+}
+
+// SaveCuratedValuation stores a local-only curated manual valuation record.
+// Score is computed deterministically by ComputeCuratedValuationScore.
+func (bs *BenchmarkStore) SaveCuratedValuation(ctx context.Context, rec store.CuratedValuationRecord) (store.CuratedValuationRecord, error) {
+	if rec.ID == "" {
+		rec.ID = uuid.New().String()
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now().UTC()
+	}
+	rec.Score = store.ComputeCuratedValuationScore(rec.CriteriaMet, rec.CriteriaTotal, rec.KillSwitch)
+
+	killSwitchInt := 0
+	if rec.KillSwitch {
+		killSwitchInt = 1
+	}
+
+	const q = `
+		INSERT INTO curated_manual_valuations (
+			id, created_at, agent_id, session_id, criteria_met, criteria_total, kill_switch, score, note
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	if _, err := bs.writeDB.ExecContext(ctx, q,
+		rec.ID,
+		rec.CreatedAt.UTC().UnixMilli(),
+		rec.AgentID,
+		rec.SessionID,
+		rec.CriteriaMet,
+		rec.CriteriaTotal,
+		killSwitchInt,
+		rec.Score,
+		rec.Note,
+	); err != nil {
+		return store.CuratedValuationRecord{}, fmt.Errorf("save curated valuation: %w", err)
+	}
+
+	return rec, nil
+}
+
+// ListCuratedValuations returns local curated valuations newest-first.
+// If agentID is empty, returns records for all agents.
+func (bs *BenchmarkStore) ListCuratedValuations(ctx context.Context, agentID string, limit int) ([]store.CuratedValuationRecord, error) {
+	if limit <= 0 || limit > MaxQueryLimit {
+		limit = MaxQueryLimit
+	}
+
+	q := `SELECT id, created_at, agent_id, session_id, criteria_met, criteria_total, kill_switch, score, note
+		FROM curated_manual_valuations`
+	args := make([]interface{}, 0, 2)
+	if agentID != "" {
+		q += " WHERE agent_id = ?"
+		args = append(args, agentID)
+	}
+	q += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := bs.readDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list curated valuations: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]store.CuratedValuationRecord, 0, limit)
+	for rows.Next() {
+		var (
+			rec           store.CuratedValuationRecord
+			createdAtMs   int64
+			killSwitchInt int
+		)
+		if err := rows.Scan(
+			&rec.ID,
+			&createdAtMs,
+			&rec.AgentID,
+			&rec.SessionID,
+			&rec.CriteriaMet,
+			&rec.CriteriaTotal,
+			&killSwitchInt,
+			&rec.Score,
+			&rec.Note,
+		); err != nil {
+			return nil, fmt.Errorf("scan curated valuation row: %w", err)
+		}
+		rec.CreatedAt = time.UnixMilli(createdAtMs).UTC()
+		rec.KillSwitch = killSwitchInt != 0
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate curated valuation rows: %w", err)
+	}
+	return out, nil
 }
 
 // Checkpoint performs a WAL checkpoint to prevent unbounded WAL file growth.
