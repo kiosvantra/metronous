@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kiosvantra/metronous/internal/archive"
 	"github.com/kiosvantra/metronous/internal/cli"
 	"github.com/kiosvantra/metronous/internal/store"
 	sqlitestore "github.com/kiosvantra/metronous/internal/store/sqlite"
@@ -405,7 +406,7 @@ func TestReportExportWritesSanitizedContractWhenOptedIn(t *testing.T) {
 			QualityScore: &quality,
 			Metadata: map[string]interface{}{
 				store.SemanticPhaseMetaKey: "verify",
-				"api_key":                  "secret",
+				"api_key":                  "***",
 			},
 		},
 	})
@@ -440,5 +441,32 @@ func TestReportExportWritesSanitizedContractWhenOptedIn(t *testing.T) {
 	}
 	if _, exists := runEntry["decision_reason"]; exists {
 		t.Fatalf("decision_reason must not be included in export contract")
+	}
+}
+
+func TestReportArchiveUsageCommandShowsStageMetrics(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, "data")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	p, err := archive.NewPipeline(archive.Config{Enabled: true, BaseDir: filepath.Join(home, "archive"), CaptureFullPayload: true})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	ev := store.Event{AgentID: "agent-a", SessionID: "session-a", EventType: "tool_call", Model: "claude", Timestamp: time.Now().UTC()}
+	if _, err := p.CaptureBronze(context.Background(), map[string]interface{}{"prompt": "hello"}, ev); err != nil {
+		t.Fatalf("CaptureBronze: %v", err)
+	}
+
+	output, err := runReportCmd(t, []string{"archive-usage", "--data-dir", dataDir})
+	if err != nil {
+		t.Fatalf("archive-usage command: %v", err)
+	}
+	if !strings.Contains(output, "bronze") {
+		t.Fatalf("expected bronze row in output, got:\n%s", output)
+	}
+	if !strings.Contains(output, "silver") || !strings.Contains(output, "gold") {
+		t.Fatalf("expected silver and gold rows in output, got:\n%s", output)
 	}
 }

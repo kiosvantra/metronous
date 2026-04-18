@@ -501,6 +501,33 @@ func TestIngestValidationErrorDoesNotProduceGoError(t *testing.T) {
 	}
 }
 
+type captureArchiver struct {
+	calls int
+}
+
+func (a *captureArchiver) CaptureBronze(_ context.Context, _ map[string]interface{}, _ store.Event) (string, error) {
+	a.calls++
+	return "", nil
+}
+
+func TestHandleIngestWithArchiveCapturesBronzeWhenConfigured(t *testing.T) {
+	ms := &mockStore{}
+	q := newQueueWithStore(t, ms)
+	a := &captureArchiver{}
+
+	req := mcp.CallToolRequest{Name: "ingest", Arguments: makeIngestArgs(nil)}
+	result, err := tracking.HandleIngestWithArchive(context.Background(), req, q, a)
+	if err != nil {
+		t.Fatalf("HandleIngestWithArchive: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected non-error result: %+v", result)
+	}
+	if a.calls != 1 {
+		t.Fatalf("expected archiver to be called once, got %d", a.calls)
+	}
+}
+
 // mockStore is shared from queue_test.go via package-level declaration.
 // However, since we are in package tracking_test, we need the compatible version.
 // (The mockStore in queue_test.go is in the same package.)

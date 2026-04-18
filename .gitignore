@@ -58,6 +58,8 @@ coverage.out
 
 # Debug / test artifacts
 archive/
+!internal/archive/
+!internal/archive/*.go
 tui-debug.log
 *.tmp
 

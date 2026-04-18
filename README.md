@@ -211,7 +211,7 @@ Key behaviors:
 METRONOUS_DATA_DIR=~/.metronous/data go run cmd/run-benchmark/main.go
 ```
 
-### Offline semantic phase report (local-only)
+### Offline reports (local-only)
 
 ```bash
 # Summarize telemetry by semantic phase tag (sdd_phase)
@@ -219,10 +219,15 @@ metronous report semantic --data-dir ~/.metronous/data
 
 # Optional: filter by agent and output JSON
 metronous report semantic --agent sdd-apply --format json
+
+# Archive pipeline usage (bronze/silver/gold)
+metronous report archive-usage --data-dir ~/.metronous/data
 ```
 
-This command is local-only: it reads `tracking.db` on your machine and performs offline aggregation.
+These commands are local-only: they read local files/SQLite and perform offline aggregation.
 No report data is sent to remote services.
+
+For archive pipeline details see [docs/LOCAL_ARCHIVE_PIPELINE.md](docs/LOCAL_ARCHIVE_PIPELINE.md).
 
 ## Data directory
 
@@ -237,6 +242,11 @@ All data lives in `~/.metronous/`:
 │   ├── metronous.pid        # Server PID (runtime)
 │   ├── session_costs.json   # Persisted session costs across plugin restarts
 │   └── plugin.log           # Plugin debug log (when METRONOUS_DEBUG=true)
+├── archive/                 # Optional local archive pipeline (default disabled)
+│   ├── bronze/              # Raw captured interactions (local)
+│   ├── silver/              # User-filtered/accepted interactions
+│   └── gold/                # Manually curated benchmark cases
+├── config.yaml              # Runtime config (scheduler + archive toggles)
 └── thresholds.json          # Performance thresholds (editable via TUI)
 ```
 
