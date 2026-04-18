@@ -370,3 +370,75 @@ func TestReportSemanticCommandJSONIncludesMissingTagsAsUntagged(t *testing.T) {
 		t.Fatalf("expected untagged phase in JSON output, got %+v", result)
 	}
 }
+
+func TestReportExportRequiresExplicitOptIn(t *testing.T) {
+	tmpDir := setupReportTest(t, []store.BenchmarkRun{sampleBenchmarkRun("agent-1", store.VerdictKeep)})
+
+	outPath := filepath.Join(tmpDir, "shared", "export.json")
+	_, err := runReportCmd(t, []string{"export", "--data-dir", tmpDir, "--out", outPath})
+	if err == nil {
+		t.Fatalf("expected command to fail without explicit opt-in")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "opt-in") {
+		t.Fatalf("expected explicit opt-in error, got: %v", err)
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Fatalf("export file should not exist when opt-in is missing")
+	}
+}
+
+func TestReportExportWritesSanitizedContractWhenOptedIn(t *testing.T) {
+	tmpDir := setupReportTest(t, []store.BenchmarkRun{sampleBenchmarkRun("agent-sensitive", store.VerdictSwitch)})
+
+	dur := 80
+	cost := 0.45
+	quality := 0.9
+	trackingDir := setupSemanticReportTest(t, []store.Event{
+		{
+			AgentID:      "agent-sensitive",
+			SessionID:    "session-sensitive-123",
+			EventType:    "complete",
+			Model:        "claude-sonnet-4-5",
+			Timestamp:    time.Now().UTC(),
+			DurationMs:   &dur,
+			CostUSD:      &cost,
+			QualityScore: &quality,
+			Metadata: map[string]interface{}{
+				store.SemanticPhaseMetaKey: "verify",
+				"api_key":                  "secret",
+			},
+		},
+	})
+	if err := os.Rename(filepath.Join(trackingDir, "tracking.db"), filepath.Join(tmpDir, "tracking.db")); err != nil {
+		t.Fatalf("move tracking.db fixture: %v", err)
+	}
+
+	outPath := filepath.Join(tmpDir, "exports", "contract.json")
+	output, err := runReportCmd(t, []string{"export", "--data-dir", tmpDir, "--out", outPath, "--allow-export"})
+	if err != nil {
+		t.Fatalf("report export command: %v\nstdout: %s", err, output)
+	}
+
+	raw, readErr := os.ReadFile(outPath)
+	if readErr != nil {
+		t.Fatalf("read export file: %v", readErr)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("export file is not valid JSON: %v\n%s", err, string(raw))
+	}
+	if parsed["schema_version"] == "" {
+		t.Fatalf("missing schema_version in export contract")
+	}
+	runs, ok := parsed["benchmark_runs"].([]interface{})
+	if !ok || len(runs) != 1 {
+		t.Fatalf("expected one benchmark run in export, got %+v", parsed["benchmark_runs"])
+	}
+	runEntry, _ := runs[0].(map[string]interface{})
+	if runEntry["agent_id"] == "agent-sensitive" {
+		t.Fatalf("expected agent_id to be sanitized in export contract")
+	}
+	if _, exists := runEntry["decision_reason"]; exists {
+		t.Fatalf("decision_reason must not be included in export contract")
+	}
+}
