@@ -34,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,7 +52,9 @@ import (
 	"github.com/kiosvantra/metronous/internal/runner"
 	"github.com/kiosvantra/metronous/internal/scheduler"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/timeline"
 	"github.com/kiosvantra/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/web"
 )
 
 // Config holds the parameters needed to launch the Metronous daemon.
@@ -168,6 +171,12 @@ type schedulerConfig struct {
 	WindowDays        int    `yaml:"window_days"`
 }
 
+type networkConfig struct {
+	ListenAddress     string `yaml:"listen_address"`
+	PublicBaseURL     string `yaml:"public_base_url"`
+	EnableTimelineLAN bool   `yaml:"enable_timeline_lan"`
+}
+
 // archiveConfig mirrors the archive section in ~/.metronous/config.yaml.
 type archiveConfig struct {
 	Enabled            bool     `yaml:"enabled"`
@@ -181,6 +190,7 @@ type archiveConfig struct {
 
 // appConfig is a minimal representation of ~/.metronous/config.yaml.
 type appConfig struct {
+	Server    networkConfig   `yaml:"server"`
 	Scheduler schedulerConfig `yaml:"scheduler"`
 	Archive   archiveConfig   `yaml:"archive"`
 }
@@ -267,6 +277,14 @@ func (p *Program) loadArchiveConfig() archive.Config {
 	return cfg
 }
 
+func (p *Program) loadListenAddress() string {
+	appCfg, _, err := p.loadAppConfig()
+	if err != nil {
+		return mcp.DefaultListenAddress
+	}
+	return mcp.SanitizeListenAddress(appCfg.Server.ListenAddress, appCfg.Server.EnableTimelineLAN)
+}
+
 func (p *Program) loadAppConfig() (appConfig, string, error) {
 	configPath := filepath.Join(filepath.Dir(p.cfg.DataDir), "config.yaml")
 	data, err := os.ReadFile(configPath)
@@ -297,6 +315,8 @@ func (p *Program) run(ctx context.Context) error {
 
 	trackingDBPath := filepath.Join(p.cfg.DataDir, "tracking.db")
 	benchmarkDBPath := filepath.Join(p.cfg.DataDir, "benchmark.db")
+	timelineDBPath := filepath.Join(p.cfg.DataDir, "timeline.db")
+	listenAddress := p.loadListenAddress()
 
 	es, err := sqlite.NewEventStore(trackingDBPath)
 	if err != nil {
@@ -323,6 +343,19 @@ func (p *Program) run(ctx context.Context) error {
 		}
 		if closeErr := bs.Close(); closeErr != nil {
 			p.logger.Error("close benchmark store", zap.Error(closeErr))
+		}
+	}()
+
+	ts, err := sqlite.NewTimelineStore(timelineDBPath)
+	if err != nil {
+		return fmt.Errorf("open timeline store: %w", err)
+	}
+	defer func() {
+		if err := ts.Checkpoint(); err != nil {
+			p.logger.Error("WAL checkpoint timeline store failed", zap.Error(err))
+		}
+		if closeErr := ts.Close(); closeErr != nil {
+			p.logger.Error("close timeline store", zap.Error(closeErr))
 		}
 	}()
 
@@ -380,6 +413,14 @@ func (p *Program) run(ctx context.Context) error {
 
 	srv := mcp.NewStdioServer(p.logger)
 	srv.SetDataDir(p.cfg.DataDir)
+	srv.SetHTTPListenAddress(listenAddress)
+	timelineService := timeline.NewService(ts, timeline.NewBroker())
+	timelineHandler := timeline.NewHandler(timelineService, p.logger, srv.ResolveIngestToken)
+	webServer := web.NewServer()
+	srv.RegisterHTTPRoutes(func(mux *http.ServeMux) {
+		timelineHandler.Register(mux)
+		webServer.Register(mux)
+	})
 	mcp.RegisterIngestHandler(srv, func(innerCtx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return tracking.HandleIngestWithArchive(innerCtx, req, queue, archiver)
 	})

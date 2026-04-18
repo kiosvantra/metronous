@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,7 +20,9 @@ import (
 	"github.com/kiosvantra/metronous/internal/daemon"
 	"github.com/kiosvantra/metronous/internal/mcp"
 	"github.com/kiosvantra/metronous/internal/store/sqlite"
+	"github.com/kiosvantra/metronous/internal/timeline"
 	"github.com/kiosvantra/metronous/internal/tracking"
+	"github.com/kiosvantra/metronous/internal/web"
 )
 
 // defaultDataDir returns the default ~/.metronous/data directory path.
@@ -41,22 +44,21 @@ type serverArchiveConfig struct {
 	MaxAgeDays         int      `yaml:"max_age_days"`
 }
 
+type serverNetworkConfig struct {
+	ListenAddress     string `yaml:"listen_address"`
+	PublicBaseURL     string `yaml:"public_base_url"`
+	EnableTimelineLAN bool   `yaml:"enable_timeline_lan"`
+}
+
 type serverAppConfig struct {
+	Server  serverNetworkConfig `yaml:"server"`
 	Archive serverArchiveConfig `yaml:"archive"`
 }
 
 func loadArchiveConfig(dataDir string, logger *zap.Logger) archive.Config {
 	cfg := archive.Config{Enabled: false}
-	configPath := filepath.Join(filepath.Dir(dataDir), "config.yaml")
-	data, err := os.ReadFile(configPath)
+	appCfg, err := loadServerAppConfig(dataDir, logger)
 	if err != nil {
-		return cfg
-	}
-	var appCfg serverAppConfig
-	if err := yaml.Unmarshal(data, &appCfg); err != nil {
-		if logger != nil {
-			logger.Warn("failed to parse config for archive pipeline", zap.Error(err))
-		}
 		return cfg
 	}
 
@@ -88,6 +90,30 @@ func loadArchiveConfig(dataDir string, logger *zap.Logger) archive.Config {
 		}
 	}
 	return cfg
+}
+
+func loadServerAppConfig(dataDir string, logger *zap.Logger) (serverAppConfig, error) {
+	configPath := filepath.Join(filepath.Dir(dataDir), "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return serverAppConfig{}, err
+	}
+	var appCfg serverAppConfig
+	if err := yaml.Unmarshal(data, &appCfg); err != nil {
+		if logger != nil {
+			logger.Warn("failed to parse config.yaml", zap.Error(err))
+		}
+		return serverAppConfig{}, err
+	}
+	return appCfg, nil
+}
+
+func loadListenAddress(dataDir string, logger *zap.Logger) string {
+	appCfg, err := loadServerAppConfig(dataDir, logger)
+	if err != nil {
+		return mcp.DefaultListenAddress
+	}
+	return mcp.SanitizeListenAddress(appCfg.Server.ListenAddress, appCfg.Server.EnableTimelineLAN)
 }
 
 // NewServerCommand creates the `metronous server` cobra command.
@@ -167,6 +193,8 @@ func runServer(dataDir string, daemonMode bool) error {
 
 	trackingDBPath := filepath.Join(dataDir, "tracking.db")
 	benchmarkDBPath := filepath.Join(dataDir, "benchmark.db")
+	timelineDBPath := filepath.Join(dataDir, "timeline.db")
+	listenAddress := loadListenAddress(dataDir, logger)
 
 	// Open event store.
 	es, err := sqlite.NewEventStore(trackingDBPath)
@@ -190,6 +218,16 @@ func runServer(dataDir string, daemonMode bool) error {
 		}
 	}()
 
+	ts, err := sqlite.NewTimelineStore(timelineDBPath)
+	if err != nil {
+		return fmt.Errorf("open timeline store: %w", err)
+	}
+	defer func() {
+		if err := ts.Close(); err != nil {
+			logger.Error("close timeline store", zap.Error(err))
+		}
+	}()
+
 	// Start event queue.
 	queue := tracking.NewEventQueue(es, tracking.DefaultBufferSize, logger)
 	queue.Start()
@@ -210,6 +248,15 @@ func runServer(dataDir string, daemonMode bool) error {
 	// Set data-dir so the port file is instance-scoped (avoids collisions when
 	// multiple metronous instances run with different data dirs).
 	srv.SetDataDir(dataDir)
+	srv.SetHTTPListenAddress(listenAddress)
+
+	timelineService := timeline.NewService(ts, timeline.NewBroker())
+	timelineHandler := timeline.NewHandler(timelineService, logger, srv.ResolveIngestToken)
+	webServer := web.NewServer()
+	srv.RegisterHTTPRoutes(func(mux *http.ServeMux) {
+		timelineHandler.Register(mux)
+		webServer.Register(mux)
+	})
 
 	// Register the ingest handler wired to the real queue.
 	mcp.RegisterIngestHandler(srv, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

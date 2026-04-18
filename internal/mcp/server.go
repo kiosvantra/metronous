@@ -3,8 +3,6 @@ package mcp
 import (
 	"bufio"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -48,6 +46,8 @@ type Server struct {
 	in       io.Reader
 	out      io.Writer
 	dataDir  string // used to derive instance-scoped port file path
+	listen   string
+	routes   []func(*http.ServeMux)
 }
 
 // NewServer creates a new MCP server reading from in and writing to out.
@@ -62,6 +62,7 @@ func NewServer(in io.Reader, out io.Writer, logger *zap.Logger) *Server {
 		logger:   logger,
 		in:       in,
 		out:      out,
+		listen:   "127.0.0.1:0",
 	}
 }
 
@@ -76,6 +77,44 @@ func (s *Server) SetDataDir(dir string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dataDir = dir
+}
+
+// SetHTTPListenAddress configures the embedded HTTP listen address.
+func (s *Server) SetHTTPListenAddress(addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(addr) == "" {
+		addr = "127.0.0.1:0"
+	}
+	s.listen = addr
+}
+
+// RegisterHTTPRoutes appends extra HTTP routes to the embedded HTTP server.
+func (s *Server) RegisterHTTPRoutes(register func(*http.ServeMux)) {
+	if register == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routes = append(s.routes, register)
+}
+
+func (s *Server) listenAddress() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if strings.TrimSpace(s.listen) == "" {
+		return "127.0.0.1:0"
+	}
+	return s.listen
+}
+
+func (s *Server) registerRoutes(mux *http.ServeMux) {
+	s.mu.RLock()
+	routes := append([]func(*http.ServeMux){}, s.routes...)
+	s.mu.RUnlock()
+	for _, route := range routes {
+		route(mux)
+	}
 }
 
 // RegisterTool registers an MCP tool with its definition and handler.
@@ -311,7 +350,7 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", s.listenAddress())
 	if err != nil {
 		return fmt.Errorf("start health HTTP server: %w", err)
 	}
@@ -340,6 +379,7 @@ func (s *Server) ServeWithHealth(ctx context.Context) error {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/status", healthHandler) // alias
 	mux.HandleFunc("/ingest", s.ingestHandler(ctx))
+	s.registerRoutes(mux)
 
 	httpSrv := &http.Server{
 		Handler:      mux,
@@ -393,7 +433,7 @@ func (s *Server) ServeDaemon(outerCtx context.Context) error {
 		_ = os.Remove(portPath)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", s.listenAddress())
 	if err != nil {
 		return fmt.Errorf("start health HTTP server: %w", err)
 	}
@@ -424,6 +464,7 @@ func (s *Server) ServeDaemon(outerCtx context.Context) error {
 	mux.HandleFunc("/status", healthHandler)
 	// Use background context for ingestHandler to avoid using cancelled ctx during shutdown
 	mux.HandleFunc("/ingest", s.ingestHandler(context.Background()))
+	s.registerRoutes(mux)
 
 	httpSrv := &http.Server{
 		Handler:      mux,
@@ -509,9 +550,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 //   - HMAC signature (recommended): "sha256:<hex-signature>" where signature is
 //     HMAC-SHA256(secret, request-body)
 
-// resolveIngestToken reads the authentication token on each request to handle
+// ResolveIngestToken reads the authentication token on each request to handle
 // lazy key creation by the plugin (ingest.key may not exist at daemon start).
-func (s *Server) resolveIngestToken() string {
+func (s *Server) ResolveIngestToken() string {
 	expectedToken := os.Getenv(ingestAuthEnvVar)
 	if expectedToken != "" {
 		return expectedToken
@@ -553,73 +594,9 @@ func (s *Server) ingestHandler(ctx context.Context) http.HandlerFunc {
 		}
 
 		// Resolve token per-request to handle lazy key creation by plugin
-		expectedToken := s.resolveIngestToken()
-
-		// Authenticate if token is configured
-		if expectedToken != "" {
-			provided := r.Header.Get(ingestAuthHeader)
-			if provided == "" {
-				http.Error(w, "authentication required", http.StatusUnauthorized)
-				return
-			}
-
-			// Support both plain token and HMAC signature formats
-			valid := false
-			var bodyStr string
-
-			if strings.HasPrefix(provided, "sha256:") {
-				// HMAC signature mode - read body and verify
-				sig := provided[7:] // strip "sha256:" prefix
-				// Decode hex signature to raw bytes for comparison
-				providedSig, err := hex.DecodeString(sig)
-				if err != nil || len(providedSig) != sha256.Size {
-					s.logger.Warn("invalid HMAC signature format in ingest request",
-						zap.String("remote_addr", r.RemoteAddr))
-					http.Error(w, "invalid authentication signature", http.StatusUnauthorized)
-					return
-				}
-				// Read body for HMAC verification
-				bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
-				if err != nil {
-					// Distinguish payload-too-large from other read errors
-					if _, ok := err.(*http.MaxBytesError); ok {
-						http.Error(w, "payload too large (max 1MB)", http.StatusRequestEntityTooLarge)
-					} else {
-						http.Error(w, "failed to read request body", http.StatusBadRequest)
-					}
-					return
-				}
-				bodyStr = string(bodyBytes)
-				// Compute expected HMAC and compare raw bytes
-				mac := hmac.New(sha256.New, []byte(expectedToken))
-				mac.Write([]byte(bodyStr))
-				expectedSig := mac.Sum(nil)
-				if hmac.Equal(providedSig, expectedSig) {
-					valid = true
-				}
-				if !valid {
-					s.logger.Warn("invalid HMAC signature in ingest request",
-						zap.String("remote_addr", r.RemoteAddr))
-					http.Error(w, "invalid authentication signature", http.StatusUnauthorized)
-					return
-				}
-				// Re-create a reader from the body for subsequent handlers
-				r.Body = io.NopCloser(strings.NewReader(bodyStr))
-			} else {
-				// Plain token mode (backward compatibility)
-				if !hmac.Equal([]byte(provided), []byte(expectedToken)) {
-					s.logger.Warn("invalid auth token in ingest request",
-						zap.String("remote_addr", r.RemoteAddr))
-					http.Error(w, "invalid authentication token", http.StatusUnauthorized)
-					return
-				}
-				valid = true
-			}
-
-			if !valid {
-				http.Error(w, "authentication failed", http.StatusUnauthorized)
-				return
-			}
+		expectedToken := s.ResolveIngestToken()
+		if err := AuthenticateHTTPRequest(w, r, expectedToken, s.logger); err != nil {
+			return
 		}
 
 		var arguments map[string]interface{}

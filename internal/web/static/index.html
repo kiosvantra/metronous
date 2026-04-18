@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Metronous Timeline</title>
+    <link rel="stylesheet" href="/timeline/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header>
+        <div>
+          <h1>IGRIS ↔ BERU Portal</h1>
+          <p class="muted">Minimal realtime timeline for handoffs and acknowledgements.</p>
+        </div>
+        <div class="controls">
+          <label>
+            Conversation
+            <select id="conversationSelect"></select>
+          </label>
+          <button id="refreshButton" type="button">Refresh</button>
+        </div>
+      </header>
+      <section id="status" class="status">Loading conversations…</section>
+      <section id="timeline" class="timeline"></section>
+    </main>
+    <template id="itemTemplate">
+      <article class="item">
+        <div class="meta"></div>
+        <div class="body"></div>
+      </article>
+    </template>
+    <script src="/timeline/app.js" defer></script>
+  </body>
+</html>

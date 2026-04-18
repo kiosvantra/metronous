@@ -39,7 +39,8 @@ Created layout:
   ├── thresholds.json    (performance thresholds)
   ├── data/
   │   ├── tracking.db    (event storage)
-  │   └── benchmark.db   (benchmark history, Phase 2)
+  │   ├── benchmark.db   (benchmark history, Phase 2)
+  │   └── timeline.db    (IGRIS↔BERU portal timeline)
   ├── agents/            (agent configs for auto-discovery)
   └── artifacts/         (decision report output)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -96,11 +97,15 @@ func runInit(home string) error {
 
 server:
   mcp_transport: stdio
+  listen_address: "127.0.0.1:0"
+  public_base_url: ""
+  enable_timeline_lan: false
 
 database:
   driver: sqlite
   tracking_path: %s
   benchmark_path: %s
+  timeline_path: %s
 
 scheduler:
   benchmark_schedule: "0 0 2 * * 1"
@@ -126,6 +131,7 @@ log:
 `,
 			filepath.Join(home, "data", "tracking.db"),
 			filepath.Join(home, "data", "benchmark.db"),
+			filepath.Join(home, "data", "timeline.db"),
 		)
 		if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 			return fmt.Errorf("write config: %w", err)
@@ -150,6 +156,14 @@ log:
 	}
 	_ = bs.Close()
 	fmt.Printf("initialized: %s\n", benchmarkDBPath)
+
+	timelineDBPath := filepath.Join(home, "data", "timeline.db")
+	ts, err := sqlite.NewTimelineStore(timelineDBPath)
+	if err != nil {
+		return fmt.Errorf("initialize timeline.db: %w", err)
+	}
+	_ = ts.Close()
+	fmt.Printf("initialized: %s\n", timelineDBPath)
 
 	fmt.Printf("\nMetronous initialized at: %s\n", home)
 	fmt.Println("Run 'metronous server' to start the MCP server.")

@@ -88,6 +88,12 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 	if !strings.Contains(configStr, "archive:") {
 		t.Fatalf("config.yaml missing archive section")
 	}
+	if !strings.Contains(configStr, "enable_timeline_lan: false") {
+		t.Fatalf("config.yaml must default server.enable_timeline_lan to false")
+	}
+	if !strings.Contains(configStr, "listen_address: \"127.0.0.1:0\"") {
+		t.Fatalf("config.yaml must default listen_address to loopback ephemeral")
+	}
 	if !strings.Contains(configStr, "enabled: false") {
 		t.Fatalf("config.yaml must default archive.enabled to false")
 	}
@@ -96,6 +102,9 @@ func TestInitCommandCreatesHomeLayout(t *testing.T) {
 	trackingDB := filepath.Join(tempHome, "data", "tracking.db")
 	if _, err := os.Stat(trackingDB); os.IsNotExist(err) {
 		t.Errorf("tracking.db not created at %s", trackingDB)
+	}
+	if _, err := os.Stat(filepath.Join(tempHome, "data", "timeline.db")); os.IsNotExist(err) {
+		t.Errorf("timeline.db not created")
 	}
 
 	// Verify thresholds.json is valid JSON.
